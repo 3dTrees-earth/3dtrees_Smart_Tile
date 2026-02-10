@@ -12,11 +12,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -146,10 +147,126 @@ def remap_single_tile(
         return (tile_id, False, str(e), 0)
 
 
+def calculate_spatial_overlap(
+    source_file: Path,
+    target_file: Path,
+    tolerance: float = 5.0
+) -> Dict[str, float]:
+    """
+    Calculate spatial overlap between two LAZ files.
+    
+    This function computes detailed spatial overlap metrics including:
+    - Bounds differences
+    - Center distance
+    - Overlap area
+    - Overlap percentage
+    
+    Args:
+        source_file: Path to source LAZ file (e.g., segmented file)
+        target_file: Path to target LAZ file (e.g., target resolution file)
+        tolerance: Tolerance for bounds matching in meters (default: 5.0)
+    
+    Returns:
+        Dictionary with overlap metrics:
+        - 'x_min_diff': Difference in X minimum bounds (meters)
+        - 'x_max_diff': Difference in X maximum bounds (meters)
+        - 'y_min_diff': Difference in Y minimum bounds (meters)
+        - 'y_max_diff': Difference in Y maximum bounds (meters)
+        - 'center_distance': Distance between centers (meters)
+        - 'x_overlap': X-axis overlap distance (meters)
+        - 'y_overlap': Y-axis overlap distance (meters)
+        - 'overlap_area': Overlapping area (square meters)
+        - 'source_area': Source file area (square meters)
+        - 'target_area': Target file area (square meters)
+        - 'overlap_percentage': Percentage of overlap (0-100)
+        - 'has_overlap': Boolean indicating if there's any overlap
+        - 'max_bounds_diff': Maximum bounds difference (meters)
+        - 'within_tolerance': Boolean indicating if within tolerance
+    """
+    try:
+        # Read headers only (fast, no point loading)
+        with laspy.open(str(source_file), laz_backend=laspy.LazBackend.LazrsParallel) as source_las:
+            source_bounds = (
+                source_las.header.x_min,
+                source_las.header.x_max,
+                source_las.header.y_min,
+                source_las.header.y_max
+            )
+        
+        with laspy.open(str(target_file), laz_backend=laspy.LazBackend.LazrsParallel) as target_las:
+            target_bounds = (
+                target_las.header.x_min,
+                target_las.header.x_max,
+                target_las.header.y_min,
+                target_las.header.y_max
+            )
+        
+        # Calculate bounds differences
+        x_min_diff = abs(source_bounds[0] - target_bounds[0])
+        x_max_diff = abs(source_bounds[1] - target_bounds[1])
+        y_min_diff = abs(source_bounds[2] - target_bounds[2])
+        y_max_diff = abs(source_bounds[3] - target_bounds[3])
+        max_bounds_diff = max(x_min_diff, x_max_diff, y_min_diff, y_max_diff)
+        
+        # Calculate center points
+        source_center_x = (source_bounds[0] + source_bounds[1]) / 2
+        source_center_y = (source_bounds[2] + source_bounds[3]) / 2
+        target_center_x = (target_bounds[0] + target_bounds[1]) / 2
+        target_center_y = (target_bounds[2] + target_bounds[3]) / 2
+        
+        # Calculate center distance
+        center_distance = math.sqrt(
+            (source_center_x - target_center_x)**2 + 
+            (source_center_y - target_center_y)**2
+        )
+        
+        # Calculate overlap
+        x_overlap = max(0, min(source_bounds[1], target_bounds[1]) - max(source_bounds[0], target_bounds[0]))
+        y_overlap = max(0, min(source_bounds[3], target_bounds[3]) - max(source_bounds[2], target_bounds[2]))
+        overlap_area = x_overlap * y_overlap if (x_overlap > 0 and y_overlap > 0) else 0.0
+        
+        # Calculate areas
+        source_area = (source_bounds[1] - source_bounds[0]) * (source_bounds[3] - source_bounds[2])
+        target_area = (target_bounds[1] - target_bounds[0]) * (target_bounds[3] - target_bounds[2])
+        
+        # Calculate overlap percentage (relative to smaller area)
+        min_area = min(source_area, target_area)
+        overlap_percentage = (overlap_area / min_area * 100) if min_area > 0 else 0.0
+        
+        has_overlap = overlap_area > 0
+        within_tolerance = max_bounds_diff <= tolerance
+        
+        return {
+            'x_min_diff': x_min_diff,
+            'x_max_diff': x_max_diff,
+            'y_min_diff': y_min_diff,
+            'y_max_diff': y_max_diff,
+            'center_distance': center_distance,
+            'x_overlap': x_overlap,
+            'y_overlap': y_overlap,
+            'overlap_area': overlap_area,
+            'source_area': source_area,
+            'target_area': target_area,
+            'overlap_percentage': overlap_percentage,
+            'has_overlap': has_overlap,
+            'max_bounds_diff': max_bounds_diff,
+            'within_tolerance': within_tolerance,
+            'source_bounds': source_bounds,
+            'target_bounds': target_bounds
+        }
+    except Exception as e:
+        return {
+            'error': str(e),
+            'has_overlap': False,
+            'within_tolerance': False
+        }
+
+
 def find_matching_files(
     results_dir: Path,
     target_folder: Path,
-    target_resolution_m: float
+    target_resolution_m: float,
+    tolerance: float = 5.0
 ) -> List[Tuple[Path, Path, str]]:
     """
     Find matching segmented and target resolution files.
@@ -158,11 +275,14 @@ def find_matching_files(
         results_dir: Directory containing *_results folders with segmented_pc.laz
         target_folder: Directory containing target resolution files
         target_resolution_m: Target resolution in meters
+        tolerance: Spatial bounds matching tolerance in meters (default: 5.0)
+        use_spatial_matching: If True, verify spatial bounds match within tolerance
     
     Returns:
         List of (segmented_file, target_file, tile_id) tuples
     """
     matches = []
+    failed_matches = []
     
     # Find all results directories
     results_dirs = sorted(results_dir.glob("*_results"))
@@ -197,7 +317,48 @@ def find_matching_files(
                 break
         
         if target_file and target_file.exists():
-            matches.append((segmented_file, target_file, tile_id))
+            # Always verify spatial bounds match
+            overlap_info = calculate_spatial_overlap(segmented_file, target_file, tolerance)
+            
+            if overlap_info.get('error'):
+                print(f"  Warning: Could not calculate overlap for {tile_id}: {overlap_info['error']}")
+                matches.append((segmented_file, target_file, tile_id))
+            elif not overlap_info.get('within_tolerance', False):
+                # Matching failed - store for detailed reporting
+                failed_matches.append((segmented_file, target_file, tile_id, overlap_info))
+                print(f"  Warning: Spatial bounds mismatch for {tile_id}")
+                print(f"    Max bounds difference: {overlap_info['max_bounds_diff']:.3f}m (tolerance: {tolerance}m)")
+                print(f"    Center distance: {overlap_info['center_distance']:.3f}m")
+                print(f"    Overlap: {overlap_info['overlap_area']:.2f}m² ({overlap_info['overlap_percentage']:.1f}%)")
+            else:
+                matches.append((segmented_file, target_file, tile_id))
+    
+    # If we have failed matches, print detailed report
+    if failed_matches:
+        print("\n" + "=" * 60)
+        print("Spatial Matching Failures (Detailed Analysis)")
+        print("=" * 60)
+        for seg_file, tgt_file, tile_id, overlap_info in failed_matches:
+            print(f"\nTile: {tile_id}")
+            print(f"  Source: {seg_file.name}")
+            print(f"  Target: {tgt_file.name}")
+            print(f"  Bounds differences:")
+            print(f"    X_min: {overlap_info['x_min_diff']:.3f}m")
+            print(f"    X_max: {overlap_info['x_max_diff']:.3f}m")
+            print(f"    Y_min: {overlap_info['y_min_diff']:.3f}m")
+            print(f"    Y_max: {overlap_info['y_max_diff']:.3f}m")
+            print(f"  Max difference: {overlap_info['max_bounds_diff']:.3f}m (tolerance: {tolerance}m)")
+            print(f"  Center distance: {overlap_info['center_distance']:.3f}m")
+            print(f"  Spatial overlap:")
+            print(f"    X overlap: {overlap_info['x_overlap']:.3f}m")
+            print(f"    Y overlap: {overlap_info['y_overlap']:.3f}m")
+            print(f"    Overlap area: {overlap_info['overlap_area']:.2f}m²")
+            print(f"    Overlap percentage: {overlap_info['overlap_percentage']:.1f}%")
+            print(f"  Source bounds: X[{overlap_info['source_bounds'][0]:.3f}, {overlap_info['source_bounds'][1]:.3f}], "
+                  f"Y[{overlap_info['source_bounds'][2]:.3f}, {overlap_info['source_bounds'][3]:.3f}]")
+            print(f"  Target bounds: X[{overlap_info['target_bounds'][0]:.3f}, {overlap_info['target_bounds'][1]:.3f}], "
+                  f"Y[{overlap_info['target_bounds'][2]:.3f}, {overlap_info['target_bounds'][3]:.3f}]")
+        print("\n" + "=" * 60)
     
     return matches
 
@@ -257,10 +418,14 @@ def remap_all_tiles(
     target_resolution_m = target_resolution_cm / 100.0
     
     # Find matching files
+    # Internal tolerance for bounds matching (not exposed as parameter)
+    bounds_tolerance = 5.0
+    print("Matching files by spatial bounds...")
     matches = find_matching_files(
         subsampled_10cm_dir, 
         subsampled_target_folder, 
-        target_resolution_m
+        target_resolution_m,
+        tolerance=bounds_tolerance
     )
     
     if not matches:
@@ -282,11 +447,58 @@ def remap_all_tiles(
             for pattern in target_patterns:
                 target_files = list(subsampled_target_folder.glob(pattern))
                 if target_files:
-                    matches.append((seg_file, target_files[0], tile_id))
+                    target_file = target_files[0]
+                    
+                    # Always verify spatial bounds - if matching fails, show overlap analysis
+                    overlap_info = calculate_spatial_overlap(seg_file, target_file, bounds_tolerance)
+                    if overlap_info.get('within_tolerance', False):
+                        matches.append((seg_file, target_file, tile_id))
+                    else:
+                        # Bounds mismatch - show warning but continue to fallback analysis
+                        print(f"  Warning: Spatial bounds mismatch for {tile_id}")
+                        print(f"    Max bounds difference: {overlap_info['max_bounds_diff']:.3f}m (tolerance: {bounds_tolerance}m)")
+                        print(f"    Overlap: {overlap_info['overlap_area']:.2f}m² ({overlap_info['overlap_percentage']:.1f}%)")
                     break
     
     if not matches:
-        raise ValueError(f"No matching segmented/target file pairs found")
+        # Calculate spatial overlap for all potential pairs before failing
+        print("\n" + "=" * 60)
+        print("No matching files found. Analyzing spatial overlap for all potential pairs...")
+        print("=" * 60)
+        
+        segmented_files = list(subsampled_10cm_dir.glob("*_segmented*.laz"))
+        if not segmented_files:
+            segmented_files = [f for d in subsampled_10cm_dir.glob("*_results") for f in [(d / "segmented_pc.laz")] if f.exists()]
+        
+        target_files = list(subsampled_target_folder.glob("*.laz"))
+        
+        print(f"  Found {len(segmented_files)} segmented files and {len(target_files)} target files")
+        
+        if segmented_files and target_files:
+            # Try to match by filename first, then check spatial overlap
+            for seg_file in segmented_files:
+                tile_id_match = re.search(r'(c\d+_r\d+)', seg_file.name)
+                if not tile_id_match:
+                    continue
+                tile_id = tile_id_match.group(1)
+                
+                # Find potential target files
+                potential_targets = [f for f in target_files if tile_id in f.name]
+                
+                if potential_targets:
+                    print(f"\n  Analyzing tile {tile_id}:")
+                    for tgt_file in potential_targets:
+                        overlap_info = calculate_spatial_overlap(seg_file, tgt_file, bounds_tolerance)
+                        if 'error' not in overlap_info:
+                            print(f"    {tgt_file.name}:")
+                            print(f"      Max bounds diff: {overlap_info['max_bounds_diff']:.3f}m (tolerance: {bounds_tolerance}m)")
+                            print(f"      Center distance: {overlap_info['center_distance']:.3f}m")
+                            print(f"      Overlap: {overlap_info['overlap_area']:.2f}m² ({overlap_info['overlap_percentage']:.1f}%)")
+                            print(f"      Status: {'✓ Within tolerance' if overlap_info['within_tolerance'] else '✗ Exceeds tolerance'}")
+                        else:
+                            print(f"    {tgt_file.name}: Error - {overlap_info['error']}")
+        
+        raise ValueError(f"No matching source/target file pairs found (tolerance: {bounds_tolerance}m)")
     
     print(f"Found {len(matches)} tiles to remap")
     print()
