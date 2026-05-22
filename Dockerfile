@@ -10,6 +10,7 @@ FROM condaforge/miniforge3:latest
 # System deps: PDAL (subprocess), GDAL (required by fiona for reading tindex GeoPackage/shapefile)
 RUN mamba install -n base -c conda-forge \
     python=3.10 \
+    "sqlite>=3.45" \
     pdal \
     gdal \
     untwine \
