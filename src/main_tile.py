@@ -201,7 +201,6 @@ def calculate_tile_bounds(
     tile_length: float,
     tile_buffer: float,
     output_dir: Path,
-    grid_offset: float = 1.0
 ) -> Tuple[Path, Path, dict]:
     """
     Calculate tile bounds from tindex.
@@ -213,7 +212,6 @@ def calculate_tile_bounds(
         tindex_file: Path to tindex GeoPackage
         tile_length: Tile size in meters
         tile_buffer: Buffer overlap in meters
-        grid_offset: Offset from min coordinates
         output_dir: Directory for output files
     
     Returns:
@@ -238,7 +236,6 @@ def calculate_tile_bounds(
         f"--tile-buffer={tile_buffer}",
         f"--jobs-out={jobs_file}",
         f"--bounds-out={bounds_json}",
-        f"--grid-offset={grid_offset}"
     ]
     
     print(f"  Tile length: {tile_length}m")
@@ -477,6 +474,30 @@ def _parse_proj_bounds(proj_bounds: str) -> Optional[Tuple[float, float, float, 
         return None
 
 
+def _load_core_bounds_from_tile_bounds_json(
+    tile_bounds_json: Optional[Path],
+) -> Dict[str, Tuple[float, float, float, float]]:
+    """Load tile core bounds as (xmin, ymin, xmax, ymax) by cXX_rYY label."""
+    if tile_bounds_json is None or not tile_bounds_json.exists():
+        return {}
+
+    with tile_bounds_json.open() as f:
+        data = json.load(f)
+
+    core_bounds: Dict[str, Tuple[float, float, float, float]] = {}
+    for tile in data.get("tiles", []):
+        try:
+            col = int(tile["col"])
+            row = int(tile["row"])
+            core = tile["core"]
+            xmin, xmax = float(core[0][0]), float(core[0][1])
+            ymin, ymax = float(core[1][0]), float(core[1][1])
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        core_bounds[f"c{col:02d}_r{row:02d}"] = (xmin, ymin, xmax, ymax)
+    return core_bounds
+
+
 def _bounds_overlap(a: Tuple[float, float, float, float],
                     b: Tuple[float, float, float, float]) -> bool:
     """Check if two (minx, miny, maxx, maxy) boxes overlap."""
@@ -676,7 +697,7 @@ def _materialize_copc_subset(
             pipeline_file.unlink()
 
 
-def _distribute_source_file(args: Tuple) -> Tuple[List[Tuple[str, int]], str]:
+def _distribute_source_file(args: Tuple) -> Tuple[List[Tuple[str, int, int]], str]:
     """
     Phase 1: Read one source file (chunked) and write cropped parts for all
     overlapping tiles.
@@ -691,13 +712,13 @@ def _distribute_source_file(args: Tuple) -> Tuple[List[Tuple[str, int]], str]:
 
     Args:
         args: (source_idx, src_file, overlapping_tiles, tiles_dir, decompress_threads, chunk_size)
-              overlapping_tiles: list of (label, (xmin, ymin, xmax, ymax))
+              overlapping_tiles: list of (label, buffered_bounds, core_bounds)
               decompress_threads: threads for LAZ decompression (LazrsParallel / Rayon)
               chunk_size: points per chunk (smaller = less peak RAM, more overhead)
 
     Returns:
         Tuple of:
-        - list of (tile_label, point_count) for tiles that received points
+        - list of (tile_label, point_count, core_point_count) for tiles that received points
         - description of how the source was read
     """
     import laspy
@@ -705,16 +726,53 @@ def _distribute_source_file(args: Tuple) -> Tuple[List[Tuple[str, int]], str]:
 
     source_idx, src_file, overlapping_tiles, tiles_dir, decompress_threads, chunk_size = args
 
+    def _count_existing_part(
+        part_file: Path,
+        core_bounds: Optional[Tuple[float, float, float, float]],
+    ) -> Tuple[int, int]:
+        with laspy.open(part_file) as reader:
+            point_count = int(reader.header.point_count)
+            if core_bounds is None or point_count == 0:
+                return point_count, point_count
+
+            cxmin, cymin, cxmax, cymax = core_bounds
+            core_count = 0
+            for part_chunk in reader.chunk_iterator(chunk_size):
+                px = np.asarray(part_chunk.x)
+                py = np.asarray(part_chunk.y)
+                core_mask = (
+                    (px >= cxmin)
+                    & (px <= cxmax)
+                    & (py >= cymin)
+                    & (py <= cymax)
+                )
+                core_count += int(core_mask.sum())
+            return point_count, core_count
+
     # Skip tiles that already have the part file for this source to avoid
     # regenerating intermediate LAS chunks during reruns/resumes.
-    pending_overlaps: List[Tuple[str, Tuple[float, float, float, float]]] = []
-    for label, bounds in overlapping_tiles:
+    existing_results: List[Tuple[str, int, int]] = []
+    pending_overlaps: List[
+        Tuple[
+            str,
+            Tuple[float, float, float, float],
+            Optional[Tuple[float, float, float, float]],
+        ]
+    ] = []
+    for label, bounds, core_bounds in overlapping_tiles:
         part_file = Path(tiles_dir) / label / f"part_{source_idx}.las"
         if part_file.exists() and part_file.stat().st_size > 0:
-            continue
-        pending_overlaps.append((label, bounds))
+            try:
+                point_count, core_count = _count_existing_part(part_file, core_bounds)
+                if point_count > 0:
+                    existing_results.append((label, point_count, core_count))
+                continue
+            except Exception:
+                # Rebuild unreadable/incomplete existing parts below.
+                pass
+        pending_overlaps.append((label, bounds, core_bounds))
     if not pending_overlaps:
-        return ([], "all parts already present")
+        return (existing_results, "all parts already present")
     overlapping_tiles = pending_overlaps
 
     # So LazrsParallel (Rayon) uses N threads for chunk decompression
@@ -730,7 +788,7 @@ def _distribute_source_file(args: Tuple) -> Tuple[List[Tuple[str, int]], str]:
         read_mode = "full scan"
 
         if src_file.lower().endswith(".copc.laz") and overlapping_tiles:
-            query_bounds = _union_bounds([bounds for _, bounds in overlapping_tiles])
+            query_bounds = _union_bounds([bounds for _, bounds, _ in overlapping_tiles])
             temp_subset_path, subset_message = _materialize_copc_subset(
                 src_file, query_bounds, f"src{source_idx}"
             )
@@ -748,15 +806,17 @@ def _distribute_source_file(args: Tuple) -> Tuple[List[Tuple[str, int]], str]:
         # --- stream through the file in chunks --------------------------------
         # We accumulate per-tile arrays and flush once at the end so that
         # each tile gets exactly one part file from this source.
-        tile_arrays: Dict[str, list] = {label: [] for label, _ in overlapping_tiles}
-        tile_counts: Dict[str, int] = {label: 0 for label, _ in overlapping_tiles}
+        tile_arrays: Dict[str, list] = {label: [] for label, _, _ in overlapping_tiles}
+        tile_counts: Dict[str, int] = {label: 0 for label, _, _ in overlapping_tiles}
+        tile_core_counts: Dict[str, int] = {label: 0 for label, _, _ in overlapping_tiles}
 
         # Build a compact bounds array for vectorised overlap tests
-        tile_labels = [label for label, _ in overlapping_tiles]
-        tile_xmin = np.array([b[0] for _, b in overlapping_tiles])
-        tile_xmax = np.array([b[2] for _, b in overlapping_tiles])
-        tile_ymin = np.array([b[1] for _, b in overlapping_tiles])
-        tile_ymax = np.array([b[3] for _, b in overlapping_tiles])
+        tile_labels = [label for label, _, _ in overlapping_tiles]
+        tile_xmin = np.array([b[0] for _, b, _ in overlapping_tiles])
+        tile_xmax = np.array([b[2] for _, b, _ in overlapping_tiles])
+        tile_ymin = np.array([b[1] for _, b, _ in overlapping_tiles])
+        tile_ymax = np.array([b[3] for _, b, _ in overlapping_tiles])
+        tile_core_bounds = [core for _, _, core in overlapping_tiles]
 
         header_snapshot = None  # will be captured from the first chunk
 
@@ -780,6 +840,19 @@ def _distribute_source_file(args: Tuple) -> Tuple[List[Tuple[str, int]], str]:
                     # Store the raw packed array slice (compact, avoids header copy)
                     tile_arrays[label].append(chunk.array[mask])
                     tile_counts[label] += cnt
+                    core_bounds = tile_core_bounds[i]
+                    if core_bounds is None:
+                        tile_core_counts[label] += cnt
+                    else:
+                        cxmin, cymin, cxmax, cymax = core_bounds
+                        core_mask = (
+                            mask
+                            & (cx >= cxmin)
+                            & (cx <= cxmax)
+                            & (cy >= cymin)
+                            & (cy <= cymax)
+                        )
+                        tile_core_counts[label] += int(core_mask.sum())
 
         if header_snapshot is None:
             return ([], read_mode)
@@ -791,9 +864,9 @@ def _distribute_source_file(args: Tuple) -> Tuple[List[Tuple[str, int]], str]:
         # overflow when coordinates are far from the source file's offset.
         src_scales = header_snapshot.scales
         src_offsets = header_snapshot.offsets
-        tile_bounds_map = {lbl: bnds for lbl, bnds in overlapping_tiles}
+        tile_bounds_map = {lbl: bnds for lbl, bnds, _ in overlapping_tiles}
 
-        results: List[Tuple[str, int]] = []
+        results: List[Tuple[str, int, int]] = list(existing_results)
         for label in tile_labels:
             if not tile_arrays[label]:
                 continue
@@ -825,7 +898,7 @@ def _distribute_source_file(args: Tuple) -> Tuple[List[Tuple[str, int]], str]:
             new_las.points = point_record
             new_las.write(str(part_file))
 
-            results.append((label, tile_counts[label]))
+            results.append((label, tile_counts[label], tile_core_counts[label]))
 
         return (results, read_mode)
 
@@ -1250,6 +1323,7 @@ def create_tiles(
     threads: int = 5,
     max_parallel: int = 5,
     chunk_size: int = 20_000_000,
+    tile_bounds_json: Optional[Path] = None,
 ) -> List[Path]:
     """
     Create overlapping tiles from source point cloud files (two-phase).
@@ -1269,6 +1343,8 @@ def create_tiles(
         threads: Threads used per process for LAZ chunk decompression (LazrsParallel/Rayon)
         max_parallel: Maximum parallel workers for each phase
         chunk_size: Points per chunk when reading source files (smaller = less peak RAM)
+        tile_bounds_json: Optional tile_bounds_tindex.json path used to skip
+            tiles whose buffered crop contains points but whose core contains none.
 
     Returns:
         List of created tile paths
@@ -1299,6 +1375,8 @@ def create_tiles(
     if not all_tiles:
         raise ValueError("No tile jobs found")
 
+    core_bounds_by_label = _load_core_bounds_from_tile_bounds_json(tile_bounds_json)
+
     # Skip tiles whose COPC output already exists
     pending_tiles: Dict[str, Tuple[float, float, float, float]] = {}
     already_done = 0
@@ -1321,6 +1399,10 @@ def create_tiles(
 
     print(f"  Source files: {len(source_files)}")
     print(f"  Total tiles: {len(all_tiles)} ({already_done} already done, {len(pending_tiles)} pending)")
+    if core_bounds_by_label:
+        print("  Core occupancy check: enabled")
+    else:
+        print("  Core occupancy check: unavailable (no tile_bounds_tindex.json)")
     print(f"  Workers: {max_parallel}")
 
     if not pending_tiles:
@@ -1335,7 +1417,7 @@ def create_tiles(
         overlapping = []
         for label, tb in pending_tiles.items():
             if fb is None or _bounds_overlap(fb, tb):
-                overlapping.append((label, tb))
+                overlapping.append((label, tb, core_bounds_by_label.get(label)))
         if overlapping:
             distribute_tasks.append((source_idx, src_file, overlapping, tiles_dir, threads, chunk_size))
 
@@ -1345,6 +1427,7 @@ def create_tiles(
     print()
 
     tile_point_counts: Dict[str, int] = {}
+    tile_core_point_counts: Dict[str, int] = {}
     with ProcessPoolExecutor(max_workers=max_parallel) as executor:
         futures = {
             executor.submit(_distribute_source_file, task): Path(task[1]).name
@@ -1354,21 +1437,42 @@ def create_tiles(
             src_name = futures[future]
             try:
                 results, read_mode = future.result()
-                for label, count in results:
+                for label, count, core_count in results:
                     tile_point_counts[label] = tile_point_counts.get(label, 0) + count
+                    tile_core_point_counts[label] = (
+                        tile_core_point_counts.get(label, 0) + core_count
+                    )
                 if results:
-                    total_pts = sum(c for _, c in results)
+                    total_pts = sum(c for _, c, _ in results)
+                    total_core_pts = sum(c for _, _, c in results)
                     print(f"    ✓ {src_name}: {total_pts:,} pts → {len(results)} tile(s) [{read_mode}]")
+                    if core_bounds_by_label:
+                        print(f"      core ownership: {total_core_pts:,} pts")
                 else:
                     print(f"    - {src_name}: no overlapping data [{read_mode}]")
             except Exception as e:
                 print(f"    ✗ {src_name}: {e}")
 
     # ── Phase 2: Finalise ───────────────────────────────────────────────
-    finalize_tasks = [
-        (label, tiles_dir, log_dir, pending_tiles.get(label))
-        for label in pending_tiles
-    ]
+    finalize_tasks = []
+    buffer_only_skipped = 0
+    for label, tile_bounds in pending_tiles.items():
+        total_count = tile_point_counts.get(label, 0)
+        has_core_bounds = label in core_bounds_by_label
+        core_count = tile_core_point_counts.get(
+            label,
+            total_count if not has_core_bounds else 0,
+        )
+        if has_core_bounds and total_count > 0 and core_count == 0:
+            buffer_only_skipped += 1
+            shutil.rmtree(tiles_dir / label, ignore_errors=True)
+            print(
+                f"    - {label}: skipped buffer-only tile "
+                f"({total_count:,} buffered pts, 0 core pts)",
+                flush=True,
+            )
+            continue
+        finalize_tasks.append((label, tiles_dir, log_dir, tile_bounds))
 
     print()
     print(
@@ -1378,7 +1482,7 @@ def create_tiles(
 
     successful = 0
     failed = 0
-    skipped = 0
+    skipped = buffer_only_skipped
 
     with ProcessPoolExecutor(max_workers=max_parallel) as executor:
         futures = {
@@ -1444,7 +1548,6 @@ def run_tiling_pipeline(
     output_dir: Path,
     tile_length: float = 100,
     tile_buffer: float = 5,
-    grid_offset: float = 1.0,
     num_workers: int = 4,
     threads: int = 5,
     max_tile_procs: int = 5,
@@ -1470,7 +1573,6 @@ def run_tiling_pipeline(
         output_dir: Base output directory
         tile_length: Tile size in meters
         tile_buffer: Buffer overlap in meters
-        grid_offset: Offset from min coordinates
         num_workers: Worker count used for source COPC conversion
         threads: Threads per PDAL writer
         max_tile_procs: Maximum parallel tile processes
@@ -1547,7 +1649,7 @@ def run_tiling_pipeline(
 
     # Step 3: Calculate tile bounds
     jobs_file, bounds_json, env = calculate_tile_bounds(
-        tindex_file, tile_length, tile_buffer, output_dir, grid_offset
+        tindex_file, tile_length, tile_buffer, output_dir
     )
 
     # Symlink tindex for Galaxy if needed
@@ -1603,6 +1705,7 @@ def run_tiling_pipeline(
         threads,
         max_tile_procs,
         chunk_size,
+        tile_bounds_json=bounds_json,
     )
 
     print()

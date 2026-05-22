@@ -117,6 +117,8 @@ def run_tile_task(params: Parameters):
             dimension_reduction=dimension_reduction,
             output_copc_res1=output_copc_res1,
             output_copc_res2=output_copc_res2,
+            fallback_laz_dir=input_dir,
+            chunk_size=chunk_size,
         )
 
         bounds_json = output_dir / "tile_bounds_tindex.json"

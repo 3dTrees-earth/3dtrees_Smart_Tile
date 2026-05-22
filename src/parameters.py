@@ -38,7 +38,7 @@ class Parameters(BaseSettings):
     )
     chunk_size: int = Field(
         default=20_000_000,
-        description="Points per streaming chunk for filtering, remap, and internal COPC preparation.",
+        description="Points per streaming chunk for filtering, remap, tile COPC preparation, and tile subsampling fallback.",
         validation_alias=AliasChoices("chunk-size", "chunk_size"),
     )
 

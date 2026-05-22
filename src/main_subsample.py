@@ -27,10 +27,13 @@ import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # Import parameters
 from parameters import TILE_PARAMS
+
+
+COPC_CHUNK_TIMEOUT_SECONDS = 120
 
 
 def get_pdal_path() -> str:
@@ -85,8 +88,326 @@ def get_file_bounds(filepath: Path) -> Optional[Tuple[float, float, float, float
         return None
 
 
+def get_laspy_laz_backend():
+    """Return the preferred laspy LAZ backend when available."""
+    try:
+        import laspy
+
+        if hasattr(laspy.LazBackend, "LazrsParallel"):
+            return laspy.LazBackend.LazrsParallel
+        if hasattr(laspy.LazBackend, "Lazrs"):
+            return laspy.LazBackend.Lazrs
+    except Exception:
+        pass
+    return None
+
+
+def build_las_writer_options(
+    output_file: Path,
+    dimension_reduction: bool,
+    compression: Optional[bool] = None,
+) -> Dict[str, object]:
+    """Build writers.las options while respecting dimension reduction."""
+    writer_opts: Dict[str, object] = {
+        "type": "writers.las",
+        "filename": str(output_file),
+    }
+    if compression is not None:
+        writer_opts["compression"] = compression
+    if dimension_reduction:
+        writer_opts["minor_version"] = 2
+        writer_opts["dataformat_id"] = 0
+    else:
+        writer_opts["minor_version"] = 4
+        writer_opts["extra_dims"] = "all"
+    return writer_opts
+
+
+def make_laspy_output_header(source_header):
+    """Create a writable laspy header from a source header without COPC VLRs."""
+    import laspy
+
+    header = laspy.LasHeader(
+        point_format=source_header.point_format,
+        version=source_header.version,
+    )
+    header.offsets = source_header.offsets
+    header.scales = source_header.scales
+
+    existing_vlrs = {(getattr(vlr, "user_id", ""), vlr.record_id) for vlr in header.vlrs}
+    for vlr in source_header.vlrs:
+        if vlr.record_id in (1, 2) and getattr(vlr, "user_id", "") == "copc":
+            continue
+        vlr_key = (getattr(vlr, "user_id", ""), vlr.record_id)
+        if vlr_key not in existing_vlrs:
+            header.vlrs.append(vlr)
+            existing_vlrs.add(vlr_key)
+
+    return header
+
+
+def parse_bounds(bounds_str: str) -> Optional[Tuple[float, float, float, float]]:
+    """Parse the PDAL 2D bounds string created by this module."""
+    import re
+
+    match = re.fullmatch(
+        r"\(\s*\[\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*\]\s*,\s*"
+        r"\[\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*\]\s*\)",
+        bounds_str.strip(),
+    )
+    if not match:
+        return None
+    minx, maxx, miny, maxy = (float(value) for value in match.groups())
+    return (minx, maxx, miny, maxy)
+
+
+def safe_unlink(path: Path) -> None:
+    """Best-effort unlink for temporary or partial outputs."""
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
+
+
+def run_pdal_pipeline(
+    pipeline: Dict[str, object],
+    pipeline_file: Path,
+    timeout_seconds: Optional[int] = None,
+) -> Tuple[int, str, str, bool]:
+    """Run a PDAL pipeline and report whether it timed out."""
+    with open(pipeline_file, "w") as f:
+        json.dump(pipeline, f, indent=2)
+
+    pdal_cmd = get_pdal_path()
+    try:
+        result = subprocess.run(
+            [pdal_cmd, "pipeline", str(pipeline_file)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds if timeout_seconds and timeout_seconds > 0 else None,
+        )
+        return result.returncode, result.stdout or "", result.stderr or "", False
+    except subprocess.TimeoutExpired as e:
+        stdout = e.stdout or ""
+        stderr = e.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        if not stderr:
+            stderr = f"PDAL pipeline timed out after {timeout_seconds}s"
+        return 124, stdout, stderr, True
+    finally:
+        if pipeline_file.exists():
+            pipeline_file.unlink()
+
+
+def summarize_pipeline_error(returncode: int, stdout: str, stderr: str) -> str:
+    """Return a compact subprocess error message."""
+    message = (stderr or stdout or "").strip()[:200]
+    return message or f"no stderr/stdout (rc={returncode})"
+
+
+def count_points(filepath: Path) -> int:
+    """Count points in a LAS/LAZ file via pdal info."""
+    try:
+        pdal_cmd = get_pdal_path()
+        info_result = subprocess.run(
+            [pdal_cmd, "info", "--metadata", str(filepath)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        import re
+
+        match = re.search(r'"count":\s*(\d+)', info_result.stdout)
+        if match:
+            return int(match.group(1))
+    except Exception:
+        pass
+    return 0
+
+
+def get_laspy_fallback_sources(input_file: Path, fallback_laz_dir: Optional[Path]) -> List[Path]:
+    """Prefer original LAS/LAZ inputs for fallback, excluding generated COPC files."""
+    if fallback_laz_dir:
+        fallback_laz_dir = Path(fallback_laz_dir)
+        if fallback_laz_dir.is_file():
+            return [fallback_laz_dir]
+        if fallback_laz_dir.is_dir():
+            sources = sorted(
+                [
+                    *fallback_laz_dir.glob("*.las"),
+                    *[
+                        path
+                        for path in fallback_laz_dir.glob("*.laz")
+                        if not path.name.endswith(".copc.laz")
+                    ],
+                ]
+            )
+            if sources:
+                return sources
+    return [input_file]
+
+
+def crop_bounds_to_las_with_laspy_chunks(
+    input_files: List[Path],
+    bounds: Tuple[float, float, float, float],
+    output_file: Path,
+    chunk_size: int,
+) -> Tuple[bool, int, str]:
+    """Stream source LAS/LAZ files and write points inside one failed chunk bound."""
+    import laspy
+    import numpy as np
+
+    minx, maxx, miny, maxy = bounds
+    laz_backend = get_laspy_laz_backend()
+    writer = None
+    written = 0
+
+    try:
+        for input_file in input_files:
+            open_kwargs = {}
+            if input_file.suffix.lower() == ".laz" and laz_backend is not None:
+                open_kwargs["laz_backend"] = laz_backend
+
+            with laspy.open(str(input_file), **open_kwargs) as reader:
+                for chunk in reader.chunk_iterator(max(1, int(chunk_size))):
+                    if len(chunk) == 0:
+                        continue
+                    mask = (
+                        (np.asarray(chunk.x) >= minx)
+                        & (np.asarray(chunk.x) <= maxx)
+                        & (np.asarray(chunk.y) >= miny)
+                        & (np.asarray(chunk.y) <= maxy)
+                    )
+                    selected = int(np.count_nonzero(mask))
+                    if selected == 0:
+                        continue
+                    if writer is None:
+                        output_header = make_laspy_output_header(reader.header)
+                        writer = laspy.open(
+                            str(output_file),
+                            mode="w",
+                            header=output_header,
+                            do_compress=False,
+                        )
+                    writer.write_points(chunk[mask])
+                    written += selected
+    except Exception as e:
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
+        safe_unlink(output_file)
+        return False, written, str(e)
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    if written == 0:
+        safe_unlink(output_file)
+    return True, written, "OK"
+
+
+def voxelize_las_part(
+    input_file: Path,
+    output_file: Path,
+    resolution: float,
+    pipeline_dir: Path,
+    dimension_reduction: bool,
+) -> Tuple[bool, str]:
+    """Apply the normal PDAL 1cm voxel reduction to one extracted fallback part."""
+    safe_unlink(output_file)
+    writer_opts = build_las_writer_options(output_file, dimension_reduction)
+    pipeline = {
+        "pipeline": [
+            {"type": "readers.las", "filename": str(input_file)},
+            {"type": "filters.voxelcentroidnearestneighbor", "cell": resolution},
+            writer_opts,
+        ]
+    }
+    rc, stdout, stderr, _ = run_pdal_pipeline(
+        pipeline,
+        pipeline_dir / f"voxel_{output_file.stem}.json",
+    )
+    if rc != 0:
+        return False, summarize_pipeline_error(rc, stdout, stderr)
+    return True, "OK"
+
+
+def extract_chunk_with_laspy_fallback(
+    input_file: Path,
+    fallback_laz_dir: Optional[Path],
+    bounds_str: str,
+    resolution: float,
+    output_dir: Path,
+    chunk_file: Path,
+    chunk_idx: int,
+    total_chunks: int,
+    dimension_reduction: bool,
+    chunk_size: int,
+) -> Tuple[bool, int, str]:
+    """Fallback after COPC stalls: stream original LAZ bounds with laspy."""
+    import shutil
+
+    bounds = parse_bounds(bounds_str)
+    if bounds is None:
+        return False, 0, f"Could not parse bounds: {bounds_str}"
+
+    fallback_sources = get_laspy_fallback_sources(input_file, fallback_laz_dir)
+    fallback_dir = output_dir / f"_chunk{chunk_idx}_laspy_fallback"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    cropped_chunk = fallback_dir / "bounded_chunk.las"
+
+    try:
+        ok, selected_count, msg = crop_bounds_to_las_with_laspy_chunks(
+            fallback_sources,
+            bounds,
+            cropped_chunk,
+            chunk_size,
+        )
+        if not ok:
+            return False, 0, msg
+        if selected_count == 0:
+            return False, 0, "laspy fallback produced no points inside failed chunk bounds"
+
+        ok, msg = voxelize_las_part(
+            cropped_chunk,
+            chunk_file,
+            resolution,
+            fallback_dir,
+            dimension_reduction,
+        )
+        safe_unlink(cropped_chunk)
+        if not ok:
+            return False, 0, msg
+
+        if not chunk_file.exists() or chunk_file.stat().st_size == 0:
+            return False, 0, "laspy fallback produced empty chunk output"
+
+        point_count = count_points(chunk_file)
+        print(
+            f"      ✓ Chunk {chunk_idx}/{total_chunks}: laspy fallback produced "
+            f"{point_count:,} points",
+            flush=True,
+        )
+        return True, point_count, ""
+    finally:
+        try:
+            shutil.rmtree(fallback_dir)
+        except Exception:
+            pass
+
+
 def subsample_tile_chunk(
-    args: Tuple[Path, str, float, Path, int, int, bool]
+    args: Tuple[Path, str, float, Path, int, int, bool, Optional[Path], int]
 ) -> Tuple[int, Optional[Path], int, str]:
     """
     Subsample a spatial chunk of a tile using PDAL with COPC-optimized bounds filter.
@@ -96,13 +417,13 @@ def subsample_tile_chunk(
     - Intermediate chunk output is plain LAS for simpler downstream reads
     
     Args:
-        args: Tuple of (input_file, bounds_str, resolution, output_dir, chunk_idx, total_chunks, dimension_reduction)
+        args: Tuple of (input_file, bounds_str, resolution, output_dir, chunk_idx, total_chunks, dimension_reduction, fallback_laz_dir, chunk_size)
               dimension_reduction: If True, write only standard dimensions (no extra_dims); minimal output.
     
     Returns:
         Tuple of (chunk_idx, output_file_or_none, point_count, error_message)
     """
-    input_file, bounds_str, resolution, output_dir, chunk_idx, total_chunks, dimension_reduction = args
+    input_file, bounds_str, resolution, output_dir, chunk_idx, total_chunks, dimension_reduction, fallback_laz_dir, chunk_size = args
     
     try:
         # Determine reader type - can read COPC or LAS
@@ -115,16 +436,7 @@ def subsample_tile_chunk(
         
         # Build pipeline - use COPC bounds filtering if available
         # When keeping all dims, do not set dataformat_id=0 (format 0 has no extra bytes); use LAS 1.4 for format 6/7.
-        writer_opts = {
-            "type": "writers.las",
-            "filename": str(chunk_file),
-        }
-        if dimension_reduction:
-            writer_opts["minor_version"] = 2
-            writer_opts["dataformat_id"] = 0  # Minimal: 20 bytes only (LAS 1.2)
-        else:
-            writer_opts["minor_version"] = 4  # LAS 1.4 required for point format 6/7 (extra dims)
-            writer_opts["extra_dims"] = "all"
+        writer_opts = build_las_writer_options(chunk_file, dimension_reduction)
 
         if is_copc:
             # COPC: Use bounds parameter directly in reader (most efficient)
@@ -152,77 +464,67 @@ def subsample_tile_chunk(
 
         # Write and execute pipeline
         pipeline_file = output_dir / f"_pipeline_chunk{chunk_idx}.json"
-        with open(pipeline_file, 'w') as f:
-            json.dump(pipeline, f, indent=2)
-        
-        pdal_cmd = get_pdal_path()
-        result = subprocess.run(
-            [pdal_cmd, "pipeline", str(pipeline_file)],
-            capture_output=True,
-            text=True,
-            check=False
+        safe_unlink(chunk_file)
+        returncode, stdout, stderr, timed_out = run_pdal_pipeline(
+            pipeline,
+            pipeline_file,
+            timeout_seconds=COPC_CHUNK_TIMEOUT_SECONDS if is_copc else None,
         )
-        
-        # Clean up pipeline
-        if pipeline_file.exists():
-            pipeline_file.unlink()
-        
-        if result.returncode != 0:
-            # Fallback: if COPC reader failed, retry with readers.las + filters.crop
-            if is_copc and ("copc" in result.stderr.lower() or "vlr" in result.stderr.lower()):
-                print(f"      ⚠ Chunk {chunk_idx}/{total_chunks}: COPC reader failed, falling back to readers.las")
-                pipeline = {
-                    "pipeline": [
-                        {"type": "readers.las", "filename": str(input_file)},
-                        {"type": "filters.crop", "bounds": bounds_str},
-                        {"type": "filters.voxelcentroidnearestneighbor", "cell": resolution},
-                        writer_opts,
-                    ]
-                }
-                pipeline_file = output_dir / f"_pipeline_chunk{chunk_idx}_fallback.json"
-                with open(pipeline_file, 'w') as f:
-                    json.dump(pipeline, f, indent=2)
-                try:
-                    result = subprocess.run(
-                        [pdal_cmd, "pipeline", str(pipeline_file)],
-                        capture_output=True, text=True, check=False,
-                    )
-                finally:
-                    if pipeline_file.exists():
-                        pipeline_file.unlink()
-                if result.returncode != 0:
-                    msg = (result.stderr or result.stdout or "").strip()
-                    msg = msg[:200]
-                    if not msg:
-                        msg = f"no stderr/stdout (rc={result.returncode})"
-                    print(f"      ⚠ Chunk {chunk_idx}/{total_chunks} fallback error (rc={result.returncode}): {msg}")
-                    return (chunk_idx, None, 0, msg)
+
+        if returncode != 0:
+            if is_copc and timed_out:
+                print(
+                    f"      ⚠ Chunk {chunk_idx}/{total_chunks}: COPC read timed out after "
+                    f"{COPC_CHUNK_TIMEOUT_SECONDS}s; falling back to laspy chunked LAZ reads",
+                    flush=True,
+                )
+                ok, point_count, msg = extract_chunk_with_laspy_fallback(
+                    input_file,
+                    fallback_laz_dir,
+                    bounds_str,
+                    resolution,
+                    output_dir,
+                    chunk_file,
+                    chunk_idx,
+                    total_chunks,
+                    dimension_reduction,
+                    chunk_size,
+                )
+                if ok:
+                    return (chunk_idx, chunk_file, point_count, "")
+                print(f"      ⚠ Chunk {chunk_idx}/{total_chunks} laspy fallback error: {msg}")
+                return (chunk_idx, None, 0, msg)
+
+            # Fallback: if COPC reader failed, bypass the COPC hierarchy and
+            # stream original LAZ/LAS sources with laspy.
+            if is_copc and ("copc" in stderr.lower() or "vlr" in stderr.lower()):
+                print(f"      ⚠ Chunk {chunk_idx}/{total_chunks}: COPC reader failed, falling back to laspy chunked LAZ reads")
+                ok, point_count, msg = extract_chunk_with_laspy_fallback(
+                    input_file,
+                    fallback_laz_dir,
+                    bounds_str,
+                    resolution,
+                    output_dir,
+                    chunk_file,
+                    chunk_idx,
+                    total_chunks,
+                    dimension_reduction,
+                    chunk_size,
+                )
+                if ok:
+                    return (chunk_idx, chunk_file, point_count, "")
+                print(f"      ⚠ Chunk {chunk_idx}/{total_chunks} laspy fallback error: {msg}")
+                return (chunk_idx, None, 0, msg)
             else:
-                msg = (result.stderr or result.stdout or "").strip()
-                msg = msg[:200]
-                if not msg:
-                    msg = f"no stderr/stdout (rc={result.returncode})"
-                print(f"      ⚠ Chunk {chunk_idx}/{total_chunks} error (rc={result.returncode}): {msg}")
+                msg = summarize_pipeline_error(returncode, stdout, stderr)
+                print(f"      ⚠ Chunk {chunk_idx}/{total_chunks} error (rc={returncode}): {msg}")
                 return (chunk_idx, None, 0, msg)
 
         if not chunk_file.exists() or chunk_file.stat().st_size == 0:
             return (chunk_idx, None, 0, "empty output")
         
         # Get point count
-        point_count = 0
-        try:
-            info_result = subprocess.run(
-                [pdal_cmd, "info", "--metadata", str(chunk_file)],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            import re
-            match = re.search(r'"count":\s*(\d+)', info_result.stdout)
-            if match:
-                point_count = int(match.group(1))
-        except Exception:
-            pass
+        point_count = count_points(chunk_file)
         
         print(f"      ✓ Chunk {chunk_idx}/{total_chunks}: {point_count:,} points")
         return (chunk_idx, chunk_file, point_count, "")
@@ -233,7 +535,7 @@ def subsample_tile_chunk(
 
 
 def subsample_single_file(
-    args: Tuple[Path, Path, float, Path, int, bool, bool]
+    args: Tuple[Path, Path, float, Path, int, bool, bool, Optional[Path], int]
 ) -> Tuple[str, bool, str, int]:
     """
     Subsample a single file by splitting it into subtiles along X-axis and processing in parallel.
@@ -244,12 +546,12 @@ def subsample_single_file(
     3. Merge all subsampled subtiles back together
     
     Args:
-        args: Tuple of (input_file, output_file, resolution, pipeline_dir, num_threads, dimension_reduction, output_copc)
+        args: Tuple of (input_file, output_file, resolution, pipeline_dir, num_threads, dimension_reduction, output_copc, fallback_laz_dir, chunk_size)
     
     Returns:
         Tuple of (filename, success, message, point_count)
     """
-    input_file, output_file, resolution, pipeline_dir, num_threads, dimension_reduction, output_copc = args
+    input_file, output_file, resolution, pipeline_dir, num_threads, dimension_reduction, output_copc, fallback_laz_dir, chunk_size = args
     try:
         print(f"    → Processing {input_file.name}...")
         
@@ -290,7 +592,17 @@ def subsample_single_file(
             chunk_maxy = maxy
             
             bounds_str = f"([{chunk_minx},{chunk_maxx}],[{chunk_miny},{chunk_maxy}])"
-            chunk_tasks.append((input_file, bounds_str, resolution, chunk_dir, chunk_idx, num_threads, dimension_reduction))
+            chunk_tasks.append((
+                input_file,
+                bounds_str,
+                resolution,
+                chunk_dir,
+                chunk_idx,
+                num_threads,
+                dimension_reduction,
+                fallback_laz_dir,
+                chunk_size,
+            ))
         
         # Process chunks in parallel using ProcessPoolExecutor for true CPU parallelism
         chunk_files = []
@@ -552,9 +864,11 @@ def subsample_parallel(
     resolution: float,
     num_cores: int,
     num_threads: int,
+    chunk_size: int,
     output_prefix: Optional[str] = None,
     dimension_reduction: bool = True,
     output_copc: bool = False,
+    fallback_laz_dir: Optional[Path] = None,
 ) -> List[Path]:
     """
     Subsample all files in directory using parallel chunk processing.
@@ -570,9 +884,11 @@ def subsample_parallel(
         resolution: Voxel resolution in meters
         num_cores: Not used (kept for compatibility)
         num_threads: Number of spatial chunks per file (from TILE_PARAMS['threads'])
+        chunk_size: Points per laspy streaming chunk for timeout fallback.
         output_prefix: Optional prefix for output filenames
         dimension_reduction: If True, write only standard dimensions (no extra_dims); default True = minimal.
         output_copc: If True, write COPC outputs (".copc.laz") instead of LAZ.
+        fallback_laz_dir: Optional original LAS/LAZ directory for laspy timeout fallback.
     
     Returns:
         List of created output file paths
@@ -653,7 +969,17 @@ def subsample_parallel(
             print(f"    ⊙ Skipping {input_file.name} (already exists)")
             continue
         
-        tasks.append((input_file, output_file, resolution, pipeline_dir, num_threads, dimension_reduction, output_copc))
+        tasks.append((
+            input_file,
+            output_file,
+            resolution,
+            pipeline_dir,
+            num_threads,
+            dimension_reduction,
+            output_copc,
+            fallback_laz_dir,
+            chunk_size,
+        ))
     
     if not tasks:
         print(f"    ✓ All files already subsampled")
@@ -701,6 +1027,8 @@ def run_subsample_pipeline(
     dimension_reduction: bool = True,
     output_copc_res1: bool = True,
     output_copc_res2: bool = False,
+    fallback_laz_dir: Optional[Path] = None,
+    chunk_size: int = 20_000_000,
 ) -> Tuple[Path, Path]:
     """
     Run the complete subsampling pipeline.
@@ -724,6 +1052,8 @@ def run_subsample_pipeline(
         dimension_reduction: If True, write only standard dimensions (minimal); if False, keep extra_dims (e.g. PredInstance).
         output_copc_res1: If True, res1 outputs are written as COPC (".copc.laz").
         output_copc_res2: If True, res2 outputs are written as COPC (".copc.laz").
+        fallback_laz_dir: Optional original LAS/LAZ directory for laspy timeout fallback.
+        chunk_size: Points per laspy streaming chunk for timeout fallback.
     
     Returns:
         Tuple of (subsampled_res1_dir, subsampled_res2_dir)
@@ -756,6 +1086,7 @@ def run_subsample_pipeline(
     print(f"Resolution 2: {res2}m ({res2_cm}cm)")
     print(f"CPU cores: {num_cores}")
     print(f"Threads (chunks per file): {num_threads}")
+    print(f"Chunk size: {chunk_size:,} points")
     print(f"Dimension reduction: {dimension_reduction} ({'minimal (standard dims only)' if dimension_reduction else 'keep all (extra_dims preserved)'})")
     print(f"Resolution 1 output: {'COPC (.copc.laz)' if output_copc_res1 else 'LAZ (.laz)'}")
     print(f"Resolution 2 output: {'COPC (.copc.laz)' if output_copc_res2 else 'LAZ (.laz)'}")
@@ -772,9 +1103,11 @@ def run_subsample_pipeline(
         resolution=res1,
         num_cores=num_cores,
         num_threads=num_threads,
+        chunk_size=chunk_size,
         output_prefix=output_prefix,
         dimension_reduction=dimension_reduction,
         output_copc=output_copc_res1,
+        fallback_laz_dir=fallback_laz_dir,
     )
     
     if not res1_files:
@@ -795,9 +1128,11 @@ def run_subsample_pipeline(
         resolution=res2,
         num_cores=num_cores,
         num_threads=num_threads,
+        chunk_size=chunk_size,
         output_prefix=output_prefix,
         dimension_reduction=dimension_reduction,
         output_copc=output_copc_res2,
+        fallback_laz_dir=None,
     )
     
     if not res2_files:
@@ -858,6 +1193,14 @@ def main():
         default=None,
         help=f"Number of spatial chunks per file for parallel processing (default: {TILE_PARAMS.get('threads', 5)})"
     )
+    parser.add_argument(
+        "--chunk-size",
+        "--chunk_size",
+        dest="chunk_size",
+        type=int,
+        default=TILE_PARAMS.get("chunk_size", 20_000_000),
+        help="Points per laspy streaming chunk for timeout fallback.",
+    )
     
     parser.add_argument(
         "--output_prefix",
@@ -893,6 +1236,7 @@ def main():
             res2=args.res2,
             num_cores=args.num_cores,
             num_threads=args.num_threads,
+            chunk_size=args.chunk_size,
             output_prefix=args.output_prefix,
             output_copc_res1=args.output_copc_res1,
             output_copc_res2=args.output_copc_res2,
