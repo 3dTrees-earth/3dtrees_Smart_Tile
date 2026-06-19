@@ -24,7 +24,7 @@ import sys
 import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import plot_tiles_and_copc
 
 from parameters import TILE_PARAMS
@@ -101,12 +101,16 @@ def _projection_vlr_fingerprints(header) -> Dict[tuple[str, int], bytes]:
     return fingerprints
 
 
-def _crs_text(header) -> Optional[str]:
-    """Best-effort parseable CRS text; returns None when pyproj/CRS metadata is unavailable."""
+def _parse_crs(header) -> Optional[Any]:
     try:
-        crs = header.parse_crs()
+        return header.parse_crs()
     except Exception:
         return None
+
+
+def _crs_text(header) -> Optional[str]:
+    """Best-effort parseable CRS text; returns None when pyproj/CRS metadata is unavailable."""
+    crs = _parse_crs(header)
     if crs is None:
         return None
     try:
@@ -115,12 +119,7 @@ def _crs_text(header) -> Optional[str]:
         return str(crs)
 
 
-def _crs_authority_string(header) -> Optional[str]:
-    """Return a compact CRS authority string such as EPSG:32632 when available."""
-    try:
-        crs = header.parse_crs()
-    except Exception:
-        return None
+def _crs_authority_from_crs(crs) -> Optional[str]:
     if crs is None:
         return None
 
@@ -138,6 +137,33 @@ def _crs_authority_string(header) -> Optional[str]:
     if epsg:
         return f"EPSG:{epsg}"
     return None
+
+
+def _crs_authority_string(header) -> Optional[str]:
+    """Return a compact CRS authority string such as EPSG:32632 when available."""
+    return _crs_authority_from_crs(_parse_crs(header))
+
+
+def _crs_equivalent(source_crs, output_crs) -> bool:
+    """Return True when two parsed CRS objects describe the same CRS."""
+    if source_crs is None or output_crs is None:
+        return False
+
+    source_authority = _crs_authority_from_crs(source_crs)
+    output_authority = _crs_authority_from_crs(output_crs)
+    if source_authority and source_authority == output_authority:
+        return True
+
+    try:
+        if source_crs.equals(output_crs, ignore_axis_order=True):
+            return True
+    except Exception:
+        pass
+
+    try:
+        return source_crs.to_wkt() == output_crs.to_wkt()
+    except Exception:
+        return str(source_crs) == str(output_crs)
 
 
 def _srs_assignment_from_file(path: Path) -> Optional[str]:
@@ -189,7 +215,7 @@ def _copc_preserves_source_crs(source_file: Path, copc_file: Path) -> Tuple[bool
     try:
         with laspy.open(str(source_file), laz_backend=backend) as src:
             source_header = src.header
-            source_crs = _crs_text(source_header)
+            source_crs = _parse_crs(source_header)
             source_projection = _projection_vlr_fingerprints(source_header)
 
         if not source_crs and not source_projection:
@@ -197,12 +223,12 @@ def _copc_preserves_source_crs(source_file: Path, copc_file: Path) -> Tuple[bool
 
         with laspy.open(str(copc_file), laz_backend=backend) as out:
             output_header = out.header
-            output_crs = _crs_text(output_header)
+            output_crs = _parse_crs(output_header)
             output_projection = _projection_vlr_fingerprints(output_header)
     except Exception as e:
         return (False, f"could not validate CRS metadata: {e}")
 
-    if source_crs and output_crs and source_crs == output_crs:
+    if _crs_equivalent(source_crs, output_crs):
         return (True, "CRS metadata preserved")
     if source_projection and all(
         output_projection.get(key) == value for key, value in source_projection.items()

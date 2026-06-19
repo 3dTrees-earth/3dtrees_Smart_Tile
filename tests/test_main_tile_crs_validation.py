@@ -13,19 +13,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.modules.setdefault("plot_tiles_and_copc", types.SimpleNamespace())
 sys.modules.setdefault("parameters", types.SimpleNamespace(TILE_PARAMS=types.SimpleNamespace()))
 
-from main_tile import _copc_preserves_source_crs, _crs_authority_string  # noqa: E402
+from main_tile import (  # noqa: E402
+    _copc_preserves_source_crs,
+    _crs_authority_string,
+    _crs_equivalent,
+)
 
 
 class _FakeCrs:
-    def __init__(self, authority=None, epsg=None):
+    def __init__(self, authority=None, epsg=None, wkt="FAKE_WKT", equals_result=None):
         self.authority = authority
         self.epsg = epsg
+        self.wkt = wkt
+        self.equals_result = equals_result
 
     def to_authority(self):
         return self.authority
 
     def to_epsg(self):
         return self.epsg
+
+    def equals(self, other, ignore_axis_order=False):
+        return self.equals_result if self.equals_result is not None else False
+
+    def to_wkt(self):
+        return self.wkt
 
 
 class _FakeHeader:
@@ -67,6 +79,18 @@ class CopcCrsValidationTests(unittest.TestCase):
         header = _FakeHeader(_FakeCrs(authority=None, epsg=32632))
 
         self.assertEqual(_crs_authority_string(header), "EPSG:32632")
+
+    def test_crs_equivalent_accepts_same_authority_with_different_wkt(self):
+        source = _FakeCrs(authority=("EPSG", "4978"), wkt="LONG_WKT")
+        output = _FakeCrs(authority=("EPSG", "4978"), wkt="SHORT_WKT")
+
+        self.assertTrue(_crs_equivalent(source, output))
+
+    def test_crs_equivalent_accepts_pyproj_equals_match(self):
+        source = _FakeCrs(wkt="LONG_WKT", equals_result=True)
+        output = _FakeCrs(wkt="SHORT_WKT")
+
+        self.assertTrue(_crs_equivalent(source, output))
 
     def test_accepts_matching_projection_vlr(self):
         with tempfile.TemporaryDirectory() as tmpdir:
