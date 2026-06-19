@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,9 @@ def _laspy_laz_backend():
 
 _PROJECTION_VLR_USER_ID = "LASF_Projection"
 _PROJECTION_VLR_RECORD_IDS = {2111, 2112, 2113, 34735, 34736, 34737}
+_GEOTIFF_PROJECTION_RECORD_IDS = {34735, 34736, 34737}
+_LAS14_START_OF_FIRST_EVLR_OFFSET = 235
+_LAS14_NUMBER_OF_EVLRS_OFFSET = 243
 
 
 def _projection_vlr_keys(header) -> set[tuple[str, int]]:
@@ -90,15 +94,30 @@ def _vlr_record_bytes(vlr) -> bytes:
         return str(record_data).encode("utf-8", errors="replace")
 
 
+def _projection_records(header, record_ids: set[int]) -> Dict[tuple[str, int], bytes]:
+    records = {}
+    collections = [getattr(header, "vlrs", [])]
+    evlrs = getattr(header, "evlrs", None)
+    if evlrs:
+        collections.append(evlrs)
+
+    for collection in collections:
+        for vlr in collection:
+            user_id = getattr(vlr, "user_id", "")
+            record_id = getattr(vlr, "record_id", None)
+            if user_id == _PROJECTION_VLR_USER_ID and record_id in record_ids:
+                records[(user_id, record_id)] = _vlr_record_bytes(vlr)
+    return records
+
+
+def _geotiff_projection_records(header) -> Dict[tuple[str, int], bytes]:
+    """Return GeoTIFF CRS projection records, including GeoKeyDirectoryVlr."""
+    return _projection_records(header, _GEOTIFF_PROJECTION_RECORD_IDS)
+
+
 def _projection_vlr_fingerprints(header) -> Dict[tuple[str, int], bytes]:
     """Return CRS/projection VLR record bytes keyed by LAS VLR identity."""
-    fingerprints = {}
-    for vlr in getattr(header, "vlrs", []):
-        user_id = getattr(vlr, "user_id", "")
-        record_id = getattr(vlr, "record_id", None)
-        if user_id == _PROJECTION_VLR_USER_ID or record_id in _PROJECTION_VLR_RECORD_IDS:
-            fingerprints[(user_id, record_id)] = _vlr_record_bytes(vlr)
-    return fingerprints
+    return _projection_records(header, _PROJECTION_VLR_RECORD_IDS)
 
 
 def _parse_crs(header) -> Optional[Any]:
@@ -185,6 +204,79 @@ def _first_srs_assignment(paths: List[Path]) -> Optional[str]:
     return _srs_assignment_from_file(crs_source)
 
 
+def _evlr_record_bytes(user_id: str, record_id: int, description: str, data: bytes) -> bytes:
+    user = user_id.encode("ascii", errors="replace")[:16].ljust(16, b"\0")
+    desc = description.encode("ascii", errors="replace")[:32].ljust(32, b"\0")
+    return struct.pack("<H16sHQ32s", 0, user, int(record_id), len(data), desc) + data
+
+
+def _source_geotiff_projection_vlrs(source_file: Path) -> List[Tuple[str, int, str, bytes]]:
+    import laspy
+
+    records = []
+    backend = _laspy_laz_backend()
+    with laspy.open(str(source_file), laz_backend=backend) as src:
+        collections = [getattr(src.header, "vlrs", [])]
+        evlrs = getattr(src.header, "evlrs", None)
+        if evlrs:
+            collections.append(evlrs)
+        for collection in collections:
+            for vlr in collection:
+                user_id = getattr(vlr, "user_id", "")
+                record_id = getattr(vlr, "record_id", None)
+                if user_id == _PROJECTION_VLR_USER_ID and record_id in _GEOTIFF_PROJECTION_RECORD_IDS:
+                    records.append(
+                        (
+                            user_id,
+                            int(record_id),
+                            getattr(vlr, "description", "") or "",
+                            _vlr_record_bytes(vlr),
+                        )
+                    )
+    return records
+
+
+def _append_source_geotiff_projection_evlrs(source_file: Path, copc_file: Path) -> Tuple[bool, str]:
+    """Append original GeoTIFF projection VLRs as EVLRs without moving COPC chunks."""
+    import laspy
+
+    try:
+        source_records = _source_geotiff_projection_vlrs(source_file)
+        if not source_records:
+            return (True, "source has no GeoTIFF projection VLRs")
+
+        backend = _laspy_laz_backend()
+        with laspy.open(str(copc_file), laz_backend=backend) as out:
+            output_header = out.header
+            output_records = _geotiff_projection_records(output_header)
+            existing_count = int(getattr(output_header, "number_of_evlrs", 0) or 0)
+            existing_start = int(getattr(output_header, "start_of_first_evlr", 0) or 0)
+            if str(output_header.version) != "1.4":
+                return (False, "GeoTIFF EVLR preservation requires LAS 1.4 output")
+
+        missing = [
+            (user_id, record_id, description, data)
+            for user_id, record_id, description, data in source_records
+            if output_records.get((user_id, record_id)) != data
+        ]
+        if not missing:
+            return (True, "GeoTIFF projection VLRs already preserved")
+
+        with open(copc_file, "r+b") as f:
+            f.seek(0, os.SEEK_END)
+            append_start = f.tell()
+            for user_id, record_id, description, data in missing:
+                f.write(_evlr_record_bytes(user_id, record_id, description, data))
+            f.seek(_LAS14_START_OF_FIRST_EVLR_OFFSET)
+            f.write(struct.pack("<Q", existing_start or append_start))
+            f.seek(_LAS14_NUMBER_OF_EVLRS_OFFSET)
+            f.write(struct.pack("<I", existing_count + len(missing)))
+
+        return (True, f"appended {len(missing)} GeoTIFF projection EVLR(s)")
+    except Exception as e:
+        return (False, f"could not preserve GeoTIFF projection VLRs: {e}")
+
+
 def _crs_metadata_present(header) -> bool:
     return bool(_projection_vlr_keys(header) or _crs_text(header))
 
@@ -217,6 +309,7 @@ def _copc_preserves_source_crs(source_file: Path, copc_file: Path) -> Tuple[bool
             source_header = src.header
             source_crs = _parse_crs(source_header)
             source_projection = _projection_vlr_fingerprints(source_header)
+            source_geotiff_projection = _geotiff_projection_records(source_header)
 
         if not source_crs and not source_projection:
             return (True, "source has no CRS metadata")
@@ -225,9 +318,18 @@ def _copc_preserves_source_crs(source_file: Path, copc_file: Path) -> Tuple[bool
             output_header = out.header
             output_crs = _parse_crs(output_header)
             output_projection = _projection_vlr_fingerprints(output_header)
+            output_geotiff_projection = _geotiff_projection_records(output_header)
     except Exception as e:
         return (False, f"could not validate CRS metadata: {e}")
 
+    if source_geotiff_projection and not all(
+        output_geotiff_projection.get(key) == value
+        for key, value in source_geotiff_projection.items()
+    ):
+        return (
+            False,
+            "source GeoTIFF projection VLRs missing or changed in COPC output",
+        )
     if _crs_equivalent(source_crs, output_crs):
         return (True, "CRS metadata preserved")
     if source_projection and all(
@@ -854,6 +956,11 @@ def _finalize_tile_to_copc(args: Tuple) -> Tuple[str, bool, str]:
 
         crs_source = _first_crs_source(parts)
         if crs_source is not None:
+            preserved_geotiff, geotiff_message = _append_source_geotiff_projection_evlrs(
+                crs_source, final_tile
+            )
+            if not preserved_geotiff:
+                return (label, False, geotiff_message)
             valid_crs, crs_message = _copc_preserves_source_crs(crs_source, final_tile)
             if not valid_crs and message == "untwine":
                 try:
@@ -865,6 +972,11 @@ def _finalize_tile_to_copc(args: Tuple) -> Tuple[str, bool, str]:
                 )
                 if not success:
                     return (label, False, f"{message}; after untwine CRS validation failed: {crs_message}")
+                preserved_geotiff, geotiff_message = _append_source_geotiff_projection_evlrs(
+                    crs_source, final_tile
+                )
+                if not preserved_geotiff:
+                    return (label, False, geotiff_message)
                 valid_crs, crs_message = _copc_preserves_source_crs(crs_source, final_tile)
             if not valid_crs:
                 return (label, False, f"COPC CRS validation failed: {crs_message}")
@@ -1000,6 +1112,7 @@ def _convert_laz_to_copc(input_laz: Path, output_copc: Path) -> bool:
                 capture_output=True, text=True, check=False,
             )
             if r.returncode == 0 and output_copc.exists() and output_copc.stat().st_size > 0:
+                _append_source_geotiff_projection_evlrs(input_laz, output_copc)
                 valid_crs, _ = _copc_preserves_source_crs(input_laz, output_copc)
                 if valid_crs:
                     return True
@@ -1011,6 +1124,12 @@ def _convert_laz_to_copc(input_laz: Path, output_copc: Path) -> bool:
             pass
 
     if not _convert_laz_to_copc_pdal(input_laz, output_copc):
+        return False
+    preserved_geotiff, message = _append_source_geotiff_projection_evlrs(
+        input_laz, output_copc
+    )
+    if not preserved_geotiff:
+        print(f"  Warning: COPC GeoTIFF projection preservation failed for {output_copc.name}: {message}")
         return False
     valid_crs, message = _copc_preserves_source_crs(input_laz, output_copc)
     if not valid_crs:
@@ -1095,9 +1214,15 @@ def create_tiles(
         if final_tile.exists() and final_tile.stat().st_size > 0:
             valid_existing_crs = True
             if crs_reference is not None:
-                valid_existing_crs, crs_message = _copc_preserves_source_crs(
+                preserved_geotiff, geotiff_message = _append_source_geotiff_projection_evlrs(
                     crs_reference, final_tile
                 )
+                if not preserved_geotiff:
+                    print(f"  Existing tile {final_tile.name} GeoTIFF preservation failed: {geotiff_message}")
+                    valid_existing_crs = False
+                valid_existing_crs, crs_message = _copc_preserves_source_crs(
+                    crs_reference, final_tile
+                ) if valid_existing_crs else (False, geotiff_message)
                 if not valid_existing_crs:
                     print(f"  Existing tile {final_tile.name} CRS validation failed: {crs_message}")
                     try:
@@ -1337,8 +1462,13 @@ def run_tiling_pipeline(
         out_copc = copc_single_dir / f"{laz_file.stem}.copc.laz"
         rebuild_copc = not out_copc.exists() or out_copc.stat().st_size == 0
         if not rebuild_copc:
+            preserved_geotiff, geotiff_message = _append_source_geotiff_projection_evlrs(
+                laz_file, out_copc
+            )
             valid_crs, crs_message = _copc_preserves_source_crs(laz_file, out_copc)
-            if not valid_crs:
+            if not preserved_geotiff or not valid_crs:
+                if not preserved_geotiff:
+                    print(f"  Existing COPC GeoTIFF preservation failed: {geotiff_message}")
                 print(f"  Existing COPC CRS validation failed: {crs_message}")
                 print("  Rebuilding COPC from source LAZ...")
                 try:
