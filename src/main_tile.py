@@ -115,6 +115,50 @@ def _crs_text(header) -> Optional[str]:
         return str(crs)
 
 
+def _crs_authority_string(header) -> Optional[str]:
+    """Return a compact CRS authority string such as EPSG:32632 when available."""
+    try:
+        crs = header.parse_crs()
+    except Exception:
+        return None
+    if crs is None:
+        return None
+
+    try:
+        authority = crs.to_authority()
+    except Exception:
+        authority = None
+    if authority and authority[0] and authority[1]:
+        return f"{authority[0].upper()}:{authority[1]}"
+
+    try:
+        epsg = crs.to_epsg()
+    except Exception:
+        epsg = None
+    if epsg:
+        return f"EPSG:{epsg}"
+    return None
+
+
+def _srs_assignment_from_file(path: Path) -> Optional[str]:
+    """Read an input header and return an Untwine --a_srs value when possible."""
+    import laspy
+
+    backend = _laspy_laz_backend()
+    try:
+        with laspy.open(str(path), laz_backend=backend) as src:
+            return _crs_authority_string(src.header)
+    except Exception:
+        return None
+
+
+def _first_srs_assignment(paths: List[Path]) -> Optional[str]:
+    crs_source = _first_crs_source(paths)
+    if crs_source is None:
+        return None
+    return _srs_assignment_from_file(crs_source)
+
+
 def _crs_metadata_present(header) -> bool:
     return bool(_projection_vlr_keys(header) or _crs_text(header))
 
@@ -895,9 +939,11 @@ def _finalize_tile_to_copc_untwine(
         input_args = []
         for p in parts:
             input_args.extend(["-i", str(p)])
+        srs_arg = _first_srs_assignment(parts)
+        srs_args = ["--a_srs", srs_arg] if srs_arg else []
 
         result = subprocess.run(
-            [untwine_cmd] + input_args + ["-o", str(final_tile)],
+            [untwine_cmd] + input_args + ["-o", str(final_tile)] + srs_args,
             capture_output=True, text=True, check=False,
         )
 
@@ -921,8 +967,10 @@ def _convert_laz_to_copc(input_laz: Path, output_copc: Path) -> bool:
     untwine_cmd = shutil.which("untwine")
     if untwine_cmd:
         try:
+            srs_arg = _srs_assignment_from_file(input_laz)
+            srs_args = ["--a_srs", srs_arg] if srs_arg else []
             r = subprocess.run(
-                [untwine_cmd, "-i", str(input_laz), "-o", str(output_copc)],
+                [untwine_cmd, "-i", str(input_laz), "-o", str(output_copc)] + srs_args,
                 capture_output=True, text=True, check=False,
             )
             if r.returncode == 0 and output_copc.exists() and output_copc.stat().st_size > 0:

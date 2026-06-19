@@ -13,7 +13,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.modules.setdefault("plot_tiles_and_copc", types.SimpleNamespace())
 sys.modules.setdefault("parameters", types.SimpleNamespace(TILE_PARAMS=types.SimpleNamespace()))
 
-from main_tile import _copc_preserves_source_crs  # noqa: E402
+from main_tile import _copc_preserves_source_crs, _crs_authority_string  # noqa: E402
+
+
+class _FakeCrs:
+    def __init__(self, authority=None, epsg=None):
+        self.authority = authority
+        self.epsg = epsg
+
+    def to_authority(self):
+        return self.authority
+
+    def to_epsg(self):
+        return self.epsg
+
+
+class _FakeHeader:
+    def __init__(self, crs):
+        self.crs = crs
+
+    def parse_crs(self):
+        return self.crs
 
 
 def _write_las(path: Path, projection_payload: bytes | None) -> None:
@@ -38,6 +58,16 @@ def _write_las(path: Path, projection_payload: bytes | None) -> None:
 
 
 class CopcCrsValidationTests(unittest.TestCase):
+    def test_crs_authority_string_prefers_authority_code(self):
+        header = _FakeHeader(_FakeCrs(authority=("EPSG", "32632"), epsg=32633))
+
+        self.assertEqual(_crs_authority_string(header), "EPSG:32632")
+
+    def test_crs_authority_string_falls_back_to_epsg_code(self):
+        header = _FakeHeader(_FakeCrs(authority=None, epsg=32632))
+
+        self.assertEqual(_crs_authority_string(header), "EPSG:32632")
+
     def test_accepts_matching_projection_vlr(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
