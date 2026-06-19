@@ -28,6 +28,7 @@ import json
 import math
 import numpy as np
 import laspy
+from laspy.vlrs.vlrlist import VLRList
 from pathlib import Path
 from typing import Dict, List, Tuple, Set, Optional
 from scipy.spatial import cKDTree
@@ -78,6 +79,67 @@ def extra_bytes_params_from_dimension_info(
         scales=getattr(dim_info, "scales", None),
         no_data=getattr(dim_info, "no_data", None),
     )
+
+
+def _is_stale_copc_vlr(vlr) -> bool:
+    """Return True for COPC index VLRs that must not be copied into non-COPC LAZ outputs."""
+    return getattr(vlr, "user_id", "") == "copc" and getattr(vlr, "record_id", None) in (1, 2)
+
+
+def _is_extra_bytes_vlr(vlr) -> bool:
+    """Return True for ExtraBytes metadata that laspy regenerates from added dimensions."""
+    return getattr(vlr, "user_id", "") == "LASF_Spec" and getattr(vlr, "record_id", None) == 4
+
+
+def copy_single_source_header(
+    source_header: laspy.LasHeader,
+    offsets: Optional[np.ndarray] = None,
+    scales: Optional[np.ndarray] = None,
+    preserve_extra_dimensions: bool = True,
+) -> laspy.LasHeader:
+    """Copy a source header for outputs that still represent exactly that source file."""
+    if preserve_extra_dimensions:
+        header = source_header.copy()
+    else:
+        fmt_id = getattr(source_header.point_format, "id", source_header.point_format)
+        if hasattr(fmt_id, "id"):
+            fmt_id = fmt_id.id
+        header = laspy.LasHeader(point_format=int(fmt_id), version=source_header.version)
+        for attr in (
+            "file_source_id",
+            "global_encoding",
+            "uuid",
+            "system_identifier",
+            "generating_software",
+            "creation_date",
+        ):
+            if hasattr(source_header, attr):
+                setattr(header, attr, getattr(source_header, attr))
+
+    header.offsets = offsets if offsets is not None else source_header.offsets
+    header.scales = scales if scales is not None else source_header.scales
+
+    # COPC hierarchy/index records describe a specific COPC container layout.
+    # Non-COPC LAZ outputs must regenerate their own layout metadata instead.
+    source_vlrs = header.vlrs if preserve_extra_dimensions else source_header.vlrs
+    header.vlrs = VLRList([
+        vlr for vlr in source_vlrs
+        if not _is_stale_copc_vlr(vlr)
+        and (preserve_extra_dimensions or not _is_extra_bytes_vlr(vlr))
+    ])
+    source_evlrs = (
+        getattr(header, "evlrs", None)
+        if preserve_extra_dimensions
+        else getattr(source_header, "evlrs", None)
+    )
+    if source_evlrs is not None:
+        header.evlrs = VLRList([
+            vlr for vlr in source_evlrs
+            if not _is_stale_copc_vlr(vlr)
+            and (preserve_extra_dimensions or not _is_extra_bytes_vlr(vlr))
+        ])
+
+    return header
 
 
 def _next_available_suffix(base: str, used: set) -> str:
@@ -1620,12 +1682,10 @@ def _process_single_tile(args):
         new_instances = local_merged_instances[indices]
         new_extras = {name: arr[indices] for name, arr in local_merged_extras.items()}
 
-        new_header = laspy.LasHeader(
-            point_format=orig_las.header.point_format,
-            version=orig_las.header.version
+        new_header = copy_single_source_header(
+            orig_las.header,
+            preserve_extra_dimensions=False,
         )
-        new_header.offsets = orig_las.header.offsets
-        new_header.scales = orig_las.header.scales
         
         output_las = laspy.LasData(new_header)
         
@@ -1904,22 +1964,19 @@ def _process_single_original_input_file(args):
             else:
                 branded_names[dim_name] = f"3DT_{dim_name}"
 
-        # Use original file's point format so output preserves original structure
-        fmt_id = getattr(input_las.header.point_format, "id", input_las.header.point_format)
-        if hasattr(fmt_id, "id"):
-            fmt_id = fmt_id.id
-        new_header = laspy.LasHeader(
-            point_format=int(fmt_id),
-            version=input_las.header.version
+        # Use the original file's header metadata while re-adding extra dims
+        # explicitly, so name collisions can preserve both source and 3DT dims.
+        new_header = copy_single_source_header(
+            input_las.header,
+            preserve_extra_dimensions=False,
         )
-        new_header.offsets = input_las.header.offsets
-        new_header.scales = input_las.header.scales
 
         output_las = laspy.LasData(new_header)
         output_standard_dim_names = set(output_las.point_format.dimension_names)
+        output_extra_dim_names = {dim.name for dim in output_las.point_format.extra_dimensions}
 
         extra_dims_to_add = []
-        added_extra_names = set(output_standard_dim_names)  # start with standard names to avoid duplicates
+        added_extra_names = output_standard_dim_names | output_extra_dim_names
         # Original extra dimensions — keep as-is (skip if name clashes with standard dims)
         for dim in input_las.point_format.extra_dimensions:
             if dim.name not in added_extra_names:
@@ -1934,7 +1991,13 @@ def _process_single_original_input_file(args):
                 added_extra_names.add(dim_name)
         # 3DTrees branded dimensions from merged file
         for dim_name, values in filtered_extras.items():
-            out_name = branded_names[dim_name]
+            desired_name = branded_names[dim_name]
+            out_name = (
+                _next_available_suffix(desired_name, added_extra_names)
+                if desired_name in added_extra_names
+                else desired_name
+            )
+            branded_names[dim_name] = out_name
             if out_name not in added_extra_names:
                 if merged_extra_dim_params and dim_name in merged_extra_dim_params:
                     params = merged_extra_dim_params[dim_name]

@@ -397,7 +397,7 @@ def filter_source_files_for_tile(
 
 
 def _make_tile_header(header_snapshot, offsets=None, scales=None):
-    """Create a LasHeader from a source header, copying VLRs and extra dimensions.
+    """Create a LasHeader from a source header, preserving source metadata.
 
     Args:
         header_snapshot: Source laspy header to copy from.
@@ -408,25 +408,21 @@ def _make_tile_header(header_snapshot, offsets=None, scales=None):
         A new laspy.LasHeader ready for writing.
     """
     import laspy
+    from laspy.vlrs.vlrlist import VLRList
 
-    hdr = laspy.LasHeader(
-        point_format=header_snapshot.point_format,
-        version=header_snapshot.version,
-    )
+    hdr = header_snapshot.copy()
+    hdr.point_count = 0
     hdr.offsets = offsets if offsets is not None else header_snapshot.offsets
     hdr.scales = scales if scales is not None else header_snapshot.scales
 
-    # Copy non-COPC VLRs, avoiding duplicates
-    existing_vlr_keys = {
-        (getattr(v, "user_id", ""), v.record_id) for v in hdr.vlrs
-    }
-    for vlr in header_snapshot.vlrs:
-        if vlr.record_id in (1, 2) and getattr(vlr, "user_id", "") == "copc":
-            continue
-        vlr_key = (getattr(vlr, "user_id", ""), vlr.record_id)
-        if vlr_key not in existing_vlr_keys:
-            hdr.vlrs.append(vlr)
-            existing_vlr_keys.add(vlr_key)
+    # COPC hierarchy/index records describe a specific COPC container layout.
+    # Tile-part LAZ files and regenerated COPC outputs must not inherit stale ones.
+    def is_stale_copc_vlr(vlr) -> bool:
+        return getattr(vlr, "user_id", "") == "copc" and getattr(vlr, "record_id", None) in (1, 2)
+
+    hdr.vlrs = VLRList([vlr for vlr in hdr.vlrs if not is_stale_copc_vlr(vlr)])
+    if getattr(hdr, "evlrs", None) is not None:
+        hdr.evlrs = VLRList([vlr for vlr in hdr.evlrs if not is_stale_copc_vlr(vlr)])
 
     # Copy extra dimensions
     try:

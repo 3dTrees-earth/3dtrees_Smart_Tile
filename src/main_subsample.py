@@ -107,6 +107,7 @@ def subsample_tile_chunk(args: Tuple[Path, str, float, Path, int, int, bool]) ->
             "type": "writers.las",
             "filename": str(chunk_file),
             "compression": True,
+            "forward": "all",
         }
         if dimension_reduction:
             writer_opts["minor_version"] = 2
@@ -301,6 +302,7 @@ def subsample_single_file(args: Tuple[Path, Path, float, Path, int, bool]) -> Tu
             "type": "writers.las",
             "filename": str(output_file),
             "compression": True,
+            "forward": "all",
         }
         if dimension_reduction:
             merge_writer["minor_version"] = 2
@@ -396,6 +398,7 @@ def subsample_simple(
             "type": "writers.las",
             "filename": str(output_file),
             "compression": True,
+            "forward": "all",
         }
         if dimension_reduction:
             writer_opts["minor_version"] = 2
@@ -813,4 +816,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

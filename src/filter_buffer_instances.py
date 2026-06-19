@@ -15,6 +15,7 @@ Usage:
 import argparse
 import numpy as np
 import laspy
+from laspy.vlrs.vlrlist import VLRList
 from pathlib import Path
 from typing import Dict, List, Tuple, Set, Optional
 
@@ -43,6 +44,20 @@ def get_tile_neighbors(tile_name: str, all_tile_names: List[str]) -> Dict[str, b
         'north': format_tile_name(col, row+1) in all_tile_names,
         'south': row > 0 and format_tile_name(col, row-1) in all_tile_names,
     }
+
+
+def _copy_filtered_output_header(source_header: laspy.LasHeader) -> laspy.LasHeader:
+    """Copy source metadata for a filtered LAZ output."""
+    header = source_header.copy()
+    header.point_count = 0
+
+    def is_stale_copc_vlr(vlr) -> bool:
+        return getattr(vlr, "user_id", "") == "copc" and getattr(vlr, "record_id", None) in (1, 2)
+
+    header.vlrs = VLRList([vlr for vlr in header.vlrs if not is_stale_copc_vlr(vlr)])
+    if getattr(header, "evlrs", None) is not None:
+        header.evlrs = VLRList([vlr for vlr in header.evlrs if not is_stale_copc_vlr(vlr)])
+    return header
 
 
 def compute_tile_bounds(points: np.ndarray) -> Tuple[float, float, float, float]:
@@ -195,15 +210,8 @@ def process_tile(
     # Create new LAS file with filtered points
     output_file.parent.mkdir(parents=True, exist_ok=True)
     
-    # Create new header (copy from original)
-    header = laspy.LasHeader(point_format=las.header.point_format.id, version=las.header.version)
-    header.offsets = las.header.offsets
-    header.scales = las.header.scales
-    
-    # Copy header metadata
-    for prop in ['system_identifier', 'generating_software', 'file_creation']:
-        if hasattr(las.header, prop):
-            setattr(header, prop, getattr(las.header, prop))
+    # Copy source metadata while letting laspy regenerate counts/bounds.
+    header = _copy_filtered_output_header(las.header)
     
     # Create new LAS data
     output_las = laspy.LasData(header)
@@ -318,4 +326,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
