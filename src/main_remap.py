@@ -28,7 +28,9 @@ from scipy.spatial import cKDTree
 from merge_tiles import (
     build_neighbor_graph_from_bounds_json,
     _match_tiles_to_json_bounds,
+    cast_instances_for_output,
     extra_bytes_params_from_dimension_info,
+    instance_extra_bytes_params,
 )  
 
 
@@ -194,6 +196,8 @@ def remap_single_tile(
     output_file: Path,
     threedtrees_dims: Optional[Set[str]] = None,
     threedtrees_suffix: str = "SAT",
+    instance_dimension: str = "PredInstance",
+    output_scales: Optional[Tuple[float, float, float]] = None,
 ) -> Tuple[str, bool, str, int]:
     """
     Remap predictions from segmented file to target resolution file.
@@ -239,6 +243,8 @@ def remap_single_tile(
             target_las.z
         )).T
         print(f"    Target file: {len(target_points):,} points")
+        if output_scales is not None:
+            target_las.header.scales = np.asarray(output_scales, dtype=np.float64)
         
         # Create KDTree from segmented points with progress indication
         print(f"    Building KDTree from {len(segmented_points):,} points...", end="", flush=True)
@@ -257,14 +263,16 @@ def remap_single_tile(
             print(f"    Warning: No extra dimensions found in segmented file")
 
         # Resolve names and collect params for batch add
-        dims_to_add = []  # (extra_params, source_dim_name)
+        dims_to_add = []  # (extra_params, source_dim_name, cast_as_instance)
         for dim_info in source_extra_dims:
             dim_name = dim_info.name
+            cast_as_instance = dim_name == instance_dimension
             # If branding is active, only transfer 3DTrees dims with branded names
             if threedtrees_dims is not None:
                 if dim_name not in threedtrees_dims:
                     continue
                 out_name = f"3DT_{dim_name}_{threedtrees_suffix}" if threedtrees_suffix else f"3DT_{dim_name}"
+                cast_as_instance = False
             else:
                 # No branding — use collision-safe naming
                 out_name = dim_name
@@ -273,13 +281,21 @@ def remap_single_tile(
                     while f"{dim_name}_{suffix}" in target_extra_dim_names:
                         suffix += 1
                     out_name = f"{dim_name}_{suffix}"
-            dims_to_add.append((extra_bytes_params_from_dimension_info(dim_info, name=out_name), dim_name))
+            extra_params = (
+                instance_extra_bytes_params(out_name, getattr(segmented_las, dim_name)[indices])
+                if cast_as_instance
+                else extra_bytes_params_from_dimension_info(dim_info, name=out_name)
+            )
+            dims_to_add.append((extra_params, dim_name, cast_as_instance))
             target_extra_dim_names.add(out_name)
         
         if dims_to_add:
-            target_las.add_extra_dims([params for params, _ in dims_to_add])
-            for params, src_name in dims_to_add:
-                setattr(target_las, params.name, getattr(segmented_las, src_name)[indices])
+            target_las.add_extra_dims([params for params, _, _ in dims_to_add])
+            for params, src_name, cast_as_instance in dims_to_add:
+                values = getattr(segmented_las, src_name)[indices]
+                if cast_as_instance:
+                    values = cast_instances_for_output(values, src_name)
+                setattr(target_las, params.name, values)
         
         # Create output directory if needed
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -551,8 +567,14 @@ def find_matching_files(
 
 def _remap_worker_item(item):
     """Unpack work item and call remap_single_tile; must be at module level for ProcessPoolExecutor pickle."""
-    src, tgt, out, _tid = item
-    return remap_single_tile(src, tgt, out)
+    src, tgt, out, _tid, instance_dimension, output_scales = item
+    return remap_single_tile(
+        src,
+        tgt,
+        out,
+        instance_dimension=instance_dimension,
+        output_scales=output_scales,
+    )
 
 
 def remap_all_tiles(
@@ -563,6 +585,8 @@ def remap_all_tiles(
     verbose: bool = False,
     tile_bounds_json: Optional[Path] = None,
     num_workers: int = 4,
+    instance_dimension: str = "PredInstance",
+    output_scales: Optional[Tuple[float, float, float]] = None,
 ) -> Path:
     """
     Remap predictions from source files to target files for all tiles.
@@ -635,7 +659,7 @@ def remap_all_tiles(
         if output_file.exists() and output_file.stat().st_size > 0:
             successful += 1
             continue
-        work_items.append((source_file, target_file, output_file, tile_id))
+        work_items.append((source_file, target_file, output_file, tile_id, instance_dimension, output_scales))
 
     if successful > 0:
         print(f"  Skipping {successful} already processed tiles")
@@ -730,6 +754,13 @@ Examples:
         default=4,
         help="Number of parallel processes (default: 4)"
     )
+    parser.add_argument(
+        "--instance_dimension",
+        "--instance-dimension",
+        type=str,
+        default="PredInstance",
+        help="Name of the instance ID dimension to persist as uint16, or uint32 above 63,535 (default: PredInstance)"
+    )
 
     args = parser.parse_args()
 
@@ -743,6 +774,7 @@ Examples:
             verbose=args.verbose,
             tile_bounds_json=args.tile_bounds_json,
             num_workers=args.workers,
+            instance_dimension=args.instance_dimension,
         )
         print(f"\nRemapped files ready: {output_folder}")
     except Exception as e:

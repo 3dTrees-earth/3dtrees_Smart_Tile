@@ -27,7 +27,12 @@ from typing import List, Optional
 
 # Import parameters and core merge function
 from parameters import MERGE_PARAMS
-from merge_tiles import add_original_dimensions_to_merged, merge_tiles as core_merge_tiles
+from merge_tiles import (
+    add_original_dimensions_to_merged,
+    MERGED_OUTPUT_SCALES,
+    merge_tiles as core_merge_tiles,
+    validate_merged_output_contract,
+)
 
 
 def run_merge(
@@ -154,7 +159,9 @@ def run_merge(
         _, success, message, point_count = remap_single_tile(
             segmented_file,
             target_file,
-            remapped_1cm_file
+            remapped_1cm_file,
+            instance_dimension=instance_dimension,
+            output_scales=tuple(MERGED_OUTPUT_SCALES),
         )
 
         if not success:
@@ -175,6 +182,8 @@ def run_merge(
                 final_output_file,
                 threedtrees_dims=set(threedtrees_dims) if threedtrees_dims else None,
                 threedtrees_suffix=threedtrees_suffix,
+                instance_dimension=instance_dimension,
+                output_scales=None,
             )
 
             if not success:
@@ -182,17 +191,10 @@ def run_merge(
 
             print(f"  ✓ Remapped {point_count:,} points to original resolution")
 
-            # Clean up intermediate file
-            remapped_1cm_file.unlink()
-            print(f"  Removed intermediate file: {remapped_1cm_file.name}")
-
         # Step 3: Write merged file (remapped file renamed to output_merged)
-        # Use final_output_file if we remapped to original, else the 1cm remapped file
-        merged_source = (
-            output_tiles_dir / f"{original_input_files[0].stem}_segmented.laz"
-            if original_input_dir
-            else remapped_1cm_file
-        )
+        # Always use the target-resolution remap as merged source. If original
+        # inputs are present, Step 2 writes a separate original-resolution output.
+        merged_source = remapped_1cm_file
         if not skip_merged_file and output_merged is not None:
             output_merged = Path(output_merged)
             output_merged.parent.mkdir(parents=True, exist_ok=True)
@@ -215,6 +217,8 @@ def run_merge(
                 print(f"  ✓ Merged file has same dimensions as original (added original-file dimensions)")
             elif original_input_dir and not transfer_original_dims_to_merged:
                 print(f"  Skipping transfer of original dimensions to merged (disabled).")
+
+            validate_merged_output_contract(output_merged, instance_dimension)
 
         print("\n" + "=" * 60)
         print("Single-file optimization complete")

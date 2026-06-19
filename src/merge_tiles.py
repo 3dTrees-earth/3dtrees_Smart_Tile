@@ -35,6 +35,15 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+# Public output contract for SmartTile prediction instance IDs and merged
+# resolution. Internal merge steps still use signed arrays while -1 marks
+# filtered points, but persisted prediction IDs must be non-negative unsigned
+# integers. Keep uint16 unless an instance ID exceeds this threshold.
+INSTANCE_UINT32_THRESHOLD = 63_535
+INSTANCE_DEFAULT_OUTPUT_DTYPE = np.uint16
+INSTANCE_LARGE_OUTPUT_DTYPE = np.uint32
+MERGED_OUTPUT_SCALES = np.array([0.01, 0.01, 0.01], dtype=np.float64)
+
 # Force unbuffered output for real-time progress feedback
 # (especially important when running in Docker/containers)
 sys.stdout.reconfigure(line_buffering=True)
@@ -89,6 +98,71 @@ def _suffixes_for_collision(base: str, used: set) -> tuple[str, str]:
     out_2 = cand_2 if cand_2 not in used else _next_available_suffix(base, used)
     used.add(out_2)
     return (out_1, out_2)
+
+
+def instance_output_dtype(instances: Optional[np.ndarray] = None) -> np.dtype:
+    """Return uint32 only when any instance ID exceeds the configured threshold."""
+    if instances is None:
+        return np.dtype(INSTANCE_DEFAULT_OUTPUT_DTYPE)
+
+    arr = np.asarray(instances)
+    if arr.size == 0:
+        return np.dtype(INSTANCE_DEFAULT_OUTPUT_DTYPE)
+    if np.any(arr < 0):
+        raise ValueError("Cannot write negative instance IDs to unsigned output dimension")
+
+    max_instance = int(np.max(arr))
+    if max_instance > INSTANCE_UINT32_THRESHOLD:
+        return np.dtype(INSTANCE_LARGE_OUTPUT_DTYPE)
+    return np.dtype(INSTANCE_DEFAULT_OUTPUT_DTYPE)
+
+
+def instance_extra_bytes_params(name: str, instances: Optional[np.ndarray] = None) -> laspy.ExtraBytesParams:
+    """Return the persisted SmartTile instance dimension schema."""
+    return laspy.ExtraBytesParams(name=name, type=instance_output_dtype(instances))
+
+
+def cast_instances_for_output(instances: np.ndarray, name: str = "instance IDs") -> np.ndarray:
+    """Cast non-negative instance IDs to the persisted unsigned output dtype."""
+    arr = np.asarray(instances)
+    if arr.size and np.any(arr < 0):
+        raise ValueError(f"Cannot write negative {name} to unsigned output dimension")
+    return arr.astype(instance_output_dtype(arr), copy=False)
+
+
+def validate_merged_output_contract(
+    merged_laz: Path,
+    instance_dimension: str = "PredInstance",
+) -> None:
+    """Verify persisted merged LAZ follows the SmartTile output contract."""
+    with laspy.open(str(merged_laz), laz_backend=laspy.LazBackend.LazrsParallel) as f:
+        scales = np.asarray(f.header.scales, dtype=np.float64)
+        if not np.allclose(scales, MERGED_OUTPUT_SCALES):
+            raise ValueError(
+                f"{merged_laz} has XYZ scales {scales.tolist()}, expected "
+                f"{MERGED_OUTPUT_SCALES.tolist()} for 1cm merged output"
+            )
+
+        extra_dims = {dim.name: dim for dim in f.header.point_format.extra_dimensions}
+        if instance_dimension not in extra_dims:
+            raise ValueError(f"{merged_laz} is missing required {instance_dimension} extra dimension")
+        dtype = np.dtype(extra_dims[instance_dimension].dtype)
+        if dtype not in {
+            np.dtype(INSTANCE_DEFAULT_OUTPUT_DTYPE),
+            np.dtype(INSTANCE_LARGE_OUTPUT_DTYPE),
+        }:
+            raise ValueError(
+                f"{merged_laz} has {instance_dimension} dtype {dtype}, expected uint16 or uint32"
+            )
+
+        point_data = f.read()
+        instances = np.asarray(getattr(point_data, instance_dimension))
+        expected_dtype = instance_output_dtype(instances)
+        if dtype != expected_dtype:
+            raise ValueError(
+                f"{merged_laz} has {instance_dimension} dtype {dtype}, expected "
+                f"{expected_dtype} for max instance ID {int(np.max(instances)) if instances.size else 0}"
+            )
 
 
 # =============================================================================
@@ -1582,7 +1656,7 @@ def _process_single_tile(args):
         
         inst_out_name = merged_rename.get(instance_dimension, instance_dimension)
         if inst_out_name not in output_extra_dim_names:
-            extra_dims_to_add.append(laspy.ExtraBytesParams(name=inst_out_name, type=np.int32))
+            extra_dims_to_add.append(instance_extra_bytes_params(inst_out_name, new_instances))
             output_extra_dim_names.add(inst_out_name)
         
         for dim_name, values in new_extras.items():
@@ -1615,7 +1689,11 @@ def _process_single_tile(args):
                     pass
         
         # Write merged dimensions (under original name or renamed to base_2 when collision)
-        setattr(output_las, merged_rename.get(instance_dimension, instance_dimension), new_instances)
+        setattr(
+            output_las,
+            merged_rename.get(instance_dimension, instance_dimension),
+            cast_instances_for_output(new_instances, instance_dimension),
+        )
         for dim_name, values in new_extras.items():
             setattr(output_las, merged_rename.get(dim_name, dim_name), values)
 
@@ -2418,6 +2496,7 @@ def merge_tiles(
         print(f"\n{'=' * 60}")
         print(f"Merged file already exists: {output_merged}")
         print(f"{'=' * 60}")
+        validate_merged_output_contract(output_merged, instance_dimension)
         print("  Loading merged file and proceeding to retiling stage...")
         
         merged_points, all_merged_dims, merged_extra_dim_params = load_merged_file(output_merged)
@@ -2609,19 +2688,19 @@ def merge_tiles(
         filtered_output_path = filtered_tiles_dir / f"{tile.name}.laz"
         header = laspy.LasHeader(point_format=6, version="1.4")
         header.offsets = [filtered_points[:, 0].min(), filtered_points[:, 1].min(), filtered_points[:, 2].min()]
-        header.scales = [0.01, 0.01, 0.01]
+        header.scales = MERGED_OUTPUT_SCALES
         
         output_las = laspy.LasData(header)
         output_las.x = filtered_points[:, 0]
         output_las.y = filtered_points[:, 1]
         output_las.z = filtered_points[:, 2]
         
-        extra_dims_params = [laspy.ExtraBytesParams(name=instance_dimension, type=np.int32)]
+        extra_dims_params = [instance_extra_bytes_params(instance_dimension, filtered_instances)]
         for dim_name, dim_arr in filtered_extra_dims.items():
             extra_dims_params.append(laspy.ExtraBytesParams(name=dim_name, type=dim_arr.dtype))
         output_las.add_extra_dims(extra_dims_params)
         
-        setattr(output_las, instance_dimension, filtered_instances)
+        setattr(output_las, instance_dimension, cast_instances_for_output(filtered_instances, instance_dimension))
         for dim_name, dim_arr in filtered_extra_dims.items():
             setattr(output_las, dim_name, dim_arr)
         
@@ -3624,7 +3703,7 @@ def merge_tiles(
 
         header = laspy.LasHeader(point_format=6, version="1.4")
         header.offsets = np.min(merged_points, axis=0)
-        header.scales = np.array([0.001, 0.001, 0.001])
+        header.scales = MERGED_OUTPUT_SCALES
 
         output_las = laspy.LasData(header)
         output_las.x = merged_points[:, 0]
@@ -3632,12 +3711,12 @@ def merge_tiles(
         output_las.z = merged_points[:, 2]
 
         # Add instance dimension and passenger extra dimensions from the merge.
-        extra_dims_params = [laspy.ExtraBytesParams(name=instance_dimension, type=np.int32)]
+        extra_dims_params = [instance_extra_bytes_params(instance_dimension, merged_instances)]
         for dim_name, dim_arr in merged_extra_dims.items():
             extra_dims_params.append(laspy.ExtraBytesParams(name=dim_name, type=dim_arr.dtype))
         output_las.add_extra_dims(extra_dims_params)
 
-        setattr(output_las, instance_dimension, merged_instances)
+        setattr(output_las, instance_dimension, cast_instances_for_output(merged_instances, instance_dimension))
         for dim_name, dim_arr in merged_extra_dims.items():
             setattr(output_las, dim_name, dim_arr)
 
@@ -3672,6 +3751,8 @@ def merge_tiles(
         else:
             shutil.copy2(str(merged_init), str(output_merged))
             print(f"  Saved merged output: {output_merged}")
+
+        validate_merged_output_contract(output_merged, instance_dimension)
 
         try:
             merged_init.unlink()

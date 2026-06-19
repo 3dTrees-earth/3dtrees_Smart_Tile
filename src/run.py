@@ -192,6 +192,7 @@ def run_merge_task(params: Parameters):
     try:
         from main_remap import remap_all_tiles
         from main_merge import run_merge
+        from merge_tiles import MERGED_OUTPUT_SCALES
     except ImportError as e:
         print(f"Error: Could not import required modules: {e}")
         print("Make sure main_remap.py and main_merge.py exist.")
@@ -281,6 +282,8 @@ def run_merge_task(params: Parameters):
                 tile_bounds_json=remap_tile_bounds_json,
                 verbose=bool(params.verbose),
                 num_workers=workers,
+                instance_dimension=params.instance_dimension,
+                output_scales=tuple(MERGED_OUTPUT_SCALES),
             )
 
         # Step 2: Merge tiles
