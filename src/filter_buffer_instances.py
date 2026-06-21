@@ -19,6 +19,8 @@ from laspy.vlrs.vlrlist import VLRList
 from pathlib import Path
 from typing import Dict, List, Tuple, Set, Optional
 
+from merge_tiles import validate_prediction_instance_labels
+
 
 def get_tile_neighbors(tile_name: str, all_tile_names: List[str]) -> Dict[str, bool]:
     """
@@ -166,8 +168,10 @@ def process_tile(
     
     if hasattr(las, instance_dimension):
         instances = np.array(getattr(las, instance_dimension))
+        validate_prediction_instance_labels(instances, instance_dimension, input_file)
     elif hasattr(las, 'treeID'):
         instances = np.array(las.treeID)
+        validate_prediction_instance_labels(instances, "treeID", input_file)
     else:
         print(f"  Warning: No instance attribute ({instance_dimension}/treeID) found in {input_file}")
         output_file.parent.mkdir(parents=True, exist_ok=True)

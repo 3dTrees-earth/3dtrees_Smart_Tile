@@ -31,6 +31,7 @@ from merge_tiles import (
     cast_instances_for_output,
     extra_bytes_params_from_dimension_info,
     instance_extra_bytes_params,
+    validate_prediction_instance_labels,
 )  
 
 
@@ -230,6 +231,12 @@ def remap_single_tile(
             segmented_las.z
         )).T
         print(f"    Segmented file: {len(segmented_points):,} points")
+        if hasattr(segmented_las, instance_dimension):
+            validate_prediction_instance_labels(
+                getattr(segmented_las, instance_dimension),
+                instance_dimension,
+                segmented_file,
+            )
         
         # Load target resolution point cloud
         print(f"    Loading target file...")

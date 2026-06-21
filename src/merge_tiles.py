@@ -37,9 +37,9 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 # Public output contract for SmartTile prediction instance IDs and merged
-# resolution. Internal merge steps still use signed arrays while -1 marks
-# filtered points, but persisted prediction IDs must be non-negative unsigned
-# integers. Keep uint16 unless an instance ID exceeds this threshold.
+# resolution. Input and persisted prediction IDs must be non-negative unsigned
+# integers. Internal merge steps still use signed arrays where -1 marks
+# transient filtered points after input labels have already been validated.
 INSTANCE_UINT32_THRESHOLD = 63_535
 INSTANCE_DEFAULT_OUTPUT_DTYPE = np.uint16
 INSTANCE_LARGE_OUTPUT_DTYPE = np.uint32
@@ -142,6 +142,58 @@ def copy_single_source_header(
     return header
 
 
+def _projection_metadata_vlrs(vlrs) -> VLRList:
+    """Keep CRS/projection records that remain true across a CRS-consistent run."""
+    return VLRList([
+        vlr for vlr in (vlrs or [])
+        if getattr(vlr, "user_id", "") == "LASF_Projection"
+    ])
+
+
+def _point_cloud_files(directory: Optional[Path]) -> List[Path]:
+    """Return LAZ/LAS files, excluding COPC derivatives when original uploads are expected."""
+    if directory is None:
+        return []
+    files = sorted(directory.glob("*.laz")) + sorted(directory.glob("*.las"))
+    return [f for f in files if not f.name.endswith(".copc.laz")]
+
+
+def merged_product_header(
+    merged_points: np.ndarray,
+    original_input_dir: Optional[Path],
+    original_tiles_dir: Path,
+) -> laspy.LasHeader:
+    """Build the user-facing merged product header from original source metadata when available."""
+    offsets = np.min(merged_points, axis=0)
+    source_files = _point_cloud_files(original_input_dir) or _point_cloud_files(original_tiles_dir)
+
+    if len(source_files) == 1:
+        with laspy.open(str(source_files[0]), laz_backend=laspy.LazBackend.LazrsParallel) as source:
+            header = copy_single_source_header(
+                source.header,
+                offsets=offsets,
+                scales=MERGED_OUTPUT_SCALES,
+                preserve_extra_dimensions=False,
+            )
+        header.point_count = 0
+        return header
+
+    header = laspy.LasHeader(point_format=6, version="1.4")
+    header.offsets = offsets
+    header.scales = MERGED_OUTPUT_SCALES
+
+    if source_files:
+        with laspy.open(str(source_files[0]), laz_backend=laspy.LazBackend.LazrsParallel) as source:
+            source_header = source.header
+            header.global_encoding = source_header.global_encoding
+            header.vlrs = _projection_metadata_vlrs(source_header.vlrs)
+            source_evlrs = getattr(source_header, "evlrs", None)
+            if source_evlrs is not None:
+                header.evlrs = _projection_metadata_vlrs(source_evlrs)
+
+    return header
+
+
 def _next_available_suffix(base: str, used: set) -> str:
     """Return base_1, base_2, ... first not in used. Used to avoid losing dimensions on name collision."""
     for i in range(1, 10000):
@@ -162,6 +214,26 @@ def _suffixes_for_collision(base: str, used: set) -> tuple[str, str]:
     return (out_1, out_2)
 
 
+def validate_prediction_instance_labels(
+    instances: np.ndarray,
+    name: str = "PredInstance",
+    source: Optional[Path | str] = None,
+) -> None:
+    """Fail fast when SmartTile receives invalid negative prediction labels."""
+    arr = np.asarray(instances)
+    if arr.size == 0 or not np.any(arr < 0):
+        return
+
+    negative_count = int(np.count_nonzero(arr < 0))
+    min_value = int(np.min(arr))
+    source_prefix = f"{source} " if source is not None else ""
+    raise ValueError(
+        f"{source_prefix}contains {negative_count} negative {name} values "
+        f"(minimum {min_value}). SmartTile expects {name}=0 for background/no tree "
+        "and positive values for tree instances."
+    )
+
+
 def instance_output_dtype(instances: Optional[np.ndarray] = None) -> np.dtype:
     """Return uint32 only when any instance ID exceeds the configured threshold."""
     if instances is None:
@@ -170,8 +242,7 @@ def instance_output_dtype(instances: Optional[np.ndarray] = None) -> np.dtype:
     arr = np.asarray(instances)
     if arr.size == 0:
         return np.dtype(INSTANCE_DEFAULT_OUTPUT_DTYPE)
-    if np.any(arr < 0):
-        raise ValueError("Cannot write negative instance IDs to unsigned output dimension")
+    validate_prediction_instance_labels(arr, "instance IDs")
 
     max_instance = int(np.max(arr))
     if max_instance > INSTANCE_UINT32_THRESHOLD:
@@ -187,8 +258,7 @@ def instance_extra_bytes_params(name: str, instances: Optional[np.ndarray] = Non
 def cast_instances_for_output(instances: np.ndarray, name: str = "instance IDs") -> np.ndarray:
     """Cast non-negative instance IDs to the persisted unsigned output dtype."""
     arr = np.asarray(instances)
-    if arr.size and np.any(arr < 0):
-        raise ValueError(f"Cannot write negative {name} to unsigned output dimension")
+    validate_prediction_instance_labels(arr, name)
     return arr.astype(instance_output_dtype(arr), copy=False)
 
 
@@ -888,6 +958,10 @@ def load_tile(
 
     if not has_instance_dim and not has_tree_id:
         print(f"  Warning: No instance attribute ({instance_dimension}/treeID) found in {filepath}")
+    elif has_instance_dim:
+        validate_prediction_instance_labels(instances, instance_dimension, filepath)
+    else:
+        validate_prediction_instance_labels(instances, "treeID", filepath)
 
     boundary = compute_tile_bounds(points)
 
@@ -3764,9 +3838,11 @@ def merge_tiles(
         # Write initial merged to a temp path so we can either enrich it or use as final
         merged_init = output_merged.parent / (output_merged.stem + "_init.laz")
 
-        header = laspy.LasHeader(point_format=6, version="1.4")
-        header.offsets = np.min(merged_points, axis=0)
-        header.scales = MERGED_OUTPUT_SCALES
+        header = merged_product_header(
+            merged_points,
+            original_input_dir,
+            original_tiles_dir,
+        )
 
         output_las = laspy.LasData(header)
         output_las.x = merged_points[:, 0]
