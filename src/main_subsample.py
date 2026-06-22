@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -49,6 +50,38 @@ def get_cpu_count() -> int:
         return 4
 
 
+def _parse_bounds_metadata(metadata) -> Optional[Tuple[float, float, float, float]]:
+    """Extract finite XY bounds from PDAL metadata."""
+    if not isinstance(metadata, dict):
+        return None
+
+    keys = ("minx", "maxx", "miny", "maxy")
+    if all(key in metadata for key in keys):
+        try:
+            minx, maxx, miny, maxy = (float(metadata[key]) for key in keys)
+        except (TypeError, ValueError):
+            return None
+        if (
+            all(math.isfinite(value) for value in (minx, maxx, miny, maxy))
+            and maxx >= minx
+            and maxy >= miny
+        ):
+            return (minx, maxx, miny, maxy)
+        return None
+
+    for value in metadata.values():
+        if isinstance(value, dict):
+            bounds = _parse_bounds_metadata(value)
+            if bounds is not None:
+                return bounds
+        elif isinstance(value, list):
+            for item in value:
+                bounds = _parse_bounds_metadata(item)
+                if bounds is not None:
+                    return bounds
+    return None
+
+
 def get_file_bounds(filepath: Path) -> Optional[Tuple[float, float, float, float]]:
     """
     Get spatial bounds of a point cloud file using pdal info.
@@ -64,14 +97,9 @@ def get_file_bounds(filepath: Path) -> Optional[Tuple[float, float, float, float
             text=True,
             check=True
         )
-        
-        import re
-        minx = float(re.search(r'"minx":\s*([\d.-]+)', result.stdout).group(1))
-        maxx = float(re.search(r'"maxx":\s*([\d.-]+)', result.stdout).group(1))
-        miny = float(re.search(r'"miny":\s*([\d.-]+)', result.stdout).group(1))
-        maxy = float(re.search(r'"maxy":\s*([\d.-]+)', result.stdout).group(1))
-        
-        return (minx, maxx, miny, maxy)
+
+        payload = json.loads(result.stdout)
+        return _parse_bounds_metadata(payload.get("metadata", payload))
     except Exception:
         return None
 
