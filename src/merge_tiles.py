@@ -151,11 +151,14 @@ def _projection_metadata_vlrs(vlrs) -> VLRList:
 
 
 def _point_cloud_files(directory: Optional[Path]) -> List[Path]:
-    """Return LAZ/LAS files, excluding COPC derivatives when original uploads are expected."""
+    """Return original LAZ/LAS files, accepting COPCs when they are the only originals present."""
     if directory is None:
         return []
     files = sorted(directory.glob("*.laz")) + sorted(directory.glob("*.las"))
-    return [f for f in files if not f.name.endswith(".copc.laz")]
+    raw_files = [f for f in files if not f.name.lower().endswith(".copc.laz")]
+    if raw_files:
+        return raw_files
+    return [f for f in files if f.name.lower().endswith(".copc.laz")]
 
 
 def merged_product_header(
@@ -2190,18 +2193,9 @@ def remap_to_original_input_files(
     print("Remapping to original input files", flush=True)
     print(f"{'=' * 60}", flush=True)
 
-    original_files = sorted(original_input_dir.glob("*.laz"))
-    if not original_files:
-        original_files = sorted(original_input_dir.glob("*.las"))
-
+    original_files = _point_cloud_files(original_input_dir)
     if len(original_files) == 0:
         print(f"  No LAZ/LAS files found in {original_input_dir}", flush=True)
-        return
-    
-    original_files = [f for f in original_files if not f.name.endswith('.copc.laz')]
-    
-    if len(original_files) == 0:
-        print(f"  No original input files found (only COPC files present)", flush=True)
         return
 
     print(f"  Found {len(original_files)} original input files", flush=True)
@@ -2347,10 +2341,7 @@ def add_original_dimensions_to_merged(
     if output_path.resolve() == Path(merged_laz).resolve():
         raise ValueError("output_path must differ from merged_laz to avoid overwriting input")
 
-    original_files = sorted(original_input_dir.glob("*.laz"))
-    if not original_files:
-        original_files = sorted(original_input_dir.glob("*.las"))
-    original_files = [f for f in original_files if not f.name.endswith(".copc.laz")]
+    original_files = _point_cloud_files(original_input_dir)
     if not original_files:
         print("  No original input files found; skipping merged-with-originals output.", flush=True)
         return

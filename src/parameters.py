@@ -30,7 +30,11 @@ class Parameters(BaseSettings):
     
     task: str = Field(
         "tile",
-        description="Task to perform: 'tile' (tiling + subsampling), 'merge' (remap + merge), or 'remap' (merged file -> original files)",
+        description=(
+            "Task to perform: 'tile' (tiling + subsampling), 'merge' (remap + merge), "
+            "'remap' (merged file -> original files), or 'create_merged_file' "
+            "(prod-merged from original_with_predictions)"
+        ),
     )
     
     input_dir: Optional[Path] = Field(
@@ -99,8 +103,14 @@ class Parameters(BaseSettings):
     
     num_spatial_chunks: Optional[int] = Field(
         default=None,
-        description="Number of spatial chunks per tile for subsampling (default: equals workers)",
+        description="Subsampling parallelism per file: COPC COM window workers or stripe chunks (default: equals workers)",
         validation_alias=AliasChoices("num-spatial-chunks", "num_spatial_chunks"),
+    )
+
+    subsampling_method: str = Field(
+        default="center-of-mass",
+        description="Subsampling method: center-of-mass (default) or nearest-to-centroid",
+        validation_alias=AliasChoices("subsampling-method", "subsampling_method"),
     )
 
     tiling_threshold: Optional[float] = Field(
@@ -173,6 +183,27 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("output-folder", "output_folder"),
     )
 
+    original_with_predictions_dir: Optional[Path] = Field(
+        default=None,
+        description="Directory with Original-with-predictions files for create_merged_file task",
+        validation_alias=AliasChoices("original-with-predictions-dir", "original_with_predictions_dir"),
+    )
+
+    merged_resolutions: str = Field(
+        "res1,res2",
+        description=(
+            "Comma-separated prod-merged output resolutions for create_merged_file. "
+            "Use res1/res2, numeric meters, or centimeter labels such as 1cm,10cm."
+        ),
+        validation_alias=AliasChoices("merged-resolutions", "merged_resolutions"),
+    )
+
+    merged_output_formats: str = Field(
+        "copc.laz",
+        description="Comma-separated prod-merged output formats: laz, copc.laz, or ply.",
+        validation_alias=AliasChoices("merged-output-formats", "merged_output_formats"),
+    )
+
     # ==========================================================================
     # Remap-to-originals task parameters (one merged file -> original files folder)
     # ==========================================================================
@@ -185,13 +216,13 @@ class Parameters(BaseSettings):
 
     output_merged_with_originals: Optional[Path] = Field(
         default=None,
-        description="Path for merged LAZ with original-file dimensions added (for remap task). If unset, default to output_dir / merged_with_originals.laz.",
+        description="Legacy path for the old merged-with-originals remap output. Prod-merged outputs now use --merged-resolutions.",
         validation_alias=AliasChoices("output-merged-with-originals", "output_merged_with_originals"),
     )
 
     transfer_original_dims_to_merged: bool = Field(
         True,
-        description="Transfer original-file dimensions (e.g. Intensity, RGB) to the merged point cloud. Applies to merge task (single-file path) and remap task.",
+        description="Create prod-merged files from Original-with-predictions after merge/remap. Uses the create_merged_file implementation.",
         validation_alias=AliasChoices("transfer-original-dims-to-merged", "transfer_original_dims_to_merged"),
     )
 
@@ -341,6 +372,56 @@ class Parameters(BaseSettings):
             raise ValueError(f"{info.field_name} must be positive")
         return v
 
+    @field_validator("subsampling_method")
+    @classmethod
+    def validate_subsampling_method(cls, v):
+        """Validate and normalize the subsampling method."""
+        normalized = (v or "center-of-mass").strip().lower()
+        aliases = {
+            "com": "center-of-mass",
+            "center_of_mass": "center-of-mass",
+            "centroid": "nearest-to-centroid",
+            "voxelcentroidnearestneighbor": "nearest-to-centroid",
+            "voxel-centroid-nearest-neighbor": "nearest-to-centroid",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in {"center-of-mass", "nearest-to-centroid"}:
+            raise ValueError("subsampling_method must be 'center-of-mass' or 'nearest-to-centroid'")
+        return normalized
+
+    @field_validator("merged_output_formats")
+    @classmethod
+    def validate_merged_output_formats(cls, v):
+        """Validate and normalize prod-merged output formats."""
+        aliases = {
+            "las": "laz",
+            "laz": "laz",
+            ".laz": "laz",
+            "copc": "copc.laz",
+            "copc_laz": "copc.laz",
+            "copc-laz": "copc.laz",
+            "copc.laz": "copc.laz",
+            ".copc.laz": "copc.laz",
+            "ply": "ply",
+            ".ply": "ply",
+        }
+        parsed = []
+        seen = set()
+        for raw_token in (v or "copc.laz").split(","):
+            token = raw_token.strip().lower()
+            if not token:
+                continue
+            output_format = aliases.get(token)
+            if output_format is None:
+                raise ValueError("merged_output_formats must contain only 'laz', 'copc.laz', or 'ply'")
+            if output_format in seen:
+                continue
+            seen.add(output_format)
+            parsed.append(output_format)
+        if not parsed:
+            raise ValueError("merged_output_formats must contain at least one format")
+        return ",".join(parsed)
+
     # ==========================================================================
     # Model configuration
     # ==========================================================================
@@ -374,6 +455,7 @@ def print_params(params: Parameters):
     print(f"  chunk_size: {params.chunk_size}")
     print(f"  resolution_1: {params.resolution_1}")
     print(f"  resolution_2: {params.resolution_2}")
+    print(f"  subsampling_method: {params.subsampling_method}")
     print(f"  skip_dimension_reduction: {params.skip_dimension_reduction}")
     
     print("\nMerge Task:")
@@ -386,6 +468,11 @@ def print_params(params: Parameters):
     print(f"  min_cluster_size: {params.min_cluster_size}")
     print(f"  disable_matching: {params.disable_matching}")
     print(f"  verbose: {params.verbose}")
+
+    print("\nCreate Merged File Task:")
+    print(f"  original_with_predictions_dir: {params.original_with_predictions_dir}")
+    print(f"  merged_resolutions: {params.merged_resolutions}")
+    print(f"  merged_output_formats: {params.merged_output_formats}")
     
     print("=" * 60)
 
@@ -400,6 +487,7 @@ def get_tile_params(params: Parameters) -> dict:
         'workers': params.workers,
         'resolution_1': params.resolution_1,
         'resolution_2': params.resolution_2,
+        'subsampling_method': params.subsampling_method,
         'skip_dimension_reduction': params.skip_dimension_reduction,
         'chunk_size': params.chunk_size,
     }
@@ -433,8 +521,9 @@ TILE_PARAMS = {
     'tile_buffer': 20,
     'threads': 10,
     'workers': 4,
-    'resolution_1': 0.02,
+    'resolution_1': 0.01,
     'resolution_2': 0.1,
+    'subsampling_method': 'center-of-mass',
     'skip_dimension_reduction': False,
     'chunk_size': 20_000_000,
 }

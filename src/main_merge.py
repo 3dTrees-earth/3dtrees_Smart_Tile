@@ -28,11 +28,18 @@ from typing import List, Optional
 # Import parameters and core merge function
 from parameters import MERGE_PARAMS
 from merge_tiles import (
-    add_original_dimensions_to_merged,
     MERGED_OUTPUT_SCALES,
+    _point_cloud_files,
     merge_tiles as core_merge_tiles,
     validate_merged_output_contract,
 )
+
+
+def _original_with_predictions_name(path: Path) -> str:
+    name = path.name
+    if name.lower().endswith(".copc.laz"):
+        return name[:-9] + ".laz"
+    return name
 
 
 def run_merge(
@@ -84,7 +91,7 @@ def run_merge(
         verbose: Print detailed merge decisions
         retile_buffer: Spatial buffer expansion in meters for filtering merged points during retiling
         retile_max_radius: Maximum distance threshold in meters for cKDTree nearest neighbor matching during retiling
-        transfer_original_dims_to_merged: If True (single-file path only), add original-file dimensions to the merged LAZ.
+        transfer_original_dims_to_merged: Legacy compatibility flag for callers that still pass the old merged-enrichment option. The orchestrator creates prod-merged outputs separately from Original-with-predictions files.
     
     Returns:
         Path to merged output file
@@ -117,17 +124,15 @@ def run_merge(
         output_merged = segmented_dir / "merged.laz"
 
     # OPTIMIZATION: If only one file in each folder, skip merge and just remap
-    segmented_files = list(segmented_dir.glob("*.laz")) + list(segmented_dir.glob("*.las"))
-    original_tiles_files = list(original_tiles_dir.glob("*.laz")) + list(original_tiles_dir.glob("*.las"))
+    segmented_files = _point_cloud_files(segmented_dir)
+    original_tiles_files = _point_cloud_files(original_tiles_dir)
 
     # Check if we should use the single-file optimization
     use_single_file_optimization = False
     if len(segmented_files) == 1 and len(original_tiles_files) == 1:
         # If original_input_dir is provided, also check it has exactly one file
         if original_input_dir:
-            original_input_files = list(original_input_dir.glob("*.laz")) + list(original_input_dir.glob("*.las"))
-            # Filter out COPC files
-            original_input_files = [f for f in original_input_files if not f.name.endswith('.copc.laz')]
+            original_input_files = _point_cloud_files(original_input_dir)
             if len(original_input_files) == 1:
                 use_single_file_optimization = True
         else:
@@ -174,7 +179,8 @@ def run_merge(
             original_file = original_input_files[0]
             print(f"\nStep 2: Remapping {remapped_1cm_file.name} → {original_file.name}")
 
-            final_output_file = output_tiles_dir / f"{original_file.stem}_segmented.laz"
+            original_output_dir = output_tiles_dir.parent / "original_with_predictions"
+            final_output_file = original_output_dir / _original_with_predictions_name(original_file)
 
             _, success, message, point_count = remap_single_tile(
                 remapped_1cm_file,
@@ -200,23 +206,6 @@ def run_merge(
             output_merged.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(merged_source), str(output_merged))
             print(f"\nStep 3: Merged file written: {output_merged.name}")
-
-            # Ensure merged file has same dimensions as original (reuse remap-to-originals logic)
-            if original_input_dir and transfer_original_dims_to_merged:
-                merged_tmp = output_merged.parent / (output_merged.stem + "_with_originals_dims.laz")
-                add_original_dimensions_to_merged(
-                    output_merged,
-                    original_input_dir,
-                    merged_tmp,
-                    tolerance=0.1,
-                    retile_buffer=retile_buffer,
-                    num_threads=4,
-                )
-                shutil.copy2(str(merged_tmp), str(output_merged))
-                merged_tmp.unlink(missing_ok=True)
-                print(f"  ✓ Merged file has same dimensions as original (added original-file dimensions)")
-            elif original_input_dir and not transfer_original_dims_to_merged:
-                print(f"  Skipping transfer of original dimensions to merged (disabled).")
 
             validate_merged_output_contract(output_merged, instance_dimension)
 

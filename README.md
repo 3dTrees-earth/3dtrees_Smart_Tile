@@ -121,7 +121,7 @@ This pipeline provides an end-to-end solution with two primary tasks:
 
 ### Multi-Resolution Processing
 - **Dual subsampling** - generates both 1cm and 10cm resolution outputs (configurable)
-- **Voxel-based downsampling** - uses PDAL's `voxelcentroidnearestneighbor` filter
+- **Selectable voxel subsampling** - defaults to SmartTile `center-of-mass` XYZ averaging; `nearest-to-centroid` preserves the previous PDAL voxel centroid nearest-neighbor behavior
 - **Dimension preservation** - all extra dimensions (PredInstance, species_id, etc.) are maintained by default
 
 ### Smart Instance Merging
@@ -219,7 +219,8 @@ python src/run.py --task tile \
 
 ### Basic Merge Task
 
-Merge segmented tiles (requires **tile_bounds_tindex.json** from the Tile task):
+Merge segmented tiles and create processed per-tile outputs plus the current processed merged LAZ
+(requires **tile_bounds_tindex.json** from the Tile task):
 
 ```bash
 python src/run.py --task merge \
@@ -230,17 +231,39 @@ python src/run.py --task merge \
     --output-merged-laz /path/to/out/merged.laz
 ```
 
-Optional: add `--original-input-dir /path/to/original` to also write per-original-file outputs with predictions.
+Optional: add `--original-input-dir /path/to/original` to also write `original_with_predictions/`.
+
+### Create Prod-Merged Products
+
+Create user-facing prod-merged files from `original_with_predictions/`. Inputs are first staged
+through COPC using the same SmartTile untwine-first / PDAL-fallback conversion used by tiling,
+then real original points are selected with nearest-to-centroid product downsampling:
+
+```bash
+python src/run.py --task create_merged_file \
+    --original-with-predictions-dir /path/to/original_with_predictions \
+    --output-dir /path/to/products \
+    --merged-resolutions res1,res2 \
+    --merged-output-formats copc.laz
+```
+
+By default this writes `prod_merged_1cm.copc.laz` and `prod_merged_10cm.copc.laz`.
+Use `--merged-output-formats laz,copc.laz,ply` to write multiple formats for each selected resolution.
+The intermediate COPC files are written under `original_with_predictions_copc/` in the output directory.
+If matching `.copc.laz` files are already present for an Original-with-predictions source, they are reused and the matching raw LAZ/LAS file is not staged a second time.
 
 ### Basic Remap Task (merged file → original files)
 
-Add all dimensions from a merged LAZ file to your original files:
+Add 3Dtrees prediction dimensions from a merged LAZ file to the original files,
+then create prod-merged products from those Original-with-predictions files:
 
 ```bash
-python src/run.py --task remap_to_originals \
+python src/run.py --task remap \
     --merged-laz /path/to/merged.laz \
     --original-input-dir /path/to/original/files \
-    --output-dir /path/to/output
+    --output-dir /path/to/original_with_predictions \
+    --merged-resolutions res1,res2 \
+    --merged-output-formats laz,copc.laz
 ```
 
 ### View Current Parameters
@@ -267,6 +290,23 @@ python src/run.py --task tile \
     --threads 10                           # Threads per COPC writer (default: 10)
 ```
 
+### Create Merged File Task Options
+
+```bash
+python src/run.py --task create_merged_file \
+    --original-with-predictions-dir /path/to/original_with_predictions \
+    --output-dir /path/to/products \
+    --resolution-1 0.01 \
+    --resolution-2 0.1 \
+    --merged-resolutions res1,res2 \
+    --merged-output-formats laz,copc.laz,ply
+```
+
+`--merged-resolutions` accepts `res1`, `res2`, numeric meter values such as `0.05`, or centimeter labels such as `1cm,10cm`.
+`--merged-output-formats` accepts `laz`, `copc.laz`, and `ply`; it can contain one or several comma-separated formats.
+The task stages LAZ/LAS inputs to COPC with untwine when available, falling back to PDAL `writers.copc`, before merging and product downsampling. Existing matching `.copc.laz` files are reused so one source is not merged twice.
+LAZ and COPC outputs use LAS/COPC metadata forwarding. PLY outputs carry point dimensions as PLY properties, but do not preserve LAS/COPC VLR metadata such as CRS records.
+
 ### Merge Task Options
 
 **Required:** `--subsampled-segmented-folder`, `--subsampled-target-folder`, `--tile_bounds_json` (from Tile task).
@@ -279,6 +319,7 @@ python src/run.py --task merge \
     --output-folder /path/to/out \                  # Optional; default: parent of segmented
     --output-merged-laz /path/to/out/merged.laz \  # Optional; merged LAZ path
     --original-input-dir /path/to/original \        # Optional; for per-original-file outputs
+    --merged-resolutions res1,res2 \                # Prod-merged outputs from original_with_predictions
     --buffer 10.0 \                                # Buffer zone distance (default: 10m)
     --overlap-threshold 0.3 \                      # Instance matching (default: 0.3)
     --max-centroid-distance 3.0 \                   # Max centroid distance (default: 3m)
@@ -340,15 +381,19 @@ All part files for each tile are merged and converted to COPC format. The pipeli
 
 **Purpose**: Create downsampled versions for efficient neural network processing.
 
-**Algorithm**: Voxel-based downsampling using `filters.voxelcentroidnearestneighbor`
+**Algorithm**: Voxel-based downsampling using the selected `--subsampling-method`.
+
+- `center-of-mass` (default): averages only X/Y/Z within each populated voxel. Non-coordinate dimensions are copied from the real point nearest to that averaged XYZ when dimensions are preserved; they are never averaged.
+- `nearest-to-centroid`: uses PDAL `filters.voxelcentroidnearestneighbor`, preserving the previous SmartTile behavior.
 
 **Process**:
-1. Each tile is split spatially into chunks along X-axis
-2. Chunks are processed in parallel
-3. Results are merged back into single file
+1. COPC `center-of-mass` runs voxel-aligned COPC windows in parallel, controlled by `--num-spatial-chunks`
+2. Other subsampling paths split each tile spatially into chunks along X-axis
+3. Chunks/windows are processed in parallel
+4. Results are merged back into single file
 
 **Outputs**:
-- `subsampled_2cm/`: Resolution_1 files
+- `subsampled_1cm/`: Resolution_1 files
 - `subsampled_10cm/`: Resolution_2 files
 
 ### The Merge Process in Detail
@@ -553,8 +598,10 @@ Tile A (east border)         Tile B (west border)
 | `--tile-buffer` | 20 | Buffer overlap in meters |
 | `--threads` | 10 | Threads per COPC writer |
 | `--workers` | 4 | Parallel file/tile processing |
+| `--num-spatial-chunks` | `--workers` | Per-file subsampling parallelism for COM windows or stripe chunks |
 | `--resolution-1` | 0.01 | First subsampling resolution (1cm) |
 | `--resolution-2` | 0.1 | Second subsampling resolution (10cm) |
+| `--subsampling-method` | center-of-mass | Subsampling method: `center-of-mass` or `nearest-to-centroid` |
 | `--skip-dimension-reduction` | False | Skip XYZ-only reduction, keep all point dimensions |
 | `--chunk-size` | 20000000 | Points per chunk when reading LAZ/LAS in Phase 1 (smaller = less peak RAM) |
 | `--tiling-threshold` | None | File size threshold in MB for skipping tiling on single small files |
@@ -571,7 +618,9 @@ Tile A (east border)         Tile B (west border)
 | `--max-volume-for-merge` | 4.0 | Max volume for small instance merge (m³) |
 | `--min-cluster-size` | 300 | Minimum cluster size in points for reassignment |
 | `--original-input-dir` | None | Optional: directory with original input LAZ files for per-file outputs |
-| `--skip-merged-file` | False | Skip creating merged LAZ file (only create retiled outputs) |
+| `--merged-resolutions` | res1,res2 | Prod-merged output resolutions when original inputs are available |
+| `--merged-output-formats` | copc.laz | Prod-merged output formats: `laz`, `copc.laz`, `ply` |
+| `--skip-merged-file` | False | Skip creating the processed merged LAZ intermediate (prod-merged outputs still come from Original-with-predictions when enabled) |
 | `--disable-matching` | False | Disable cross-tile instance matching |
 | `--disable-volume-merge` | False | Disable small volume instance merging |
 | `--workers` | 4 | Parallel processing (tile loading, KDTree queries) |
@@ -579,7 +628,7 @@ Tile A (east border)         Tile B (west border)
 
 *Retile buffer is fixed internally at 2.0 m; correspondence tolerance is no longer a user parameter.*
 
-### Understanding `--workers` vs `--threads`
+### Understanding `--workers`, `--threads`, and `--num-spatial-chunks`
 
 These two parameters control different aspects of parallelism:
 
@@ -594,24 +643,27 @@ Controls how many files/tasks run simultaneously using Python's `ProcessPoolExec
 
 **Memory impact**: Higher values = more files in memory simultaneously
 
-#### `--threads` (Per-File Chunking)
+#### `--threads` (COPC Writer Threads)
 
-Controls spatial chunking during **subsampling only**:
+Controls tiling/COPC writer threading. It does not control subsampling parallelism.
 
-- Each tile is split into `--threads` spatial chunks along the X-axis (default: 5)
-- Chunks are processed in parallel using `ProcessPoolExecutor`
+#### `--num-spatial-chunks` (Subsampling Parallelism)
+
+Controls per-file parallelism during **subsampling only**:
+
+- COPC `center-of-mass` uses `--num-spatial-chunks` voxel-aligned COPC window workers
+- Other paths split each tile into `--num-spatial-chunks` spatial chunks along the X-axis
+- Chunks/windows are processed in parallel using `ProcessPoolExecutor`
 - Files are processed **sequentially** (one at a time), but each file's chunks run in parallel
 
 ```
-Example with --threads=5:
-  tile.laz → [chunk_0, chunk_1, chunk_2, chunk_3, chunk_4] → parallel subsample → merge
+Example with --num-spatial-chunks=5:
+  tile.laz → [chunk/window 0..4] → parallel subsample → merge
 ```
 
-**Memory impact**: Higher values = smaller chunks = less memory per chunk
+**Memory impact**: Higher values = more concurrent readers/workers; tune down if memory or storage I/O becomes the bottleneck.
 
-#### `--num-spatial-chunks`
-
-Optional override for number of spatial chunks per tile during subsampling. If not specified, defaults to the value of `--workers`.
+If not specified, this defaults to `--workers`.
 
 
 
@@ -660,6 +712,13 @@ output_dir/
 │   ├── input_file_1.laz
 │   └── input_file_2.laz
 │
+├── products/
+│   ├── original_with_predictions_copc/
+│   │   ├── input_file_1.copc.laz
+│   │   └── input_file_2.copc.laz
+│   ├── prod_merged_1cm.copc.laz  # Default prod-merged product
+│   └── prod_merged_10cm.copc.laz
+│
 ├── tindex_100m.gpkg             # Spatial index
 ├── tile_bounds_tindex.json      # Tile metadata
 ├── tile_jobs_100m.txt           # Processing jobs
@@ -696,7 +755,8 @@ python src/run.py --task tile \
     --tile-length 500 \
     --tile-buffer 30 \
     --workers 32 \
-    --threads 10
+    --threads 10 \
+    --num-spatial-chunks 10
 ```
 
 ### High-Precision Processing
@@ -725,6 +785,7 @@ python src/run.py --task tile \
     --tile-buffer 10 \
     --workers 2 \
     --threads 2 \
+    --num-spatial-chunks 2 \
     --resolution-1 0.02 \
     --resolution-2 0.15
 ```
@@ -812,6 +873,7 @@ This automated workflow:
 #### "Memory allocation failed"
 - Reduce `--tile-length` for smaller tiles
 - Decrease `--workers` to limit concurrent memory usage
+- Decrease `--num-spatial-chunks` to limit per-file subsampling workers
 - Use `--resolution-1` and `--resolution-2` with larger values
 
 #### "CRS mismatch" or "Coordinates appear projected"
@@ -842,13 +904,13 @@ cat output_dir/logs/c00_r00_convert.log
 #### Optimize for SSD
 ```bash
 # Use more workers when I/O is fast
-python src/run.py --task tile --workers 16 --threads 10 ...
+python src/run.py --task tile --workers 16 --threads 10 --num-spatial-chunks 10 ...
 ```
 
 #### Optimize for HDD
 ```bash
 # Reduce parallel I/O
-python src/run.py --task tile --workers 2 --threads 2 ...
+python src/run.py --task tile --workers 2 --threads 2 --num-spatial-chunks 2 ...
 ```
 
 #### Monitor resource usage

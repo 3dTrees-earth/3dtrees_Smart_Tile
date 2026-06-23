@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Main subsampling script: Parallel subsampling to resolution 1 (2cm) and resolution 2 (10cm).
+Main subsampling script: Parallel subsampling to resolution 1 (1cm) and resolution 2 (10cm).
 
 This script handles subsampling of tiled point clouds:
-1. Subsample tiles to resolution 1 (default: 2cm)
+1. Subsample tiles to resolution 1 (default: 1cm)
 2. Subsample resolution 1 files to resolution 2 (default: 10cm)
 
 Files are split across available CPU cores for parallel processing.
@@ -15,7 +15,7 @@ COPC Optimizations:
 - Multi-threaded COPC writing for improved performance
 
 Usage:
-    python main_subsample.py --tiles_dir /path/to/tiles --res1 0.02 --res2 0.1
+    python main_subsample.py --tiles_dir /path/to/tiles --res1 0.01 --res2 0.1
 """
 
 from __future__ import annotations
@@ -28,10 +28,24 @@ import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
+
+import laspy
+import numpy as np
 
 # Import parameters
 from parameters import TILE_PARAMS
+
+
+SUBSAMPLING_METHOD_CENTER_OF_MASS = "center-of-mass"
+SUBSAMPLING_METHOD_NEAREST_TO_CENTROID = "nearest-to-centroid"
+SUBSAMPLING_METHODS = {
+    SUBSAMPLING_METHOD_CENTER_OF_MASS,
+    SUBSAMPLING_METHOD_NEAREST_TO_CENTROID,
+}
+COPC_COM_TARGET_WINDOW_CELLS = 500
+COPC_COM_MAX_WINDOW_SIZE = 20.0
+COPC_COM_DENSE_BIN_LIMIT = 5_000_000
 
 
 def get_pdal_path() -> str:
@@ -104,7 +118,451 @@ def get_file_bounds(filepath: Path) -> Optional[Tuple[float, float, float, float
         return None
 
 
-def subsample_tile_chunk(args: Tuple[Path, str, float, Path, int, int, bool]) -> Tuple[Path, int]:
+def get_file_xy_scales(filepath: Path) -> Tuple[float, float]:
+    """Return LAS/COPC XY scales for half-open chunk bounds."""
+    try:
+        with laspy.open(str(filepath), laz_backend=laspy.LazBackend.LazrsParallel) as reader:
+            scales = reader.header.scales
+            return (float(scales[0]), float(scales[1]))
+    except Exception:
+        return (0.001, 0.001)
+
+
+def normalize_subsampling_method(method: Optional[str]) -> str:
+    """Return a canonical SmartTile subsampling method name."""
+    normalized = (method or SUBSAMPLING_METHOD_CENTER_OF_MASS).strip().lower()
+    if normalized in {"centroid", "voxelcentroidnearestneighbor", "voxel-centroid-nearest-neighbor"}:
+        return SUBSAMPLING_METHOD_NEAREST_TO_CENTROID
+    if normalized in {"com", "center_of_mass", "center-of-mass"}:
+        return SUBSAMPLING_METHOD_CENTER_OF_MASS
+    if normalized not in SUBSAMPLING_METHODS:
+        allowed = ", ".join(sorted(SUBSAMPLING_METHODS))
+        raise ValueError(f"Unknown subsampling method {method!r}; expected one of: {allowed}")
+    return normalized
+
+
+def _voxel_subsampling_filter(resolution: float, method: str) -> dict:
+    """Return the PDAL filter stage for methods implemented by PDAL."""
+    method = normalize_subsampling_method(method)
+    if method == SUBSAMPLING_METHOD_NEAREST_TO_CENTROID:
+        return {"type": "filters.voxelcentroidnearestneighbor", "cell": resolution}
+    raise ValueError(f"{method} is implemented by SmartTile, not a PDAL filter stage")
+
+
+def _is_copc_file(path: Path) -> bool:
+    return path.name.lower().endswith(".copc.laz")
+
+
+def _is_stale_copc_vlr(vlr) -> bool:
+    return getattr(vlr, "user_id", "") == "copc" and getattr(vlr, "record_id", None) in (1, 2)
+
+
+def _is_extra_bytes_vlr(vlr) -> bool:
+    return getattr(vlr, "user_id", "") == "LASF_Spec" and getattr(vlr, "record_id", None) == 4
+
+
+def _make_center_of_mass_header(source_header: laspy.LasHeader, dimension_reduction: bool) -> laspy.LasHeader:
+    """Create an output header for center-of-mass subsampling."""
+    from laspy.vlrs.vlrlist import VLRList
+
+    if dimension_reduction:
+        header = laspy.LasHeader(point_format=0, version="1.2")
+        for attr in (
+            "file_source_id",
+            "global_encoding",
+            "uuid",
+            "system_identifier",
+            "generating_software",
+            "creation_date",
+        ):
+            if hasattr(source_header, attr):
+                try:
+                    setattr(header, attr, getattr(source_header, attr))
+                except Exception:
+                    pass
+        source_vlrs = source_header.vlrs
+    else:
+        header = source_header.copy()
+        source_vlrs = header.vlrs
+
+    header.offsets = source_header.offsets
+    header.scales = source_header.scales
+    header.vlrs = VLRList([
+        vlr for vlr in (source_vlrs or [])
+        if not _is_stale_copc_vlr(vlr)
+        and (not dimension_reduction or not _is_extra_bytes_vlr(vlr))
+    ])
+
+    source_evlrs = getattr(source_header, "evlrs", None)
+    if source_evlrs is not None and not dimension_reduction:
+        header.evlrs = VLRList([vlr for vlr in source_evlrs if not _is_stale_copc_vlr(vlr)])
+
+    return header
+
+
+def _copy_non_xyz_dimensions(source_las: laspy.LasData, output_las: laspy.LasData, indices: np.ndarray) -> None:
+    """Copy all output-supported non-XYZ dimensions from selected source points."""
+    for dim_name in output_las.point_format.dimension_names:
+        if dim_name in {"X", "Y", "Z"}:
+            continue
+        if not hasattr(source_las, dim_name):
+            continue
+        try:
+            setattr(output_las, dim_name, np.asarray(getattr(source_las, dim_name))[indices])
+        except Exception:
+            pass
+
+
+def _point_record_to_xyz(points) -> np.ndarray:
+    coords = np.empty((len(points), 3), dtype=np.float64)
+    coords[:, 0] = points.x
+    coords[:, 1] = points.y
+    coords[:, 2] = points.z
+    return coords
+
+
+def _aggregate_center_of_mass_sparse(coords: np.ndarray, resolution: float) -> np.ndarray:
+    voxel_keys = np.floor(coords / resolution).astype(np.int64)
+    _, inverse, counts = np.unique(
+        voxel_keys,
+        axis=0,
+        return_inverse=True,
+        return_counts=True,
+    )
+    sums = np.zeros((len(counts), 3), dtype=np.float64)
+    np.add.at(sums, inverse, coords)
+    return sums / counts[:, None]
+
+
+def _aggregate_center_of_mass_bincount(coords: np.ndarray, resolution: float) -> Optional[np.ndarray]:
+    keys = np.floor(coords / resolution).astype(np.int64)
+    key_min = keys.min(axis=0)
+    key_max = keys.max(axis=0)
+    shape = (key_max - key_min + 1).astype(np.int64)
+    bins = int(shape[0] * shape[1] * shape[2])
+    if bins <= 0 or bins > COPC_COM_DENSE_BIN_LIMIT:
+        return None
+
+    yz = int(shape[1] * shape[2])
+    z = int(shape[2])
+    linear = (
+        (keys[:, 0] - key_min[0]) * yz
+        + (keys[:, 1] - key_min[1]) * z
+        + (keys[:, 2] - key_min[2])
+    )
+    counts = np.bincount(linear, minlength=bins)
+    occupied = np.flatnonzero(counts)
+    sums_x = np.bincount(linear, weights=coords[:, 0], minlength=bins)[occupied]
+    sums_y = np.bincount(linear, weights=coords[:, 1], minlength=bins)[occupied]
+    sums_z = np.bincount(linear, weights=coords[:, 2], minlength=bins)[occupied]
+    occupied_counts = counts[occupied].astype(np.float64)
+
+    centers = np.empty((len(occupied), 3), dtype=np.float64)
+    centers[:, 0] = sums_x / occupied_counts
+    centers[:, 1] = sums_y / occupied_counts
+    centers[:, 2] = sums_z / occupied_counts
+    return centers
+
+
+def _aggregate_center_of_mass_xyz(points, resolution: float) -> np.ndarray:
+    coords = _point_record_to_xyz(points)
+    if len(coords) == 0:
+        return np.empty((0, 3), dtype=np.float64)
+    centers = _aggregate_center_of_mass_bincount(coords, resolution)
+    if centers is not None:
+        return centers
+    return _aggregate_center_of_mass_sparse(coords, resolution)
+
+
+def _aligned_edges(start: float, stop: float, step: float, align: float) -> List[Tuple[float, float]]:
+    first = math.floor(start / align) * align
+    final = math.ceil(stop / align) * align
+    edges = []
+    cur = first
+    while cur < stop:
+        nxt = min(cur + step, final)
+        if nxt > start and cur < stop:
+            edges.append((max(cur, start), min(nxt, stop)))
+        cur = nxt
+    return edges
+
+
+def _copc_com_window_size(resolution: float) -> float:
+    return max(resolution, min(COPC_COM_MAX_WINDOW_SIZE, resolution * COPC_COM_TARGET_WINDOW_CELLS))
+
+
+def _iter_copc_center_of_mass_windows(header: laspy.LasHeader, resolution: float) -> Iterable[object]:
+    """Yield voxel-aligned, half-open XY bounds for COPC center-of-mass queries."""
+    from laspy.copc import Bounds
+
+    step = _copc_com_window_size(resolution)
+    x_edges = _aligned_edges(header.x_min, header.x_max, step, resolution)
+    y_edges = _aligned_edges(header.y_min, header.y_max, step, resolution)
+    eps_x = float(header.scales[0]) * 0.5
+    eps_y = float(header.scales[1]) * 0.5
+
+    for xi, (xmin, xmax) in enumerate(x_edges):
+        for yi, (ymin, ymax) in enumerate(y_edges):
+            qmaxx = xmax if xi == len(x_edges) - 1 else xmax - eps_x
+            qmaxy = ymax if yi == len(y_edges) - 1 else ymax - eps_y
+            if qmaxx < xmin or qmaxy < ymin:
+                continue
+            yield Bounds(
+                np.array([xmin, ymin, header.z_min], dtype=np.float64),
+                np.array([qmaxx, qmaxy, header.z_max], dtype=np.float64),
+            )
+
+
+def _copc_center_of_mass_window_worker(
+    args: Tuple[int, str, Tuple[float, float, float], Tuple[float, float, float], float]
+) -> Tuple[int, int, np.ndarray]:
+    window_idx, input_file, mins, maxs, resolution = args
+    from laspy.copc import Bounds, CopcReader
+
+    with CopcReader.open(input_file) as reader:
+        points = reader.query(
+            Bounds(
+                np.array(mins, dtype=np.float64),
+                np.array(maxs, dtype=np.float64),
+            )
+        )
+        point_count = len(points)
+        if point_count == 0:
+            return (window_idx, 0, np.empty((0, 3), dtype=np.float64))
+        return (window_idx, point_count, _aggregate_center_of_mass_xyz(points, resolution))
+
+
+def _write_center_of_mass_points(writer, header: laspy.LasHeader, centers: np.ndarray) -> int:
+    """Write one batch of XYZ center points to an open LAS/LAZ writer."""
+    if len(centers) == 0:
+        return 0
+    points = laspy.ScaleAwarePointRecord.zeros(len(centers), header=header)
+    points.x = centers[:, 0]
+    points.y = centers[:, 1]
+    points.z = centers[:, 2]
+    writer.write_points(points)
+    return len(centers)
+
+
+def center_of_mass_subsample_copc(
+    input_file: Path,
+    output_file: Path,
+    resolution: float,
+    num_workers: int = 1,
+) -> int:
+    """Subsample one COPC file by querying voxel-aligned windows and averaging XYZ."""
+    from laspy.copc import CopcReader
+
+    if resolution <= 0:
+        raise ValueError("resolution must be positive")
+    num_workers = max(1, int(num_workers or 1))
+
+    pending_centers = {}
+    total_input_points = 0
+    total_output_points = 0
+
+    with CopcReader.open(input_file) as reader:
+        header = reader.header
+        windows = list(_iter_copc_center_of_mass_windows(header, resolution))
+
+    if not windows:
+        raise ValueError(f"No COPC query windows available for {input_file}")
+
+    output_header = _make_center_of_mass_header(header, dimension_reduction=True)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    def make_task(window_idx: int):
+        bounds = windows[window_idx]
+        return (
+            window_idx,
+            str(input_file),
+            tuple(float(value) for value in bounds.mins),
+            tuple(float(value) for value in bounds.maxs),
+            resolution,
+        )
+
+    with laspy.open(
+        str(output_file),
+        mode="w",
+        header=output_header,
+        do_compress=output_file.suffix.lower() == ".laz",
+    ) as writer:
+        if num_workers == 1 or len(windows) <= 1:
+            with CopcReader.open(input_file) as reader:
+                for bounds in windows:
+                    points = reader.query(bounds)
+                    if len(points) == 0:
+                        continue
+                    total_input_points += len(points)
+                    centers = _aggregate_center_of_mass_xyz(points, resolution)
+                    total_output_points += _write_center_of_mass_points(writer, output_header, centers)
+        else:
+            worker_count = min(num_workers, len(windows))
+            max_in_flight = min(len(windows), worker_count * 2)
+            print(f"      → COPC COM window parallelism: {worker_count} workers")
+
+            with ProcessPoolExecutor(max_workers=worker_count) as executor:
+                futures = {}
+                next_submit = 0
+                next_write = 0
+
+                def submit_until_capacity():
+                    nonlocal next_submit
+                    while (
+                        next_submit < len(windows)
+                        and len(futures) + len(pending_centers) < max_in_flight
+                    ):
+                        future = executor.submit(_copc_center_of_mass_window_worker, make_task(next_submit))
+                        futures[future] = next_submit
+                        next_submit += 1
+
+                submit_until_capacity()
+
+                while futures or next_submit < len(windows):
+                    if not futures:
+                        submit_until_capacity()
+                    for future in as_completed(futures):
+                        futures.pop(future)
+                        window_idx, point_count, centers = future.result()
+                        total_input_points += point_count
+                        pending_centers[window_idx] = centers
+
+                        while next_write in pending_centers:
+                            centers_to_write = pending_centers.pop(next_write)
+                            total_output_points += _write_center_of_mass_points(
+                                writer,
+                                output_header,
+                                centers_to_write,
+                            )
+                            next_write += 1
+                        submit_until_capacity()
+                        break
+
+                while next_write in pending_centers:
+                    centers_to_write = pending_centers.pop(next_write)
+                    total_output_points += _write_center_of_mass_points(
+                        writer,
+                        output_header,
+                        centers_to_write,
+                    )
+                    next_write += 1
+
+    if total_output_points == 0:
+        raise ValueError(f"No points available in {input_file}")
+
+    print(
+        f"      COPC COM windows: {len(windows):,}; "
+        f"input points read: {total_input_points:,}; output points: {total_output_points:,}"
+    )
+    return total_output_points
+
+
+def center_of_mass_subsample_las(
+    input_file: Path,
+    output_file: Path,
+    resolution: float,
+    dimension_reduction: bool = True,
+) -> int:
+    """Subsample one LAS/LAZ file by averaging XYZ per voxel.
+
+    Non-coordinate attributes are copied from the real point nearest to the averaged XYZ
+    within each voxel. They are never averaged.
+    """
+    if resolution <= 0:
+        raise ValueError("resolution must be positive")
+
+    source_las = laspy.read(str(input_file), laz_backend=laspy.LazBackend.LazrsParallel)
+    point_count = len(source_las.points)
+    if point_count == 0:
+        raise ValueError(f"No points available in {input_file}")
+
+    coords = _point_record_to_xyz(source_las)
+    voxel_keys = np.floor(coords / resolution).astype(np.int64)
+    _, inverse, counts = np.unique(
+        voxel_keys,
+        axis=0,
+        return_inverse=True,
+        return_counts=True,
+    )
+
+    sums = np.zeros((len(counts), 3), dtype=np.float64)
+    np.add.at(sums, inverse, coords)
+    means = sums / counts[:, None]
+
+    dist2 = np.sum((coords - means[inverse]) ** 2, axis=1)
+    order = np.lexsort((dist2, inverse))
+    sorted_inverse = inverse[order]
+    first_in_voxel = np.empty(len(order), dtype=bool)
+    first_in_voxel[0] = True
+    first_in_voxel[1:] = sorted_inverse[1:] != sorted_inverse[:-1]
+    selected_indices = order[first_in_voxel]
+    selected_voxels = inverse[selected_indices]
+    mean_coords = means[selected_voxels]
+
+    header = _make_center_of_mass_header(source_las.header, dimension_reduction)
+    output_las = laspy.LasData(header)
+    output_las.points = laspy.ScaleAwarePointRecord.zeros(len(selected_indices), header=header)
+    _copy_non_xyz_dimensions(source_las, output_las, selected_indices)
+    output_las.x = mean_coords[:, 0]
+    output_las.y = mean_coords[:, 1]
+    output_las.z = mean_coords[:, 2]
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_las.write(str(output_file), do_compress=output_file.suffix.lower() == ".laz")
+    return len(selected_indices)
+
+
+def _crop_input_to_laz(
+    input_file: Path,
+    crop_file: Path,
+    bounds_str: str,
+    dimension_reduction: bool,
+) -> bool:
+    """Crop a chunk with PDAL before SmartTile center-of-mass aggregation."""
+    is_copc = _is_copc_file(input_file)
+    reader_type = "readers.copc" if is_copc else "readers.las"
+    writer_opts = {
+        "type": "writers.las",
+        "filename": str(crop_file),
+        "compression": True,
+        "forward": "all",
+    }
+    if dimension_reduction:
+        writer_opts["minor_version"] = 2
+        writer_opts["dataformat_id"] = 0
+    else:
+        writer_opts["minor_version"] = 4
+        writer_opts["extra_dims"] = "all"
+
+    if is_copc:
+        stages = [{"type": reader_type, "filename": str(input_file), "bounds": bounds_str}]
+    else:
+        stages = [
+            {"type": reader_type, "filename": str(input_file)},
+            {"type": "filters.crop", "bounds": bounds_str},
+        ]
+    stages.append(writer_opts)
+    pipeline = {"pipeline": stages}
+
+    pipeline_file = crop_file.parent / f"_{crop_file.stem}_crop.json"
+    with open(pipeline_file, "w") as f:
+        json.dump(pipeline, f, indent=2)
+    try:
+        pdal_cmd = get_pdal_path()
+        result = subprocess.run(
+            [pdal_cmd, "pipeline", str(pipeline_file)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        if pipeline_file.exists():
+            pipeline_file.unlink()
+
+    return result.returncode == 0 and crop_file.exists() and crop_file.stat().st_size > 0
+
+
+def subsample_tile_chunk(args: Tuple[Path, str, float, Path, int, int, bool, str]) -> Tuple[Path, int]:
     """
     Subsample a spatial chunk of a tile using PDAL with COPC-optimized bounds filter.
     
@@ -113,21 +571,43 @@ def subsample_tile_chunk(args: Tuple[Path, str, float, Path, int, int, bool]) ->
     - Output is always LAZ format (compressed LAS)
     
     Args:
-        args: Tuple of (input_file, bounds_str, resolution, output_dir, chunk_idx, total_chunks, dimension_reduction)
+        args: Tuple of (input_file, bounds_str, resolution, output_dir, chunk_idx, total_chunks, dimension_reduction, subsampling_method)
               dimension_reduction: If True, write only standard dimensions (no extra_dims); minimal output.
     
     Returns:
         Tuple of (output_file, point_count)
     """
-    input_file, bounds_str, resolution, output_dir, chunk_idx, total_chunks, dimension_reduction = args
+    input_file, bounds_str, resolution, output_dir, chunk_idx, total_chunks, dimension_reduction, subsampling_method = args
+    subsampling_method = normalize_subsampling_method(subsampling_method)
     
     try:
         # Determine reader type - can read COPC or LAS
-        is_copc = input_file.name.endswith('.copc.laz')
+        is_copc = _is_copc_file(input_file)
         reader_type = "readers.copc" if is_copc else "readers.las"
         
         # Always output as LAZ format (compressed LAS)
         chunk_file = output_dir / f"{input_file.stem}_chunk{chunk_idx}.laz"
+
+        if subsampling_method == SUBSAMPLING_METHOD_CENTER_OF_MASS:
+            crop_file = output_dir / f"{input_file.stem}_chunk{chunk_idx}_crop.laz"
+            try:
+                if not _crop_input_to_laz(input_file, crop_file, bounds_str, dimension_reduction):
+                    print(f"      ⚠ Chunk {chunk_idx}/{total_chunks}: crop failed for center-of-mass")
+                    return (None, 0)
+                point_count = center_of_mass_subsample_las(
+                    crop_file,
+                    chunk_file,
+                    resolution,
+                    dimension_reduction=dimension_reduction,
+                )
+                print(f"      ✓ Chunk {chunk_idx}/{total_chunks}: {point_count:,} points")
+                return (chunk_file, point_count)
+            finally:
+                if crop_file.exists():
+                    try:
+                        crop_file.unlink()
+                    except Exception:
+                        pass
         
         # Build pipeline - use COPC bounds filtering if available
         # When keeping all dims, do not set dataformat_id=0 (format 0 has no extra bytes); use LAS 1.4 for format 6/7.
@@ -153,7 +633,7 @@ def subsample_tile_chunk(args: Tuple[Path, str, float, Path, int, int, bool]) ->
                         "filename": str(input_file),
                         "bounds": bounds_str  # COPC native bounds filtering - very efficient
                     },
-                    {"type": "filters.voxelcentroidnearestneighbor", "cell": resolution},
+                    _voxel_subsampling_filter(resolution, subsampling_method),
                     writer_opts,
                 ]
             }
@@ -163,7 +643,7 @@ def subsample_tile_chunk(args: Tuple[Path, str, float, Path, int, int, bool]) ->
                 "pipeline": [
                     {"type": reader_type, "filename": str(input_file)},
                     {"type": "filters.crop", "bounds": bounds_str},
-                    {"type": "filters.voxelcentroidnearestneighbor", "cell": resolution},
+                    _voxel_subsampling_filter(resolution, subsampling_method),
                     writer_opts,
                 ]
             }
@@ -193,7 +673,7 @@ def subsample_tile_chunk(args: Tuple[Path, str, float, Path, int, int, bool]) ->
                     "pipeline": [
                         {"type": "readers.las", "filename": str(input_file)},
                         {"type": "filters.crop", "bounds": bounds_str},
-                        {"type": "filters.voxelcentroidnearestneighbor", "cell": resolution},
+                        _voxel_subsampling_filter(resolution, subsampling_method),
                         writer_opts,
                     ]
                 }
@@ -242,7 +722,7 @@ def subsample_tile_chunk(args: Tuple[Path, str, float, Path, int, int, bool]) ->
         return (None, 0)
 
 
-def subsample_single_file(args: Tuple[Path, Path, float, Path, int, bool]) -> Tuple[str, bool, str, int]:
+def subsample_single_file(args: Tuple[Path, Path, float, Path, int, bool, str]) -> Tuple[str, bool, str, int]:
     """
     Subsample a single file by splitting it into subtiles along X-axis and processing in parallel.
     
@@ -252,20 +732,43 @@ def subsample_single_file(args: Tuple[Path, Path, float, Path, int, bool]) -> Tu
     3. Merge all subsampled subtiles back together
     
     Args:
-        args: Tuple of (input_file, output_file, resolution, pipeline_dir, num_threads)
+        args: Tuple of (input_file, output_file, resolution, pipeline_dir, num_threads, dimension_reduction, subsampling_method)
     
     Returns:
         Tuple of (filename, success, message, point_count)
     """
-    input_file, output_file, resolution, pipeline_dir, num_threads, dimension_reduction = args
+    input_file, output_file, resolution, pipeline_dir, num_threads, dimension_reduction, subsampling_method = args
+    subsampling_method = normalize_subsampling_method(subsampling_method)
     try:
         print(f"    → Processing {input_file.name}...")
+
+        if (
+            subsampling_method == SUBSAMPLING_METHOD_CENTER_OF_MASS
+            and dimension_reduction
+            and _is_copc_file(input_file)
+        ):
+            print("      → Using COPC voxel-aligned center-of-mass windows")
+            point_count = center_of_mass_subsample_copc(
+                input_file,
+                output_file,
+                resolution,
+                num_workers=num_threads,
+            )
+            print(f"    ✓ {input_file.name}: {point_count:,} points")
+            return (input_file.name, True, "Success", point_count)
         
         # Get file bounds
         bounds = get_file_bounds(input_file)
         if not bounds:
             # Fall back to simple single-pass subsampling when bounds cannot be determined
-            return subsample_simple(input_file, output_file, resolution, pipeline_dir, dimension_reduction)
+            return subsample_simple(
+                input_file,
+                output_file,
+                resolution,
+                pipeline_dir,
+                dimension_reduction,
+                subsampling_method,
+            )
         
         minx, maxx, miny, maxy = bounds
 
@@ -274,14 +777,25 @@ def subsample_single_file(args: Tuple[Path, Path, float, Path, int, bool]) -> Tu
         # from the COPC reader. In that case, fall back to the simple
         # single-pass subsampling without spatial chunking.
         if maxx - minx == 0 or maxy - miny == 0:
-            return subsample_simple(input_file, output_file, resolution, pipeline_dir, dimension_reduction)
+            return subsample_simple(
+                input_file,
+                output_file,
+                resolution,
+                pipeline_dir,
+                dimension_reduction,
+                subsampling_method,
+            )
 
-        # Split into num_threads subtiles along X-axis only
+        # Split into num_threads subtiles along X-axis only.
+        # Align boundaries to the voxel grid and make non-final chunks half-open
+        # so one output voxel is never computed in two chunks.
         grid_x = num_threads
         grid_y = 1
         
         # Calculate step size for X-axis
-        x_step = (maxx - minx) / grid_x
+        raw_x_step = (maxx - minx) / grid_x
+        x_step = max(resolution, math.ceil(raw_x_step / resolution) * resolution)
+        scale_x, _ = get_file_xy_scales(input_file)
         
         print(f"      Splitting into {num_threads} subtiles along X-axis only ({grid_x}x{grid_y} grid)")
         
@@ -290,15 +804,26 @@ def subsample_single_file(args: Tuple[Path, Path, float, Path, int, bool]) -> Tu
         chunk_dir.mkdir(parents=True, exist_ok=True)
         
         chunk_tasks = []
-        for chunk_idx in range(num_threads):
-            chunk_minx = minx + chunk_idx * x_step
-            chunk_maxx = minx + (chunk_idx + 1) * x_step
+        chunk_edges = _aligned_edges(minx, maxx, x_step, resolution)
+        for chunk_idx, (chunk_minx, chunk_maxx) in enumerate(chunk_edges):
             # Keep full Y range for each chunk
             chunk_miny = miny
             chunk_maxy = maxy
+            query_maxx = chunk_maxx if chunk_idx == len(chunk_edges) - 1 else chunk_maxx - scale_x * 0.5
+            if query_maxx < chunk_minx:
+                continue
             
-            bounds_str = f"([{chunk_minx},{chunk_maxx}],[{chunk_miny},{chunk_maxy}])"
-            chunk_tasks.append((input_file, bounds_str, resolution, chunk_dir, chunk_idx, num_threads, dimension_reduction))
+            bounds_str = f"([{chunk_minx},{query_maxx}],[{chunk_miny},{chunk_maxy}])"
+            chunk_tasks.append((
+                input_file,
+                bounds_str,
+                resolution,
+                chunk_dir,
+                chunk_idx,
+                len(chunk_edges),
+                dimension_reduction,
+                subsampling_method,
+            ))
         
         # Process chunks in parallel using ProcessPoolExecutor for true CPU parallelism
         chunk_files = []
@@ -396,7 +921,12 @@ def subsample_single_file(args: Tuple[Path, Path, float, Path, int, bool]) -> Tu
 
 
 def subsample_simple(
-    input_file: Path, output_file: Path, resolution: float, pipeline_dir: Path, dimension_reduction: bool = True
+    input_file: Path,
+    output_file: Path,
+    resolution: float,
+    pipeline_dir: Path,
+    dimension_reduction: bool = True,
+    subsampling_method: str = SUBSAMPLING_METHOD_CENTER_OF_MASS,
 ) -> Tuple[str, bool, str, int]:
     """
     Simple single-pass subsampling (fallback method) with COPC reader optimization.
@@ -410,12 +940,14 @@ def subsample_simple(
         resolution: Voxel resolution
         pipeline_dir: Directory for pipeline files
         dimension_reduction: If True, write only standard dimensions (no extra_dims).
+        subsampling_method: SmartTile subsampling method.
     
     Returns:
         Tuple of (filename, success, message, point_count)
     """
+    subsampling_method = normalize_subsampling_method(subsampling_method)
     try:
-        is_copc = input_file.name.endswith('.copc.laz')
+        is_copc = _is_copc_file(input_file)
         reader_type = "readers.copc" if is_copc else "readers.las"
         
         # Always output as LAZ format (compressed LAS)
@@ -434,10 +966,23 @@ def subsample_simple(
         else:
             writer_opts["minor_version"] = 4
             writer_opts["extra_dims"] = "all"
+
+        if subsampling_method == SUBSAMPLING_METHOD_CENTER_OF_MASS:
+            if is_copc and dimension_reduction:
+                point_count = center_of_mass_subsample_copc(input_file, output_file, resolution)
+            else:
+                point_count = center_of_mass_subsample_las(
+                    input_file,
+                    output_file,
+                    resolution,
+                    dimension_reduction=dimension_reduction,
+                )
+            return (input_file.name, True, "Success", point_count)
+
         pipeline = {
             "pipeline": [
                 {"type": reader_type, "filename": str(input_file)},
-                {"type": "filters.voxelcentroidnearestneighbor", "cell": resolution},
+                _voxel_subsampling_filter(resolution, subsampling_method),
                 writer_opts,
             ]
         }
@@ -464,7 +1009,7 @@ def subsample_simple(
                 pipeline = {
                     "pipeline": [
                         {"type": "readers.las", "filename": str(input_file)},
-                        {"type": "filters.voxelcentroidnearestneighbor", "cell": resolution},
+                        _voxel_subsampling_filter(resolution, subsampling_method),
                         writer_opts,
                     ]
                 }
@@ -517,13 +1062,14 @@ def subsample_parallel(
     num_threads: int,
     output_prefix: Optional[str] = None,
     dimension_reduction: bool = True,
+    subsampling_method: str = SUBSAMPLING_METHOD_CENTER_OF_MASS,
 ) -> List[Path]:
     """
     Subsample all files in directory using parallel chunk processing.
     
     Files are processed sequentially (one at a time), but each file is split
     spatially into chunks along X-axis and processed in parallel.
-    Uses PDAL voxelcentroidnearestneighbor filter.
+    Uses the selected SmartTile subsampling method.
     When dimension_reduction is True, only standard LAS dimensions are written (minimal output).
     
     Args:
@@ -534,11 +1080,13 @@ def subsample_parallel(
         num_threads: Number of spatial chunks per file (from TILE_PARAMS['threads'])
         output_prefix: Optional prefix for output filenames
         dimension_reduction: If True, write only standard dimensions (no extra_dims); default True = minimal.
+        subsampling_method: "center-of-mass" or "nearest-to-centroid".
     
     Returns:
         List of created output file paths
     """
     # Create output directory
+    subsampling_method = normalize_subsampling_method(subsampling_method)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Create pipeline directory
@@ -612,7 +1160,15 @@ def subsample_parallel(
             print(f"    ⊙ Skipping {input_file.name} (already exists)")
             continue
         
-        tasks.append((input_file, output_file, resolution, pipeline_dir, num_threads, dimension_reduction))
+        tasks.append((
+            input_file,
+            output_file,
+            resolution,
+            pipeline_dir,
+            num_threads,
+            dimension_reduction,
+            subsampling_method,
+        ))
     
     if not tasks:
         print(f"    ✓ All files already subsampled")
@@ -621,6 +1177,7 @@ def subsample_parallel(
     print(f"    Files to process: {len(tasks)}")
     print(f"    Processing mode: Sequential (one file at a time)")
     print(f"    Chunk parallelism: {num_threads} chunks per file (parallel)")
+    print(f"    Subsampling method: {subsampling_method}")
     print()
     
     # Process files sequentially, but chunks within each file in parallel
@@ -658,12 +1215,13 @@ def run_subsample_pipeline(
     output_prefix: Optional[str] = None,
     output_base_dir: Optional[Path] = None,
     dimension_reduction: bool = True,
+    subsampling_method: str = SUBSAMPLING_METHOD_CENTER_OF_MASS,
 ) -> Tuple[Path, Path]:
     """
     Run the complete subsampling pipeline.
     
     Steps:
-    1. Subsample tiles to resolution 1 (default: 2cm)
+    1. Subsample tiles to resolution 1 (default: 1cm)
     2. Subsample resolution 1 files to resolution 2 (default: 10cm)
     
     Files are processed sequentially (one at a time), but each file is split
@@ -679,10 +1237,12 @@ def run_subsample_pipeline(
         output_prefix: Optional prefix for output filenames
         output_base_dir: Base directory for output (default: parent of tiles_dir)
         dimension_reduction: If True, write only standard dimensions (minimal); if False, keep extra_dims (e.g. PredInstance).
+        subsampling_method: "center-of-mass" or "nearest-to-centroid".
     
     Returns:
         Tuple of (subsampled_res1_dir, subsampled_res2_dir)
     """
+    subsampling_method = normalize_subsampling_method(subsampling_method)
     # Auto-detect CPU count
     if num_cores is None:
         num_cores = get_cpu_count()
@@ -712,6 +1272,7 @@ def run_subsample_pipeline(
     print(f"CPU cores: {num_cores}")
     print(f"Threads (chunks per file): {num_threads}")
     print(f"Dimension reduction: {dimension_reduction} ({'minimal (standard dims only)' if dimension_reduction else 'keep all (extra_dims preserved)'})")
+    print(f"Subsampling method: {subsampling_method}")
     print()
     
     # Step 1: Subsample to resolution 1
@@ -727,6 +1288,7 @@ def run_subsample_pipeline(
         num_threads=num_threads,
         output_prefix=output_prefix,
         dimension_reduction=dimension_reduction,
+        subsampling_method=subsampling_method,
     )
     
     if not res1_files:
@@ -749,6 +1311,7 @@ def run_subsample_pipeline(
         num_threads=num_threads,
         output_prefix=output_prefix,
         dimension_reduction=dimension_reduction,
+        subsampling_method=subsampling_method,
     )
     
     if not res2_files:
@@ -785,8 +1348,8 @@ def main():
     parser.add_argument(
         "--res1",
         type=float,
-        default=TILE_PARAMS.get('resolution_1', 0.02),
-        help=f"First resolution in meters (default: {TILE_PARAMS.get('resolution_1', 0.02)})"
+        default=TILE_PARAMS.get('resolution_1', 0.01),
+        help=f"First resolution in meters (default: {TILE_PARAMS.get('resolution_1', 0.01)})"
     )
     
     parser.add_argument(
@@ -808,6 +1371,18 @@ def main():
         type=int,
         default=None,
         help=f"Number of spatial chunks per file for parallel processing (default: {TILE_PARAMS.get('threads', 5)})"
+    )
+
+    parser.add_argument(
+        "--subsampling-method",
+        "--subsampling_method",
+        choices=sorted(SUBSAMPLING_METHODS),
+        default=TILE_PARAMS.get("subsampling_method", SUBSAMPLING_METHOD_CENTER_OF_MASS),
+        help=(
+            "Subsampling method: center-of-mass averages XYZ per voxel; "
+            "nearest-to-centroid preserves the previous PDAL voxel centroid nearest-neighbor behavior "
+            f"(default: {TILE_PARAMS.get('subsampling_method', SUBSAMPLING_METHOD_CENTER_OF_MASS)})"
+        ),
     )
     
     parser.add_argument(
@@ -832,7 +1407,8 @@ def main():
             res2=args.res2,
             num_cores=args.num_cores,
             num_threads=args.num_threads,
-            output_prefix=args.output_prefix
+            output_prefix=args.output_prefix,
+            subsampling_method=args.subsampling_method,
         )
         print(f"\nSubsampled files ready:")
         print(f"  Resolution 1: {res1_dir}")

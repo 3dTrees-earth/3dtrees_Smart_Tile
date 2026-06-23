@@ -3,14 +3,16 @@
 Main orchestrator script for the 3DTrees smart tiling pipeline.
 
 Routes to appropriate task modules based on --task parameter:
-- tile: XYZ reduction, COPC conversion, tiling, and subsampling (2cm and 10cm)
+- tile: XYZ reduction, COPC conversion, tiling, and subsampling (1cm and 10cm)
 - merge: Remap predictions and merge tiles with instance matching
 - remap: Remap merged file dimensions to original input files
+- create_merged_file: Create prod-merged files from original_with_predictions
 
 Usage:
     python src/run.py --task tile --input-dir /path/to/input --output-dir /path/to/output
     python src/run.py --task merge --subsampled-10cm-folder /path/to/10cm --original-input-dir /path/to/input
     python src/run.py --task remap --merged-laz /path/to/merged.laz --original-input-dir /path/to/originals --output-dir /path/to/output
+    python src/run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output
 """
 
 import sys
@@ -29,6 +31,46 @@ except ImportError as e:
     print(f"Error: Could not import parameters.py: {e}")
     print("Please install required dependencies: pip install pydantic pydantic-settings")
     sys.exit(1)
+
+
+def _create_prod_merged_outputs(
+    original_with_predictions_dir: Path,
+    output_dir: Path,
+    params: Parameters,
+) -> None:
+    """Create prod-merged outputs using the shared create_merged_file implementation."""
+    if not original_with_predictions_dir.exists():
+        print(f"  Skipping prod-merged outputs; missing {original_with_predictions_dir}")
+        return
+
+    try:
+        from main_create_merged_file import create_prod_merged_files
+    except ImportError as e:
+        print(f"Error: Could not import main_create_merged_file.py: {e}")
+        sys.exit(1)
+
+    print()
+    print("=" * 60)
+    print("Creating Prod-Merged Files")
+    print("=" * 60)
+    print(f"Original-with-predictions dir: {original_with_predictions_dir}")
+    print(f"Output dir: {output_dir}")
+    print(f"Selected resolutions: {params.merged_resolutions}")
+    print(f"Selected output formats: {params.merged_output_formats}")
+    print("Product subsampling method: nearest-to-centroid")
+    print()
+
+    outputs = create_prod_merged_files(
+        original_with_predictions_dir=original_with_predictions_dir,
+        output_dir=output_dir,
+        resolution_selector=params.merged_resolutions,
+        output_format_selector=params.merged_output_formats,
+        res1=params.resolution_1,
+        res2=params.resolution_2,
+    )
+    print("  Prod-merged outputs:")
+    for output in outputs:
+        print(f"    {output}")
 
 
 def run_tile_task(params: Parameters):
@@ -79,8 +121,10 @@ def run_tile_task(params: Parameters):
         else str(params.skip_dimension_reduction).strip().lower() in ("true", "1", "yes")
     )
     num_spatial_chunks = params.num_spatial_chunks
+    subsampling_chunks = num_spatial_chunks or workers
     res1 = params.resolution_1
     res2 = params.resolution_2
+    subsampling_method = params.subsampling_method
     tiling_threshold = params.tiling_threshold
     chunk_size = params.chunk_size
     print("=" * 60)
@@ -92,9 +136,11 @@ def run_tile_task(params: Parameters):
     print(f"Tile buffer: {tile_buffer}m")
     print(f"Workers: {workers}")
     print(f"Threads per writer: {threads}")
+    print(f"Subsampling spatial chunks/window workers: {subsampling_chunks}")
     print(f"Skip dimension reduction: {skip_dimension_reduction}")
     dimension_reduction = not skip_dimension_reduction
     print(f"Subsampling dimensions: {'minimal (standard dims only)' if dimension_reduction else 'keep all (including extra_dims)'}")
+    print(f"Subsampling method: {subsampling_method}")
     print(f"Resolutions: {res1}m ({int(res1*100)}cm), {res2}m ({int(res2*100)}cm)")
     if tiling_threshold is not None:
         print(f"Tiling threshold: {tiling_threshold} MB")
@@ -146,10 +192,11 @@ def run_tile_task(params: Parameters):
             res1=res1,
             res2=res2,
             num_cores=workers,
-            num_threads=num_spatial_chunks,  # num_spatial_chunks maps to num_threads in the function
+            num_threads=subsampling_chunks,
             output_prefix=output_prefix,
             output_base_dir=output_dir,  # Output directly to output_dir, not under tiles_dir
             dimension_reduction=dimension_reduction,  # True = minimal (standard dims only); False = keep extra_dims
+            subsampling_method=subsampling_method,
         )
 
         # Step 7: Update tile_bounds_tindex.json with actual bounds from created tiles
@@ -361,10 +408,21 @@ def run_merge_task(params: Parameters):
             verbose=params.verbose,
             retile_buffer=retile_buffer,
             instance_dimension=params.instance_dimension,
-            transfer_original_dims_to_merged=params.transfer_original_dims_to_merged,
+            transfer_original_dims_to_merged=False,
             threedtrees_dims=threedtrees_dims,
             threedtrees_suffix=threedtrees_suffix,
         )
+
+        if original_input_dir and params.transfer_original_dims_to_merged:
+            original_with_predictions_dir = Path(output_tiles_dir).parent / "original_with_predictions"
+            product_output_dir = Path(merged_output).parent if merged_output else Path(output_tiles_dir).parent
+            _create_prod_merged_outputs(
+                original_with_predictions_dir=original_with_predictions_dir,
+                output_dir=product_output_dir,
+                params=params,
+            )
+        elif original_input_dir:
+            print("  Skipping prod-merged output creation (disabled).")
 
         print()
         print("=" * 60)
@@ -382,11 +440,10 @@ def run_merge_task(params: Parameters):
 def run_remap_task(params: Parameters):
     """
     Run the remap task: one merged LAZ file -> original files folder.
-    All dimensions from the merged file are added to each original file (no hardcoded dimension list).
+    3DTrees dimensions from the merged file are added to each original file.
     """
     try:
         from merge_tiles import (
-            add_original_dimensions_to_merged,
             load_merged_file,
             remap_to_original_input_files,
         )
@@ -447,26 +504,71 @@ def run_remap_task(params: Parameters):
         threedtrees_suffix=threedtrees_suffix,
     )
 
-    # Add dimensions from original files to the merged file (optional)
+    # Create prod-merged files from the enriched original outputs (optional).
     if params.transfer_original_dims_to_merged:
-        output_merged_with_originals = (
-            Path(params.output_merged_with_originals)
-            if params.output_merged_with_originals is not None
-            else output_dir / "merged_with_originals.laz"
-        )
-        add_original_dimensions_to_merged(
-            merged_laz,
-            original_input_dir,
-            output_merged_with_originals,
-            tolerance=tolerance,
-            retile_buffer=retile_buffer,
-            num_threads=max(1, params.workers),
+        product_output_dir = output_dir.parent
+        _create_prod_merged_outputs(
+            original_with_predictions_dir=output_dir,
+            output_dir=product_output_dir,
+            params=params,
         )
     else:
-        print("  Skipping transfer of original dimensions to merged file (disabled).")
+        print("  Skipping prod-merged output creation (disabled).")
 
     print()
     print("Remap complete.")
+
+
+def run_create_merged_file_task(params: Parameters):
+    """Create prod-merged files from Original-with-predictions files."""
+    try:
+        from main_create_merged_file import create_prod_merged_files
+    except ImportError as e:
+        print(f"Error: Could not import main_create_merged_file.py: {e}")
+        sys.exit(1)
+
+    input_dir = params.original_with_predictions_dir or params.input_dir
+    if input_dir is None:
+        print("Error: --original-with-predictions-dir or --input-dir is required for create_merged_file task")
+        sys.exit(1)
+
+    output_dir = params.output_dir
+    if output_dir is None:
+        output_dir = Path(input_dir).parent
+    else:
+        output_dir = Path(output_dir)
+
+    print("=" * 60)
+    print("Create Prod-Merged Files")
+    print("=" * 60)
+    print(f"Original-with-predictions dir: {input_dir}")
+    print(f"Output dir: {output_dir}")
+    print(f"Selected resolutions: {params.merged_resolutions}")
+    print(f"Selected output formats: {params.merged_output_formats}")
+    print(f"Resolution 1: {params.resolution_1:g}m")
+    print(f"Resolution 2: {params.resolution_2:g}m")
+    print("Product subsampling method: nearest-to-centroid")
+    print()
+
+    try:
+        outputs = create_prod_merged_files(
+            original_with_predictions_dir=Path(input_dir),
+            output_dir=output_dir,
+            resolution_selector=params.merged_resolutions,
+            output_format_selector=params.merged_output_formats,
+            res1=params.resolution_1,
+            res2=params.resolution_2,
+        )
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    print()
+    print("Create merged file complete.")
+    for output in outputs:
+        print(f"  {output}")
 
 
 def preprocess_boolean_flags(args_list):
@@ -554,6 +656,7 @@ def main():
         print("Usage: python run.py --task tile --input-dir /path/to/input --output-dir /path/to/output")
         print("       python run.py --task merge --subsampled-10cm-folder /path/to/10cm")
         print("       python run.py --task remap --merged-laz /path/to/merged.laz --original-input-dir /path/to/originals")
+        print("       python run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output")
         print("       python run.py --show-params")
         sys.exit(1)
 
@@ -564,9 +667,11 @@ def main():
         run_merge_task(params)
     elif params.task == "remap":
         run_remap_task(params)
+    elif params.task == "create_merged_file":
+        run_create_merged_file_task(params)
     else:
         print(f"Error: Unknown task: {params.task}")
-        print("Valid tasks: tile, merge, remap")
+        print("Valid tasks: tile, merge, remap, create_merged_file")
         sys.exit(1)
 
 

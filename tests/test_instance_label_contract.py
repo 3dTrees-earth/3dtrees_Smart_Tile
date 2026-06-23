@@ -12,6 +12,7 @@ from laspy.vlrs.vlr import VLR
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from merge_tiles import (  # noqa: E402
+    _point_cloud_files,
     instance_output_dtype,
     load_tile,
     merged_product_header,
@@ -57,6 +58,19 @@ def _write_source_las(path: Path, system_identifier: str, projection_payload: by
 
 
 class InstanceLabelContractTests(unittest.TestCase):
+    def test_point_cloud_files_prefers_raw_files_but_accepts_copc_only_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            directory = Path(tmpdir)
+            raw = directory / "source.laz"
+            copc = directory / "source.copc.laz"
+            raw.write_text("raw")
+            copc.write_text("copc")
+
+            self.assertEqual(_point_cloud_files(directory), [raw])
+
+            raw.unlink()
+            self.assertEqual(_point_cloud_files(directory), [copc])
+
     def test_accepts_background_and_positive_instances(self):
         validate_prediction_instance_labels(np.array([0, 1, 63_535], dtype=np.uint16))
 
