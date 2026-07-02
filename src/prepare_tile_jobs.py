@@ -110,6 +110,12 @@ def main():
     parser.add_argument("--tile-length", type=float, default=40.0)
     parser.add_argument("--tile-buffer", type=float, default=5.0)
     parser.add_argument(
+        "--grid-offset",
+        type=float,
+        default=1.0,
+        help="Accepted for compatibility with tile_tindex.py; tiling remains data-aligned.",
+    )
+    parser.add_argument(
         "--jobs-out",
         type=Path,
         default=Path("tile_jobs.txt"),
