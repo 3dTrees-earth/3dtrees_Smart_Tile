@@ -200,5 +200,3 @@ def main(merge_tiles_func):
         match_all_instances=args.match_all_instances,
         instance_dimension=args.instance_dimension,
     )
-
-

@@ -14,11 +14,7 @@ import tile_copc  # noqa: E402
 
 class TileCopcDimensionPolicyTests(unittest.TestCase):
     def setUp(self):
-        self._previous_empty_dims_supported = tile_copc._UNTWINE_EMPTY_DIMS_SUPPORTED
-        tile_copc._UNTWINE_EMPTY_DIMS_SUPPORTED = None
-
-    def tearDown(self):
-        tile_copc._UNTWINE_EMPTY_DIMS_SUPPORTED = self._previous_empty_dims_supported
+        tile_copc._DIRECT_UNTWINE_STRIP_BY_SCHEMA.clear()
 
     def test_pdal_copc_conversion_strips_extra_dims_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -159,7 +155,7 @@ class TileCopcDimensionPolicyTests(unittest.TestCase):
             self.assertEqual(writer["dataformat_id"], 0)
             self.assertNotIn("extra_dims", writer)
 
-    def test_run_untwine_uses_empty_dimension_keep_list_for_stripping(self):
+    def test_run_untwine_uses_non_empty_dimension_keep_list_for_stripping(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             input_laz = tmp_path / "input.laz"
@@ -186,46 +182,6 @@ class TileCopcDimensionPolicyTests(unittest.TestCase):
                 command[command.index("--dims") + 1],
                 tile_copc.UNTWINE_STRIP_EXTRA_DIMS_ARG,
             )
-            self.assertTrue(tile_copc._UNTWINE_EMPTY_DIMS_SUPPORTED)
-
-    def test_run_untwine_caches_unsupported_empty_dimension_keep_list(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            input_laz = tmp_path / "input.laz"
-            output_copc = tmp_path / "output.copc.laz"
-            input_laz.write_text("input")
-
-            def reject_empty_dims(command, **_):
-                self.assertIn("--dims", command)
-                return subprocess.CompletedProcess(
-                    command,
-                    255,
-                    "",
-                    "Untwine Error: Missing value for argument 'dims'.",
-                )
-
-            with mock.patch("tile_copc.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch("tile_copc.subprocess.run", side_effect=reject_empty_dims) as run:
-                    success, message = tile_copc._run_untwine(
-                        [input_laz],
-                        output_copc,
-                        "EPSG:32632",
-                        strip_extra_dims=True,
-                    )
-                    self.assertFalse(success)
-                    self.assertIn("untwine failed", message)
-                    self.assertFalse(tile_copc._UNTWINE_EMPTY_DIMS_SUPPORTED)
-
-                    success, message = tile_copc._run_untwine(
-                        [input_laz],
-                        output_copc,
-                        "EPSG:32632",
-                        strip_extra_dims=True,
-                    )
-
-            self.assertFalse(success)
-            self.assertEqual(message, "untwine empty --dims unsupported")
-            self.assertEqual(run.call_count, 1)
 
     def test_convert_laz_to_copc_uses_direct_untwine_dims_when_supported(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -277,6 +233,41 @@ class TileCopcDimensionPolicyTests(unittest.TestCase):
             self.assertTrue(untwine.call_args_list[0].kwargs["strip_extra_dims"])
             self.assertFalse(untwine.call_args_list[1].kwargs["strip_extra_dims"])
             pdal.assert_not_called()
+
+    def test_convert_laz_to_copc_caches_direct_strip_schema_failures(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            input_laz = tmp_path / "input.laz"
+            first_copc = tmp_path / "first.copc.laz"
+            second_copc = tmp_path / "second.copc.laz"
+            input_laz.write_text("input")
+            schema = (("PredInstance", "uint32"),)
+
+            with mock.patch("tile_copc.shutil.which", return_value="/usr/bin/untwine"):
+                with mock.patch("tile_copc._input_extra_dimension_schema", return_value=schema):
+                    with mock.patch("tile_copc._strip_las_to_standard_dims", return_value=(True, "stripped")) as strip:
+                        with mock.patch(
+                            "tile_copc._run_untwine",
+                            side_effect=[
+                                (True, "direct-kept-extras"),
+                                (True, "fallback"),
+                                (True, "fallback"),
+                            ],
+                        ) as untwine:
+                            with mock.patch(
+                                "tile_copc._output_has_no_extra_dimensions",
+                                side_effect=[False, True, True],
+                            ):
+                                with mock.patch("tile_copc.append_source_geotiff_projection_evlrs", return_value=(True, "ok")):
+                                    with mock.patch("tile_copc.copc_preserves_source_crs", return_value=(True, "ok")):
+                                        self.assertTrue(tile_copc.convert_laz_to_copc(input_laz, first_copc))
+                                        self.assertTrue(tile_copc.convert_laz_to_copc(input_laz, second_copc))
+
+            self.assertEqual(strip.call_count, 2)
+            self.assertEqual(untwine.call_count, 3)
+            self.assertTrue(untwine.call_args_list[0].kwargs["strip_extra_dims"])
+            self.assertFalse(untwine.call_args_list[1].kwargs["strip_extra_dims"])
+            self.assertFalse(untwine.call_args_list[2].kwargs["strip_extra_dims"])
 
 if __name__ == "__main__":
     unittest.main()
