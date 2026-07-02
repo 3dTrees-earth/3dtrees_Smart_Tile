@@ -26,13 +26,10 @@ from pathlib import Path
 from typing import List, Optional
 
 # Import parameters and core merge function
+from instance_labels import MERGED_OUTPUT_SCALES, validate_merged_output_contract
 from parameters import MERGE_PARAMS
-from merge_tiles import (
-    MERGED_OUTPUT_SCALES,
-    _point_cloud_files,
-    merge_tiles as core_merge_tiles,
-    validate_merged_output_contract,
-)
+from merge_tiles import merge_tiles as core_merge_tiles
+from point_cloud_metadata import point_cloud_files as _point_cloud_files
 
 
 def _original_with_predictions_name(path: Path) -> str:
@@ -71,7 +68,7 @@ def run_merge(
 ) -> Path:
     """
     Run the tile merge pipeline.
-    
+
     Args:
         segmented_dir: Directory containing segmented LAZ tiles
         output_tiles_dir: Output directory for retiled files
@@ -92,21 +89,21 @@ def run_merge(
         retile_buffer: Spatial buffer expansion in meters for filtering merged points during retiling
         retile_max_radius: Maximum distance threshold in meters for cKDTree nearest neighbor matching during retiling
         transfer_original_dims_to_merged: Legacy compatibility flag for callers that still pass the old merged-enrichment option. The orchestrator creates prod-merged outputs separately from Original-with-predictions files.
-    
+
     Returns:
         Path to merged output file
     """
     print("=" * 60)
     print("3DTrees Merge Pipeline")
     print("=" * 60)
-    
+
     # Validate input
     if not segmented_dir.exists():
         raise ValueError(f"Segmented directory not found: {segmented_dir}")
-    
+
     if not original_tiles_dir.exists():
         raise ValueError(f"Original tiles directory not found: {original_tiles_dir}")
-    
+
     if not output_tiles_dir.exists():
         output_tiles_dir.mkdir(parents=True, exist_ok=True)
 
@@ -118,7 +115,7 @@ def run_merge(
             f"tile_bounds_tindex.json not found: {tile_bounds_json}. "
             "Merge requires this file and will not run without it."
         )
-    
+
     # Auto-derive output path if not provided (inside segmented dir so it is writable e.g. in Docker /out)
     if output_merged is None:
         output_merged = segmented_dir / "merged.laz"
@@ -235,7 +232,7 @@ def run_merge(
     if original_input_dir:
         print(f"Original input dir: {original_input_dir} (Stage 7 enabled)")
     print()
-    
+
     # Run the core merge function
     core_merge_tiles(
         input_dir=segmented_dir,
@@ -271,7 +268,7 @@ def main() -> None:
         description="3DTrees Merge Pipeline - Merge segmented tiles with instance matching",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    
+
     parser.add_argument(
         "--segmented_dir", "--segmented_folder", "-i",
         type=Path,
@@ -279,21 +276,21 @@ def main() -> None:
         dest="segmented_dir",
         help="Directory containing segmented LAZ tiles"
     )
-    
+
     parser.add_argument(
         "--output_merged", "-o",
         type=Path,
         default=None,
         help="Output path for merged LAZ file (auto-derived if not specified)"
     )
-    
+
     parser.add_argument(
         "--output_tiles_dir",
         type=Path,
         required=True,
         help="Output directory for retiled files (required)"
     )
-    
+
     parser.add_argument(
         "--original_tiles_dir",
         type=Path,
@@ -307,35 +304,35 @@ def main() -> None:
         required=True,
         help="Path to tile_bounds_tindex.json (required; used for neighbor graph)"
     )
-    
+
     parser.add_argument(
         "--original_input_dir",
         type=Path,
         default=None,
         help="Directory with original input LAZ files for final remap (optional, enables Stage 7)"
     )
-    
+
     parser.add_argument(
         "--buffer",
         type=float,
         default=MERGE_PARAMS.get('buffer', 10.0),
         help=f"Buffer zone distance in meters (default: {MERGE_PARAMS.get('buffer', 10.0)})"
     )
-    
+
     parser.add_argument(
         "--overlap_threshold",
         type=float,
         default=MERGE_PARAMS.get('overlap_threshold', 0.3),
         help=f"Overlap ratio threshold (default: {MERGE_PARAMS.get('overlap_threshold', 0.3)})"
     )
-    
+
     parser.add_argument(
         "--max_centroid_distance",
         type=float,
         default=MERGE_PARAMS.get('max_centroid_distance', 3.0),
         help=f"Max centroid distance (default: {MERGE_PARAMS.get('max_centroid_distance', 3.0)})"
     )
-    
+
     parser.add_argument(
         "--correspondence_tolerance",
         type=float,
@@ -349,14 +346,14 @@ def main() -> None:
         default=MERGE_PARAMS.get('max_volume_for_merge', 4.0),
         help=f"Max volume for small instance merge (default: {MERGE_PARAMS.get('max_volume_for_merge', 4.0)})"
     )
-    
+
     parser.add_argument(
         "--min_cluster_size",
         type=int,
         default=MERGE_PARAMS.get('min_cluster_size', 300),
         help=f"Minimum cluster size in points for reassignment (default: {MERGE_PARAMS.get('min_cluster_size', 300)})"
     )
-    
+
     parser.add_argument(
         "--num_threads", "--workers",
         type=int,
@@ -391,33 +388,33 @@ def main() -> None:
         action="store_true",
         help="Disable cross-tile instance matching"
     )
-    
+
     parser.add_argument(
         "--disable_overlap_check",
         action="store_true",
         help="Disable overlap ratio check (centroid distance only)"
     )
-    
+
     parser.add_argument(
         "--disable_volume_merge",
         action="store_true",
         help="Disable small volume instance merging"
     )
-    
+
     parser.add_argument(
         "--skip_merged_file",
         action="store_true",
         help="Skip creating merged LAZ file (only create retiled outputs)"
     )
-    
+
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Print detailed merge decisions"
     )
-    
+
     args = parser.parse_args()
-    
+
     # Run pipeline
     try:
         output_file = run_merge(

@@ -11,13 +11,13 @@ from laspy.vlrs.vlr import VLR
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from merge_tiles import (  # noqa: E402
-    _point_cloud_files,
+from instance_labels import (  # noqa: E402
     instance_output_dtype,
-    load_tile,
-    merged_product_header,
     validate_prediction_instance_labels,
 )
+from merge_tiles import load_tile  # noqa: E402
+from point_cloud_metadata import copc_files, point_cloud_files, raw_point_cloud_files  # noqa: E402
+from point_cloud_outputs import merged_product_header, write_loaded_point_cloud  # noqa: E402
 
 
 def _write_las_with_predinstance(path: Path, values: np.ndarray) -> None:
@@ -58,7 +58,13 @@ def _write_source_las(path: Path, system_identifier: str, projection_payload: by
 
 
 class InstanceLabelContractTests(unittest.TestCase):
-    def test_point_cloud_files_prefers_raw_files_but_accepts_copc_only_inputs(self):
+    def test_cli_help_documents_uint32_threshold(self):
+        main_remap = (Path(__file__).resolve().parents[1] / "src" / "main_remap.py").read_text()
+
+        self.assertIn("uint32 above 65,535", main_remap)
+        self.assertNotIn("63,535", main_remap)
+
+    def test_point_cloud_files_prefers_copc_twins_but_accepts_raw_only_inputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             directory = Path(tmpdir)
             raw = directory / "source.laz"
@@ -66,13 +72,34 @@ class InstanceLabelContractTests(unittest.TestCase):
             raw.write_text("raw")
             copc.write_text("copc")
 
-            self.assertEqual(_point_cloud_files(directory), [raw])
+            self.assertEqual(point_cloud_files(directory), [copc])
 
-            raw.unlink()
-            self.assertEqual(_point_cloud_files(directory), [copc])
+            copc.unlink()
+            self.assertEqual(point_cloud_files(directory), [raw])
+
+    def test_point_cloud_file_discovery_is_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            directory = Path(tmpdir)
+            raw = directory / "UPPER.LAZ"
+            copc = directory / "UPPER.COPC.LAZ"
+            las = directory / "OTHER.LAS"
+            raw.write_text("raw")
+            copc.write_text("copc")
+            las.write_text("las")
+
+            self.assertEqual(point_cloud_files(directory), [las, copc])
+            self.assertEqual(raw_point_cloud_files(directory), [las, raw])
+            self.assertEqual(copc_files(directory), [copc])
+
+    def test_point_cloud_file_discovery_missing_directory_is_empty(self):
+        missing = Path("/tmp/smarttile_missing_point_cloud_dir_for_test")
+
+        self.assertEqual(point_cloud_files(missing), [])
+        self.assertEqual(raw_point_cloud_files(missing), [])
+        self.assertEqual(copc_files(missing), [])
 
     def test_accepts_background_and_positive_instances(self):
-        validate_prediction_instance_labels(np.array([0, 1, 63_535], dtype=np.uint16))
+        validate_prediction_instance_labels(np.array([0, 1, 65_535], dtype=np.uint16))
 
     def test_rejects_negative_prediction_instance_labels(self):
         with self.assertRaisesRegex(ValueError, "SmartTile expects PredInstance=0"):
@@ -83,8 +110,8 @@ class InstanceLabelContractTests(unittest.TestCase):
             )
 
     def test_dtype_selection_still_uses_uint32_only_above_threshold(self):
-        self.assertEqual(instance_output_dtype(np.array([0, 63_535], dtype=np.uint32)), np.dtype(np.uint16))
-        self.assertEqual(instance_output_dtype(np.array([0, 63_536], dtype=np.uint32)), np.dtype(np.uint32))
+        self.assertEqual(instance_output_dtype(np.array([0, 65_535], dtype=np.uint32)), np.dtype(np.uint16))
+        self.assertEqual(instance_output_dtype(np.array([0, 65_536], dtype=np.uint32)), np.dtype(np.uint32))
 
     def test_load_tile_fails_fast_on_negative_predinstance(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -148,6 +175,34 @@ class InstanceLabelContractTests(unittest.TestCase):
                 [(v.user_id, v.record_id) for v in header.vlrs],
                 [("LASF_Projection", 34735)],
             )
+
+    def test_write_loaded_point_cloud_preserves_selected_standard_dimensions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source.las"
+            output = Path(tmpdir) / "filtered.laz"
+            header = laspy.LasHeader(point_format=3, version="1.2")
+            header.scales = np.array([0.001, 0.001, 0.001])
+            header.offsets = np.array([100.0, 200.0, 300.0])
+            las = laspy.LasData(header)
+            las.x = np.array([100.0, 100.1, 100.2])
+            las.y = np.array([200.0, 200.1, 200.2])
+            las.z = np.array([300.0, 300.1, 300.2])
+            las.intensity = np.array([11, 22, 33], dtype=np.uint16)
+            las.classification = np.array([2, 3, 4], dtype=np.uint8)
+            las.write(source)
+
+            write_loaded_point_cloud(
+                source,
+                output,
+                np.array([[100.0, 200.0, 300.0], [100.2, 200.2, 300.2]]),
+                {"PredInstance": np.array([1, 2], dtype=np.uint16)},
+                source_indices=np.array([0, 2]),
+            )
+
+            out = laspy.read(output)
+            np.testing.assert_array_equal(out.intensity, np.array([11, 33], dtype=np.uint16))
+            np.testing.assert_array_equal(out.classification, np.array([2, 4], dtype=np.uint8))
+            np.testing.assert_array_equal(out.PredInstance, np.array([1, 2], dtype=np.uint16))
 
 
 if __name__ == "__main__":

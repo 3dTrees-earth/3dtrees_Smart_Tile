@@ -1,14 +1,12 @@
 import json
 import subprocess
 import sys
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.modules.setdefault("parameters", types.SimpleNamespace(TILE_PARAMS=types.SimpleNamespace()))
 
 from main_subsample import get_file_bounds  # noqa: E402
 

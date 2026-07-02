@@ -10,29 +10,20 @@ import numpy as np
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.modules.setdefault(
-    "parameters",
-    types.SimpleNamespace(
-        TILE_PARAMS={
-            "subsampling_method": "center-of-mass",
-            "resolution_1": 0.01,
-            "resolution_2": 0.1,
-            "threads": 2,
-        }
-    ),
-)
 
 from main_subsample import (  # noqa: E402
     SUBSAMPLING_METHOD_CENTER_OF_MASS,
     SUBSAMPLING_METHOD_NEAREST_TO_CENTROID,
     _aggregate_center_of_mass_xyz,
     _iter_copc_center_of_mass_windows,
+    _subsample_input_files,
     _voxel_subsampling_filter,
     _write_center_of_mass_points,
     center_of_mass_subsample_las,
     normalize_subsampling_method,
 )
 import main_subsample  # noqa: E402
+import subsample_com  # noqa: E402
 
 
 class FakePoints:
@@ -129,7 +120,7 @@ class SubsamplingMethodTests(unittest.TestCase):
             scales=np.array([0.01, 0.01, 0.01]),
         )
 
-        with mock.patch.object(main_subsample, "COPC_COM_TARGET_WINDOW_CELLS", 1):
+        with mock.patch.object(subsample_com, "COPC_COM_TARGET_WINDOW_CELLS", 1):
             windows = list(_iter_copc_center_of_mass_windows(header, 0.2))
 
         self.assertEqual(len(windows), 2)
@@ -163,6 +154,156 @@ class SubsamplingMethodTests(unittest.TestCase):
 
             self.assertEqual(result, (input_file.name, True, "Success", 42))
             optimized.assert_called_once_with(input_file, output_file, 0.2, num_workers=8)
+
+    def test_subsample_parallel_uses_copc_extension_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            input_dir = tmp_path / "tiles"
+            output_dir = tmp_path / "subsampled"
+            input_dir.mkdir()
+            (input_dir / "tile.copc.laz").write_bytes(b"placeholder")
+
+            def fake_subsample(args):
+                output_file = args[1]
+                output_copc = args[-1]
+                output_file.write_bytes(b"placeholder")
+                return (args[0].name, True, "Success", 1 if output_copc else 0)
+
+            with mock.patch.object(main_subsample, "subsample_single_file", side_effect=fake_subsample) as worker:
+                outputs = main_subsample.subsample_parallel(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    resolution=0.01,
+                    num_cores=1,
+                    num_threads=1,
+                    output_copc=True,
+                )
+
+            self.assertEqual([path.name for path in outputs], ["tile_subsampled_1cm.copc.laz"])
+            self.assertTrue(worker.call_args.args[0][-1])
+
+    def test_subsample_parallel_strips_previous_subsampled_cm_suffix(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            input_dir = tmp_path / "subsampled_res1"
+            output_dir = tmp_path / "subsampled_res2"
+            input_dir.mkdir()
+            (input_dir / "tile_subsampled_1cm.copc.laz").write_bytes(b"placeholder")
+
+            def fake_subsample(args):
+                output_file = args[1]
+                output_file.write_bytes(b"placeholder")
+                return (args[0].name, True, "Success", 1)
+
+            with mock.patch.object(main_subsample, "subsample_single_file", side_effect=fake_subsample):
+                outputs = main_subsample.subsample_parallel(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    resolution=0.1,
+                    num_cores=1,
+                    num_threads=1,
+                    output_copc=False,
+                )
+
+            self.assertEqual([path.name for path in outputs], ["tile_subsampled_10cm.laz"])
+            self.assertFalse((output_dir / "tile_subsampled_subsampled_10cm.laz").exists())
+
+    def test_subsample_parallel_manifest_skips_matching_rerun(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            input_dir = tmp_path / "tiles"
+            output_dir = tmp_path / "subsampled"
+            input_dir.mkdir()
+            (input_dir / "tile.laz").write_bytes(b"placeholder")
+
+            def fake_subsample(args):
+                output_file = args[1]
+                output_file.write_bytes(b"subsampled")
+                return (args[0].name, True, "Success", 1)
+
+            with mock.patch.object(main_subsample, "subsample_single_file", side_effect=fake_subsample) as worker:
+                first = main_subsample.subsample_parallel(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    resolution=0.01,
+                    num_cores=1,
+                    num_threads=1,
+                    output_copc=False,
+                    subsampling_method="center-of-mass",
+                )
+                second = main_subsample.subsample_parallel(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    resolution=0.01,
+                    num_cores=1,
+                    num_threads=1,
+                    output_copc=False,
+                    subsampling_method="center-of-mass",
+                )
+
+            self.assertEqual([path.name for path in first], ["tile_subsampled_1cm.laz"])
+            self.assertEqual([path.name for path in second], ["tile_subsampled_1cm.laz"])
+            self.assertEqual(worker.call_count, 1)
+
+    def test_subsample_parallel_rebuilds_when_method_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            input_dir = tmp_path / "tiles"
+            output_dir = tmp_path / "subsampled"
+            input_dir.mkdir()
+            (input_dir / "tile.laz").write_bytes(b"placeholder")
+
+            writes = []
+
+            def fake_subsample(args):
+                output_file = args[1]
+                method = args[6]
+                writes.append(method)
+                output_file.write_bytes(method.encode("ascii"))
+                return (args[0].name, True, "Success", 1)
+
+            with mock.patch.object(main_subsample, "subsample_single_file", side_effect=fake_subsample):
+                main_subsample.subsample_parallel(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    resolution=0.01,
+                    num_cores=1,
+                    num_threads=1,
+                    output_copc=False,
+                    subsampling_method="center-of-mass",
+                )
+                main_subsample.subsample_parallel(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    resolution=0.01,
+                    num_cores=1,
+                    num_threads=1,
+                    output_copc=False,
+                    subsampling_method="nearest-to-centroid",
+                )
+
+            self.assertEqual(writes, ["center-of-mass", "nearest-to-centroid"])
+            self.assertEqual((output_dir / "tile_subsampled_1cm.laz").read_bytes(), b"nearest-to-centroid")
+
+    def test_subsample_input_files_include_mixed_laz_and_las(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir)
+            (input_dir / "first.laz").write_bytes(b"placeholder")
+            (input_dir / "second.las").write_bytes(b"placeholder")
+
+            files = [path.name for path in _subsample_input_files(input_dir)]
+
+        self.assertEqual(files, ["first.laz", "second.las"])
+
+    def test_subsample_input_files_prefer_copc_twin(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir)
+            (input_dir / "tile.laz").write_bytes(b"placeholder")
+            (input_dir / "tile.copc.laz").write_bytes(b"placeholder")
+
+            files = [path.name for path in _subsample_input_files(input_dir)]
+
+        self.assertEqual(files, ["tile.copc.laz"])
 
     def test_center_of_mass_points_can_be_written_in_streamed_batches(self):
         with tempfile.TemporaryDirectory() as tmpdir:

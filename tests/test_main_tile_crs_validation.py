@@ -1,6 +1,5 @@
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
@@ -10,14 +9,12 @@ from laspy.vlrs.vlr import VLR
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.modules.setdefault("plot_tiles_and_copc", types.SimpleNamespace())
-sys.modules.setdefault("parameters", types.SimpleNamespace(TILE_PARAMS=types.SimpleNamespace()))
 
-from main_tile import (  # noqa: E402
-    _append_source_geotiff_projection_evlrs,
-    _copc_preserves_source_crs,
-    _crs_authority_string,
-    _crs_equivalent,
+from copc_metadata import (  # noqa: E402
+    append_source_geotiff_projection_evlrs,
+    copc_preserves_source_crs,
+    crs_authority_string,
+    crs_equivalent,
 )
 
 
@@ -74,24 +71,24 @@ class CopcCrsValidationTests(unittest.TestCase):
     def test_crs_authority_string_prefers_authority_code(self):
         header = _FakeHeader(_FakeCrs(authority=("EPSG", "32632"), epsg=32633))
 
-        self.assertEqual(_crs_authority_string(header), "EPSG:32632")
+        self.assertEqual(crs_authority_string(header), "EPSG:32632")
 
     def test_crs_authority_string_falls_back_to_epsg_code(self):
         header = _FakeHeader(_FakeCrs(authority=None, epsg=32632))
 
-        self.assertEqual(_crs_authority_string(header), "EPSG:32632")
+        self.assertEqual(crs_authority_string(header), "EPSG:32632")
 
     def test_crs_equivalent_accepts_same_authority_with_different_wkt(self):
         source = _FakeCrs(authority=("EPSG", "4978"), wkt="LONG_WKT")
         output = _FakeCrs(authority=("EPSG", "4978"), wkt="SHORT_WKT")
 
-        self.assertTrue(_crs_equivalent(source, output))
+        self.assertTrue(crs_equivalent(source, output))
 
     def test_crs_equivalent_accepts_pyproj_equals_match(self):
         source = _FakeCrs(wkt="LONG_WKT", equals_result=True)
         output = _FakeCrs(wkt="SHORT_WKT")
 
-        self.assertTrue(_crs_equivalent(source, output))
+        self.assertTrue(crs_equivalent(source, output))
 
     def test_accepts_matching_projection_vlr(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -102,7 +99,7 @@ class CopcCrsValidationTests(unittest.TestCase):
             _write_las(source, payload)
             _write_las(output, payload)
 
-            ok, message = _copc_preserves_source_crs(source, output)
+            ok, message = copc_preserves_source_crs(source, output)
 
             self.assertTrue(ok, message)
 
@@ -114,7 +111,7 @@ class CopcCrsValidationTests(unittest.TestCase):
             _write_las(source, b"\x01\x00\x01\x00\x00\x00\x01\x00\x00\x00\x04\x00\x01\x00r\x13", record_id=34735)
             _write_las(output, None)
 
-            ok, message = _copc_preserves_source_crs(source, output)
+            ok, message = copc_preserves_source_crs(source, output)
 
             self.assertFalse(ok)
             self.assertIn("missing or changed", message)
@@ -131,11 +128,41 @@ class CopcCrsValidationTests(unittest.TestCase):
             )
             _write_las(output, None)
 
-            ok, message = _append_source_geotiff_projection_evlrs(source, output)
+            ok, message = append_source_geotiff_projection_evlrs(source, output)
             self.assertTrue(ok, message)
-            ok, message = _copc_preserves_source_crs(source, output)
+            ok, message = copc_preserves_source_crs(source, output)
 
             self.assertTrue(ok, message)
+
+    def test_appends_source_wkt_projection_vlr_as_output_evlr(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source = tmp_path / "source.las"
+            output = tmp_path / "output.las"
+            _write_las(source, b'PROJCS["source-original"]', record_id=2112)
+            _write_las(output, b'PROJCS["writer-normalized"]', record_id=2112)
+
+            ok, message = append_source_geotiff_projection_evlrs(source, output)
+            self.assertTrue(ok, message)
+            ok, message = copc_preserves_source_crs(source, output)
+
+            self.assertTrue(ok, message)
+
+    def test_does_not_append_duplicate_matching_wkt_projection_vlr(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source = tmp_path / "source.las"
+            output = tmp_path / "output.las"
+            payload = b'PROJCS["source-original"]'
+            _write_las(source, payload, record_id=2112)
+            _write_las(output, payload, record_id=2112)
+
+            ok, message = append_source_geotiff_projection_evlrs(source, output)
+
+            self.assertTrue(ok, message)
+            self.assertEqual(message, "projection VLRs already preserved")
+            with laspy.open(output) as reader:
+                self.assertEqual(int(reader.header.number_of_evlrs or 0), 0)
 
     def test_rejects_changed_projection_vlr(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -145,7 +172,7 @@ class CopcCrsValidationTests(unittest.TestCase):
             _write_las(source, b'LOCAL_CS["3dtrees-test"]')
             _write_las(output, b'LOCAL_CS["different"]')
 
-            ok, message = _copc_preserves_source_crs(source, output)
+            ok, message = copc_preserves_source_crs(source, output)
 
             self.assertFalse(ok)
             self.assertIn("missing or changed", message)
@@ -158,7 +185,7 @@ class CopcCrsValidationTests(unittest.TestCase):
             _write_las(source, None)
             _write_las(output, None)
 
-            ok, message = _copc_preserves_source_crs(source, output)
+            ok, message = copc_preserves_source_crs(source, output)
 
             self.assertTrue(ok, message)
 

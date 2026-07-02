@@ -7,7 +7,7 @@ by matching files based on their spatial boundaries, then using KDTree nearest n
 lookup to transfer attributes.
 
 Usage:
-    python main_remap.py --source_folder /path/to/segmented --target_folder /path/to/2cm --output_folder /path/to/output
+    python main_remap.py --source_folder /path/to/segmented --target_folder /path/to/res1 --output_folder /path/to/output
 """
 
 from __future__ import annotations
@@ -23,25 +23,46 @@ import numpy as np
 import laspy
 from concurrent.futures import ProcessPoolExecutor
 from scipy.spatial import cKDTree
+from laspy.vlrs.vlrlist import VLRList
 
-# For JSON-based file matching (same grid as merge)
-from merge_tiles import (
-    build_neighbor_graph_from_bounds_json,
-    _match_tiles_to_json_bounds,
+from instance_labels import (
     cast_instances_for_output,
-    extra_bytes_params_from_dimension_info,
     instance_extra_bytes_params,
     validate_prediction_instance_labels,
-)  
+)
+from point_cloud_metadata import extra_bytes_params_from_dimension_info, point_cloud_files
+from tile_bounds_graph import (
+    build_neighbor_graph_from_bounds_json,
+    match_tiles_to_json_bounds,
+)
+from worker_budget import kdtree_query_workers
+
+
+def _strip_copc_records_for_laspy_write(header: laspy.LasHeader) -> None:
+    """Remove COPC hierarchy records before writing a regular LAZ with laspy."""
+    def is_copc_record(vlr) -> bool:
+        return getattr(vlr, "user_id", "") == "copc"
+
+    header.vlrs = VLRList([
+        vlr for vlr in (getattr(header, "vlrs", []) or [])
+        if not is_copc_record(vlr)
+    ])
+
+    evlrs = getattr(header, "evlrs", None)
+    if evlrs is not None:
+        header.evlrs = VLRList([
+            vlr for vlr in evlrs
+            if not is_copc_record(vlr)
+        ])
 
 
 def get_file_bounds(filepath: Path) -> Optional[Tuple[float, float, float, float]]:
     """
     Get spatial bounds of a point cloud file using laspy header only (no point loading).
-    
+
     Args:
         filepath: Path to LAZ file
-    
+
     Returns:
         Tuple of (minx, maxx, miny, maxy) or None on error
     """
@@ -51,6 +72,11 @@ def get_file_bounds(filepath: Path) -> Optional[Tuple[float, float, float, float
             return (las.header.x_min, las.header.x_max, las.header.y_min, las.header.y_max)
     except Exception:
         return None
+
+
+def _remap_point_cloud_files(directory: Path) -> List[Path]:
+    """Return LAS/LAZ inputs for remap matching, preferring COPC twins."""
+    return point_cloud_files(directory)
 
 
 def calculate_bounds_overlap(
@@ -199,6 +225,7 @@ def remap_single_tile(
     threedtrees_suffix: str = "SAT",
     instance_dimension: str = "PredInstance",
     output_scales: Optional[Tuple[float, float, float]] = None,
+    kdtree_workers: int = 1,
 ) -> Tuple[str, bool, str, int]:
     """
     Remap predictions from segmented file to target resolution file.
@@ -208,26 +235,26 @@ def remap_single_tile(
 
     Args:
         segmented_file: Path to segmented LAZ file (e.g., 10cm with predictions)
-        target_file: Path to target resolution LAZ file (e.g., 2cm)
+        target_file: Path to target resolution LAZ file (e.g., resolution-1 subsample)
         output_file: Path for output LAZ file
-        threedtrees_dims: If set, only transfer these dims, branded as 3DT_{name}_{suffix}
+        threedtrees_dims: If set, only transfer these dims, renamed to {name}_{suffix}
         threedtrees_suffix: Suffix for branding (default: "SAT")
 
     Returns:
         Tuple of (tile_id, success, message, point_count)
     """
     tile_id = segmented_file.stem.replace('_segmented', '').replace('_results', '')
-    
+
     try:
         # Load segmented point cloud (source of predictions)
         print(f"    Loading segmented file...")
         segmented_las = laspy.read(
-            str(segmented_file), 
+            str(segmented_file),
             laz_backend=laspy.LazBackend.LazrsParallel
         )
         segmented_points = np.vstack((
-            segmented_las.x, 
-            segmented_las.y, 
+            segmented_las.x,
+            segmented_las.y,
             segmented_las.z
         )).T
         print(f"    Segmented file: {len(segmented_points):,} points")
@@ -237,34 +264,18 @@ def remap_single_tile(
                 instance_dimension,
                 segmented_file,
             )
-        
-        # Load target resolution point cloud
-        print(f"    Loading target file...")
-        target_las = laspy.read(
-            str(target_file), 
-            laz_backend=laspy.LazBackend.LazrsParallel
-        )
-        target_points = np.vstack((
-            target_las.x, 
-            target_las.y, 
-            target_las.z
-        )).T
-        print(f"    Target file: {len(target_points):,} points")
-        if output_scales is not None:
-            target_las.header.scales = np.asarray(output_scales, dtype=np.float64)
-        
+
         # Create KDTree from segmented points with progress indication
         print(f"    Building KDTree from {len(segmented_points):,} points...", end="", flush=True)
         tree = cKDTree(segmented_points)
         print(" ✓")
-        
-        # Query nearest neighbors
-        print(f"    Querying nearest neighbors for {len(target_points):,} points...", end="", flush=True)
-        distances, indices = tree.query(target_points, workers=-1)
-        print(" ✓")
-        
+
         source_extra_dims = list(segmented_las.point_format.extra_dimensions)
-        target_extra_dim_names = set(target_las.point_format.dimension_names)
+        with laspy.open(str(target_file), laz_backend=laspy.LazBackend.LazrsParallel) as target_reader:
+            output_header = target_reader.header.copy()
+            target_point_count = target_reader.header.point_count
+
+        target_extra_dim_names = set(output_header.point_format.dimension_names)
 
         if len(source_extra_dims) == 0:
             print(f"    Warning: No extra dimensions found in segmented file")
@@ -278,7 +289,7 @@ def remap_single_tile(
             if threedtrees_dims is not None:
                 if dim_name not in threedtrees_dims:
                     continue
-                out_name = f"3DT_{dim_name}_{threedtrees_suffix}" if threedtrees_suffix else f"3DT_{dim_name}"
+                out_name = f"{dim_name}_{threedtrees_suffix}" if threedtrees_suffix else dim_name
                 cast_as_instance = False
             else:
                 # No branding — use collision-safe naming
@@ -289,36 +300,79 @@ def remap_single_tile(
                         suffix += 1
                     out_name = f"{dim_name}_{suffix}"
             extra_params = (
-                instance_extra_bytes_params(out_name, getattr(segmented_las, dim_name)[indices])
+                instance_extra_bytes_params(out_name, getattr(segmented_las, dim_name))
                 if cast_as_instance
                 else extra_bytes_params_from_dimension_info(dim_info, name=out_name)
             )
             dims_to_add.append((extra_params, dim_name, cast_as_instance))
             target_extra_dim_names.add(out_name)
-        
+
+        if output_scales is not None:
+            output_header.scales = np.asarray(output_scales, dtype=np.float64)
+        _strip_copc_records_for_laspy_write(output_header)
         if dims_to_add:
-            target_las.add_extra_dims([params for params, _, _ in dims_to_add])
-            for params, src_name, cast_as_instance in dims_to_add:
-                values = getattr(segmented_las, src_name)[indices]
-                if cast_as_instance:
-                    values = cast_instances_for_output(values, src_name)
-                setattr(target_las, params.name, values)
-        
+            output_header.add_extra_dims([params for params, _, _ in dims_to_add])
+
+        source_dim_values = {
+            src_name: getattr(segmented_las, src_name)
+            for _, src_name, _ in dims_to_add
+        }
+
+        def copy_target_chunk(
+            target_chunk: laspy.ScaleAwarePointRecord,
+        ) -> laspy.ScaleAwarePointRecord:
+            out_chunk = laspy.ScaleAwarePointRecord.zeros(len(target_chunk), header=output_header)
+            out_chunk.x = np.asarray(target_chunk.x)
+            out_chunk.y = np.asarray(target_chunk.y)
+            out_chunk.z = np.asarray(target_chunk.z)
+            for name in target_chunk.point_format.dimension_names:
+                if name in {"X", "Y", "Z"}:
+                    continue
+                if name in out_chunk.point_format.dimension_names:
+                    out_chunk[name] = target_chunk[name]
+            return out_chunk
+
         # Create output directory if needed
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Save output
-        with open(str(output_file), "wb") as f:
-            target_las.write(
-                f, 
-                do_compress=True, 
-                laz_backend=laspy.LazBackend.LazrsParallel
-            )
-            f.flush()
-            os.fsync(f.fileno())
-        
-        return (tile_id, True, "Success", len(target_points))
-        
+
+        chunk_size = int(os.environ.get("SMARTTILE_REMAP_CHUNK_SIZE", "5000000"))
+        processed = 0
+        print(
+            f"    Streaming nearest-neighbor remap for {target_point_count:,} target points "
+            f"in chunks of {chunk_size:,}...",
+            flush=True,
+        )
+
+        with laspy.open(str(target_file), laz_backend=laspy.LazBackend.LazrsParallel) as target_reader:
+            with laspy.open(
+                str(output_file),
+                mode="w",
+                header=output_header,
+                laz_backend=laspy.LazBackend.LazrsParallel,
+            ) as writer:
+                for target_chunk in target_reader.chunk_iterator(chunk_size):
+                    target_points = np.vstack((
+                        target_chunk.x,
+                        target_chunk.y,
+                        target_chunk.z,
+                    )).T
+                    _, indices = tree.query(target_points, workers=kdtree_workers)
+                    out_chunk = copy_target_chunk(target_chunk)
+                    for params, src_name, cast_as_instance in dims_to_add:
+                        values = source_dim_values[src_name][indices]
+                        if cast_as_instance:
+                            values = cast_instances_for_output(values, src_name)
+                        out_chunk[params.name] = values
+                    writer.write_points(out_chunk)
+                    processed += len(target_chunk)
+                    if processed % 25_000_000 < len(target_chunk) or processed == target_point_count:
+                        print(
+                            f"    Remapped {processed:,}/{target_point_count:,} points",
+                            flush=True,
+                        )
+
+        return (tile_id, True, "Success", target_point_count)
+
     except Exception as e:
         return (tile_id, False, str(e), 0)
 
@@ -334,8 +388,8 @@ def _match_files_via_json(
     Both source and target files are matched to JSON entries (stepwise bounds/centroid);
     pairs are formed by shared JSON index. Uses the same stable matching as merge.
     """
-    source_files = sorted(source_folder.glob("*.laz")) or sorted(source_folder.glob("*.las"))
-    target_files = sorted(target_folder.glob("*.laz")) or sorted(target_folder.glob("*.las"))
+    source_files = _remap_point_cloud_files(source_folder)
+    target_files = _remap_point_cloud_files(target_folder)
     if not source_files or not target_files:
         return []
 
@@ -374,10 +428,10 @@ def _match_files_via_json(
     if not target_boundaries:
         raise ValueError("Could not read bounds from any target file")
 
-    source_to_json, json_to_source = _match_tiles_to_json_bounds(
+    source_to_json, json_to_source = match_tiles_to_json_bounds(
         source_boundaries, json_bounds, centers
     )
-    target_to_json, json_to_target = _match_tiles_to_json_bounds(
+    target_to_json, json_to_target = match_tiles_to_json_bounds(
         target_boundaries, json_bounds, centers
     )
 
@@ -420,7 +474,7 @@ def find_matching_files(
 
     Args:
         source_folder: Directory containing source LAZ files (e.g., segmented files)
-        target_folder: Directory containing target LAZ files (e.g., 2cm subsampled files)
+        target_folder: Directory containing target LAZ files (e.g., resolution-1 subsampled files)
         overlap_threshold: DEPRECATED - not used (kept for compatibility)
         verbose: If True, print detailed matching diagnostics
         tile_bounds_json: Optional path to tile_bounds_tindex.json for grid-based matching
@@ -435,8 +489,8 @@ def find_matching_files(
     matches = []
 
     # Get all LAZ/LAS files from both folders (flat structure)
-    source_files = sorted(source_folder.glob("*.laz")) or sorted(source_folder.glob("*.las"))
-    target_files = sorted(target_folder.glob("*.laz")) or sorted(target_folder.glob("*.las"))
+    source_files = _remap_point_cloud_files(source_folder)
+    target_files = _remap_point_cloud_files(target_folder)
 
     if not source_files:
         print(f"  Warning: No LAZ/LAS files found in source folder: {source_folder}")
@@ -574,13 +628,14 @@ def find_matching_files(
 
 def _remap_worker_item(item):
     """Unpack work item and call remap_single_tile; must be at module level for ProcessPoolExecutor pickle."""
-    src, tgt, out, _tid, instance_dimension, output_scales = item
+    src, tgt, out, _tid, instance_dimension, output_scales, kdtree_workers = item
     return remap_single_tile(
         src,
         tgt,
         out,
         instance_dimension=instance_dimension,
         output_scales=output_scales,
+        kdtree_workers=kdtree_workers,
     )
 
 
@@ -603,7 +658,7 @@ def remap_all_tiles(
 
     Args:
         source_folder: Path to folder containing source LAZ files (e.g., segmented files)
-        target_folder: Path to folder containing target LAZ files (e.g., 2cm subsampled files)
+        target_folder: Path to folder containing target LAZ files (e.g., resolution-1 subsampled files)
         output_folder: Output folder for remapped files
         overlap_threshold: Minimum spatial overlap percentage required (default: 99.0%)
         verbose: If True, print detailed matching diagnostics
@@ -651,10 +706,10 @@ def remap_all_tiles(
             "file bounds are matched to the JSON tile bounds."
         )
         raise ValueError(msg)
-    
+
     print(f"Found {len(matches)} matching file pairs")
     print()
-    
+
     # Build work items, skipping already-processed tiles
     successful = 0
     failed = 0
@@ -675,7 +730,12 @@ def remap_all_tiles(
         print(f"  All tiles already processed!")
     else:
         n_procs = min(max(1, num_workers), len(work_items))
-        print(f"  Processing {len(work_items)} tiles with {n_procs} workers...")
+        query_workers = kdtree_query_workers(num_workers, n_procs)
+        work_items = [(*item, query_workers) for item in work_items]
+        print(
+            f"  Processing {len(work_items)} tiles with {n_procs} workers; "
+            f"{query_workers} KDTree query worker(s) each..."
+        )
 
         with ProcessPoolExecutor(max_workers=n_procs) as executor:
             for i, result in enumerate(executor.map(_remap_worker_item, work_items)):
@@ -688,7 +748,7 @@ def remap_all_tiles(
                 else:
                     failed += 1
                     print(f"  [{i+1}/{len(work_items)}] ✗ {tile_id}: {message}")
-    
+
     # Summary
     print()
     print("=" * 60)
@@ -698,7 +758,7 @@ def remap_all_tiles(
     print(f"  Failed: {failed}")
     print(f"  Total points: {total_points:,}")
     print(f"  Output: {output_folder}")
-    
+
     return output_folder
 
 
@@ -710,34 +770,34 @@ def main():
         epilog="""
 Examples:
   # Remap files matching by bounds
-  python main_remap.py --source_folder /path/to/segmented --target_folder /path/to/2cm --output_folder /path/to/output
-  
+  python main_remap.py --source_folder /path/to/segmented --target_folder /path/to/res1 --output_folder /path/to/output
+
   # Remap with custom tolerance
-  python main_remap.py --source_folder /path/to/segmented --target_folder /path/to/2cm --output_folder /path/to/output --tolerance 10.0
+  python main_remap.py --source_folder /path/to/segmented --target_folder /path/to/res1 --output_folder /path/to/output --tolerance 10.0
         """
     )
-    
+
     parser.add_argument(
         "--source_folder",
         type=Path,
         required=True,
         help="Path to folder containing source LAZ files (e.g., segmented files with predictions)"
     )
-    
+
     parser.add_argument(
         "--target_folder",
         type=Path,
         required=True,
-        help="Path to folder containing target LAZ files (e.g., 2cm subsampled files)"
+        help="Path to folder containing target LAZ files (e.g., resolution-1 subsampled files)"
     )
-    
+
     parser.add_argument(
         "--output_folder",
         type=Path,
         required=True,
         help="Output folder for remapped files"
     )
-    
+
     parser.add_argument(
         "--tolerance",
         type=float,
@@ -766,7 +826,7 @@ Examples:
         "--instance-dimension",
         type=str,
         default="PredInstance",
-        help="Name of the instance ID dimension to persist as uint16, or uint32 above 63,535 (default: PredInstance)"
+        help="Name of the instance ID dimension to persist as uint16, or uint32 above 65,535 (default: PredInstance)"
     )
 
     args = parser.parse_args()

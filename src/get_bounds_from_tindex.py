@@ -21,10 +21,10 @@ except ImportError as e:
 
 def load_extent_from_tindex(tindex_path: Path):
     """Load extent from tindex shapefile.
-    
+
     Returns:
         Tuple of (minx, miny, maxx, maxy), crs_string
-        
+
     The coordinates are returned in the native units of the data (assumed metric).
     """
     with fiona.open(tindex_path) as src:
@@ -36,16 +36,16 @@ def load_extent_from_tindex(tindex_path: Path):
                 srs_info = crs.to_string()
             except Exception:
                 srs_info = str(src.crs)
-        
+
         print(f"  Detected CRS: {srs_info} (Treating as Planar/Metric)", file=sys.stderr)
-        
+
         if srs_info == "missing":
              print(f"  ⚠ Warning: CRS missing; tiling in dataset-local planar coordinates.", file=sys.stderr)
-        
+
         # Get bounds of all features
         minx = miny = math.inf
         maxx = maxy = -math.inf
-        
+
         feature_count = 0
         for feature in src:
             feature_count += 1
@@ -56,13 +56,13 @@ def load_extent_from_tindex(tindex_path: Path):
                 coords = [c for poly in geom['coordinates'] for c in poly[0]]
             else:
                 continue
-            
+
             xs, ys = zip(*coords)
             minx = min(minx, min(xs))
             miny = min(miny, min(ys))
             maxx = max(maxx, max(xs))
             maxy = max(maxy, max(ys))
-        
+
         if feature_count == 0:
             bounds = src.bounds
             if bounds and bounds != (0.0, 0.0, 0.0, 0.0):
@@ -75,7 +75,7 @@ def load_extent_from_tindex(tindex_path: Path):
 
 def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, grid_offset=0.0):
     """Build tile grid.
-    
+
     Args:
         minx, miny, maxx, maxy: Data extent bounds
         length: Tile size in units
@@ -89,7 +89,7 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, gri
             f"Invalid bounds detected (infinity or NaN): "
             f"minx={minx}, miny={miny}, maxx={maxx}, maxy={maxy}."
         )
-    
+
     if align_to_grid:
         start_x = math.floor((minx + grid_offset) / length) * length
         start_y = math.floor((miny + grid_offset) / length) * length
@@ -107,12 +107,12 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, gri
             )
         end_x = math.ceil(x_range / length) * length + start_x
         end_y = math.ceil(y_range / length) * length + start_y
-    
+
     # Estimate number of tiles and warn if excessive
     num_tiles_x = int(math.ceil((end_x - start_x) / length))
     num_tiles_y = int(math.ceil((end_y - start_y) / length))
     total_tiles = num_tiles_x * num_tiles_y
-    
+
     # Warn if creating too many tiles (more than 1 million)
     MAX_TILES = 1000000
     if total_tiles > MAX_TILES:
@@ -182,7 +182,7 @@ def main():
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("/home/kg281/data/output/pdal_experiments/tile_bounds_tindex.json"),
+        default=Path("tile_bounds_tindex.json"),
         help="Where to write the tile bounds JSON summary",
     )
     parser.add_argument(
@@ -194,18 +194,18 @@ def main():
     args = parser.parse_args()
 
     (minx, miny, maxx, maxy), srs = load_extent_from_tindex(args.tindex_path)
-    
+
     # Always treat as planar/metric
     proj_minx, proj_miny, proj_maxx, proj_maxy = minx, miny, maxx, maxy
     proj_crs = srs if srs != "missing" else args.proj_crs
-    
+
     # geo_extent matches proj_extent because we assume metric
     geo_minx, geo_miny, geo_maxx, geo_maxy = minx, miny, maxx, maxy
-    
+
     # Use data-aligned tiling
     tiles, grid_bounds = build_tiles(
-        proj_minx, proj_miny, proj_maxx, proj_maxy, 
-        args.tile_length, args.tile_buffer, 
+        proj_minx, proj_miny, proj_maxx, proj_maxy,
+        args.tile_length, args.tile_buffer,
         align_to_grid=False,
         grid_offset=args.grid_offset
     )

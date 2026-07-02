@@ -24,7 +24,7 @@ except ImportError as exc:  # pragma: no cover
     raise
 
 
-DEFAULT_BOUNDS_JSON = Path("/home/kg281/data/output/pdal_experiments/tile_bounds_tindex.json")
+DEFAULT_BOUNDS_JSON = Path("tile_bounds_tindex.json")
 
 
 def run_get_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, bounds_json_path: Path, grid_offset: float = 0.0) -> dict:
@@ -40,7 +40,7 @@ def run_get_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, bo
         cmd.append(f"--grid-offset={grid_offset}")
     print(f"[prepare_tile_jobs] running: {' '.join(cmd)}", file=sys.stderr)
     completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    
+
     if completed.returncode != 0:
         # Print the full error message
         if completed.stderr:
@@ -54,7 +54,7 @@ def run_get_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, bo
             f"stderr: {completed.stderr}\n"
             f"stdout: {completed.stdout}"
         )
-    
+
     env = {}
     for line in completed.stdout.splitlines():
         if "=" in line:
@@ -70,7 +70,7 @@ def write_job_list(bounds_json: Path, job_file: Path) -> None:
     # Get SRS from tile bounds data
     # get_bounds_from_tindex.py uses 'proj_srs' for the working projection
     srs = data.get("proj_srs", data.get("tindex_srs", "missing"))
-    
+
     transformer = None
     if srs != "missing":
         try:
@@ -82,7 +82,7 @@ def write_job_list(bounds_json: Path, job_file: Path) -> None:
         if transformer is None:
             # Fallback: if no transformer, return original bounds (planar units)
             return bx, by
-            
+
         corners = [
             transformer.transform(bx[0], by[0]),
             transformer.transform(bx[0], by[1]),
@@ -114,7 +114,7 @@ def main():
     parser.add_argument(
         "--jobs-out",
         type=Path,
-        default=Path("/home/kg281/data/output/pdal_experiments/tile_jobs.txt"),
+        default=Path("tile_jobs.txt"),
     )
     parser.add_argument(
         "--bounds-out",
@@ -143,4 +143,3 @@ def main():
 
 if __name__ == "__main__":  # pragma: no cover
     main()
-

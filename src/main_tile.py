@@ -16,668 +16,48 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
-import struct
-import subprocess
 import sys
-import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import plot_tiles_and_copc
 
+from copc_metadata import (
+    append_source_geotiff_projection_evlrs as _append_source_geotiff_projection_evlrs,
+    copc_preserves_source_crs as _copc_preserves_source_crs,
+    first_crs_source as _first_crs_source,
+    laspy_laz_backend as _laspy_laz_backend,
+)
 from parameters import TILE_PARAMS
-
-
-
-def get_pdal_path() -> str:
-    """Get the path to pdal executable."""
-    import shutil
-    # Use shutil.which to find pdal in PATH
-    pdal_path = shutil.which("pdal")
-    return pdal_path if pdal_path else "pdal"
-
-
-def get_pdal_wrench_path() -> str:
-    """Get the path to pdal_wrench executable."""
-    import shutil
-    # Use shutil.which to find pdal_wrench in PATH
-    wrench_path = shutil.which("pdal_wrench")
-    return wrench_path if wrench_path else "pdal_wrench"
-
-
-def _laspy_laz_backend():
-    """Return the LAZ backend to use for laspy (Lazrs or LazrsParallel when available)."""
-    try:
-        import laspy
-        if hasattr(laspy.LazBackend, "LazrsParallel"):
-            return laspy.LazBackend.LazrsParallel
-        if hasattr(laspy.LazBackend, "Lazrs"):
-            return laspy.LazBackend.Lazrs
-    except Exception:
-        pass
-    return None
-
-
-_PROJECTION_VLR_USER_ID = "LASF_Projection"
-_PROJECTION_VLR_RECORD_IDS = {2111, 2112, 2113, 34735, 34736, 34737}
-_GEOTIFF_PROJECTION_RECORD_IDS = {34735, 34736, 34737}
-_LAS14_START_OF_FIRST_EVLR_OFFSET = 235
-_LAS14_NUMBER_OF_EVLRS_OFFSET = 243
-
-
-def _projection_vlr_keys(header) -> set[tuple[str, int]]:
-    """Return CRS/projection VLR keys that should survive format conversion."""
-    keys = set()
-    for vlr in getattr(header, "vlrs", []):
-        user_id = getattr(vlr, "user_id", "")
-        record_id = getattr(vlr, "record_id", None)
-        if user_id == _PROJECTION_VLR_USER_ID or record_id in _PROJECTION_VLR_RECORD_IDS:
-            keys.add((user_id, record_id))
-    return keys
-
-
-def _vlr_record_bytes(vlr) -> bytes:
-    if hasattr(vlr, "record_data_bytes"):
-        try:
-            return bytes(vlr.record_data_bytes())
-        except Exception:
-            pass
-    record_data = getattr(vlr, "record_data", None)
-    if record_data is None:
-        return b""
-    try:
-        return bytes(record_data)
-    except Exception:
-        return str(record_data).encode("utf-8", errors="replace")
-
-
-def _projection_records(header, record_ids: set[int]) -> Dict[tuple[str, int], bytes]:
-    records = {}
-    collections = [getattr(header, "vlrs", [])]
-    evlrs = getattr(header, "evlrs", None)
-    if evlrs:
-        collections.append(evlrs)
-
-    for collection in collections:
-        for vlr in collection:
-            user_id = getattr(vlr, "user_id", "")
-            record_id = getattr(vlr, "record_id", None)
-            if user_id == _PROJECTION_VLR_USER_ID and record_id in record_ids:
-                records[(user_id, record_id)] = _vlr_record_bytes(vlr)
-    return records
-
-
-def _geotiff_projection_records(header) -> Dict[tuple[str, int], bytes]:
-    """Return GeoTIFF CRS projection records, including GeoKeyDirectoryVlr."""
-    return _projection_records(header, _GEOTIFF_PROJECTION_RECORD_IDS)
-
-
-def _projection_vlr_fingerprints(header) -> Dict[tuple[str, int], bytes]:
-    """Return CRS/projection VLR record bytes keyed by LAS VLR identity."""
-    return _projection_records(header, _PROJECTION_VLR_RECORD_IDS)
-
-
-def _parse_crs(header) -> Optional[Any]:
-    try:
-        return header.parse_crs()
-    except Exception:
-        return None
-
-
-def _crs_text(header) -> Optional[str]:
-    """Best-effort parseable CRS text; returns None when pyproj/CRS metadata is unavailable."""
-    crs = _parse_crs(header)
-    if crs is None:
-        return None
-    try:
-        return crs.to_wkt()
-    except Exception:
-        return str(crs)
-
-
-def _crs_authority_from_crs(crs) -> Optional[str]:
-    if crs is None:
-        return None
-
-    try:
-        authority = crs.to_authority()
-    except Exception:
-        authority = None
-    if authority and authority[0] and authority[1]:
-        return f"{authority[0].upper()}:{authority[1]}"
-
-    try:
-        epsg = crs.to_epsg()
-    except Exception:
-        epsg = None
-    if epsg:
-        return f"EPSG:{epsg}"
-    return None
-
-
-def _crs_authority_string(header) -> Optional[str]:
-    """Return a compact CRS authority string such as EPSG:32632 when available."""
-    return _crs_authority_from_crs(_parse_crs(header))
-
-
-def _crs_equivalent(source_crs, output_crs) -> bool:
-    """Return True when two parsed CRS objects describe the same CRS."""
-    if source_crs is None or output_crs is None:
-        return False
-
-    source_authority = _crs_authority_from_crs(source_crs)
-    output_authority = _crs_authority_from_crs(output_crs)
-    if source_authority and source_authority == output_authority:
-        return True
-
-    try:
-        if source_crs.equals(output_crs, ignore_axis_order=True):
-            return True
-    except Exception:
-        pass
-
-    try:
-        return source_crs.to_wkt() == output_crs.to_wkt()
-    except Exception:
-        return str(source_crs) == str(output_crs)
-
-
-def _srs_assignment_from_file(path: Path) -> Optional[str]:
-    """Read an input header and return an Untwine --a_srs value when possible."""
-    import laspy
-
-    backend = _laspy_laz_backend()
-    try:
-        with laspy.open(str(path), laz_backend=backend) as src:
-            return _crs_authority_string(src.header)
-    except Exception:
-        return None
-
-
-def _first_srs_assignment(paths: List[Path]) -> Optional[str]:
-    crs_source = _first_crs_source(paths)
-    if crs_source is None:
-        return None
-    return _srs_assignment_from_file(crs_source)
-
-
-def _evlr_record_bytes(user_id: str, record_id: int, description: str, data: bytes) -> bytes:
-    user = user_id.encode("ascii", errors="replace")[:16].ljust(16, b"\0")
-    desc = description.encode("ascii", errors="replace")[:32].ljust(32, b"\0")
-    return struct.pack("<H16sHQ32s", 0, user, int(record_id), len(data), desc) + data
-
-
-def _source_geotiff_projection_vlrs(source_file: Path) -> List[Tuple[str, int, str, bytes]]:
-    import laspy
-
-    records = []
-    backend = _laspy_laz_backend()
-    with laspy.open(str(source_file), laz_backend=backend) as src:
-        collections = [getattr(src.header, "vlrs", [])]
-        evlrs = getattr(src.header, "evlrs", None)
-        if evlrs:
-            collections.append(evlrs)
-        for collection in collections:
-            for vlr in collection:
-                user_id = getattr(vlr, "user_id", "")
-                record_id = getattr(vlr, "record_id", None)
-                if user_id == _PROJECTION_VLR_USER_ID and record_id in _GEOTIFF_PROJECTION_RECORD_IDS:
-                    records.append(
-                        (
-                            user_id,
-                            int(record_id),
-                            getattr(vlr, "description", "") or "",
-                            _vlr_record_bytes(vlr),
-                        )
-                    )
-    return records
-
-
-def _append_source_geotiff_projection_evlrs(source_file: Path, copc_file: Path) -> Tuple[bool, str]:
-    """Append original GeoTIFF projection VLRs as EVLRs without moving COPC chunks."""
-    import laspy
-
-    try:
-        source_records = _source_geotiff_projection_vlrs(source_file)
-        if not source_records:
-            return (True, "source has no GeoTIFF projection VLRs")
-
-        backend = _laspy_laz_backend()
-        with laspy.open(str(copc_file), laz_backend=backend) as out:
-            output_header = out.header
-            output_records = _geotiff_projection_records(output_header)
-            existing_count = int(getattr(output_header, "number_of_evlrs", 0) or 0)
-            existing_start = int(getattr(output_header, "start_of_first_evlr", 0) or 0)
-            if str(output_header.version) != "1.4":
-                return (False, "GeoTIFF EVLR preservation requires LAS 1.4 output")
-
-        missing = [
-            (user_id, record_id, description, data)
-            for user_id, record_id, description, data in source_records
-            if output_records.get((user_id, record_id)) != data
-        ]
-        if not missing:
-            return (True, "GeoTIFF projection VLRs already preserved")
-
-        with open(copc_file, "r+b") as f:
-            f.seek(0, os.SEEK_END)
-            append_start = f.tell()
-            for user_id, record_id, description, data in missing:
-                f.write(_evlr_record_bytes(user_id, record_id, description, data))
-            f.seek(_LAS14_START_OF_FIRST_EVLR_OFFSET)
-            f.write(struct.pack("<Q", existing_start or append_start))
-            f.seek(_LAS14_NUMBER_OF_EVLRS_OFFSET)
-            f.write(struct.pack("<I", existing_count + len(missing)))
-
-        return (True, f"appended {len(missing)} GeoTIFF projection EVLR(s)")
-    except Exception as e:
-        return (False, f"could not preserve GeoTIFF projection VLRs: {e}")
-
-
-def _crs_metadata_present(header) -> bool:
-    return bool(_projection_vlr_keys(header) or _crs_text(header))
-
-
-def _first_crs_source(paths: List[Path]) -> Optional[Path]:
-    """Return the first source file with CRS metadata, else the first source file."""
-    if not paths:
-        return None
-    import laspy
-
-    fallback = paths[0]
-    backend = _laspy_laz_backend()
-    for path in paths:
-        try:
-            with laspy.open(str(path), laz_backend=backend) as src:
-                if _crs_metadata_present(src.header):
-                    return path
-        except Exception:
-            continue
-    return fallback
-
-
-def _copc_preserves_source_crs(source_file: Path, copc_file: Path) -> Tuple[bool, str]:
-    """Validate that a COPC output still carries the source CRS/projection metadata."""
-    import laspy
-
-    backend = _laspy_laz_backend()
-    try:
-        with laspy.open(str(source_file), laz_backend=backend) as src:
-            source_header = src.header
-            source_crs = _parse_crs(source_header)
-            source_projection = _projection_vlr_fingerprints(source_header)
-            source_geotiff_projection = _geotiff_projection_records(source_header)
-
-        if not source_crs and not source_projection:
-            return (True, "source has no CRS metadata")
-
-        with laspy.open(str(copc_file), laz_backend=backend) as out:
-            output_header = out.header
-            output_crs = _parse_crs(output_header)
-            output_projection = _projection_vlr_fingerprints(output_header)
-            output_geotiff_projection = _geotiff_projection_records(output_header)
-    except Exception as e:
-        return (False, f"could not validate CRS metadata: {e}")
-
-    if source_geotiff_projection and not all(
-        output_geotiff_projection.get(key) == value
-        for key, value in source_geotiff_projection.items()
-    ):
-        return (
-            False,
-            "source GeoTIFF projection VLRs missing or changed in COPC output",
-        )
-    if _crs_equivalent(source_crs, output_crs):
-        return (True, "CRS metadata preserved")
-    if source_projection and all(
-        output_projection.get(key) == value for key, value in source_projection.items()
-    ):
-        return (True, "projection VLRs preserved")
-    if source_crs or source_projection:
-        return (
-            False,
-            "source CRS/projection metadata missing or changed in COPC output",
-        )
-    return (True, "source has no CRS metadata")
-
-
-def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
-    """
-    Build spatial index (tindex) from LAZ/LAS files.
-
-    Uses pdal tindex to create a GeoPackage containing the spatial
-    extents of all point cloud files for efficient spatial queries.
-
-    Args:
-        input_dir: Directory containing input LAZ/LAS files
-        output_gpkg: Output path for tindex GeoPackage
-
-    Returns:
-        Path to created tindex file
-    """
-    print()
-    print("=" * 60)
-    print("Step 1: Building spatial index (tindex)")
-    print("=" * 60)
-
-    # Check if tindex already exists
-    if output_gpkg.exists():
-        print(f"  Using existing tindex: {output_gpkg}")
-        return output_gpkg
-
-    # Create output directory
-    output_gpkg.parent.mkdir(parents=True, exist_ok=True)
-
-    # Find LAZ and LAS files (exclude .copc.laz)
-    source_files = sorted(
-        list(input_dir.glob("*.laz")) + list(input_dir.glob("*.las"))
-    )
-    source_files = [f for f in source_files if not f.name.endswith(".copc.laz")]
-    if not source_files:
-        raise ValueError(f"No LAZ/LAS files found in {input_dir}")
-
-    # Try to get SRS from the first file to avoid default EPSG:4326 in tindex
-    tindex_srs = None
-    try:
-        pdal_cmd = get_pdal_path()
-        info_cmd = [pdal_cmd, "info", "--metadata", str(source_files[0])]
-        info_result = subprocess.run(info_cmd, capture_output=True, text=True, check=False)
-        if info_result.returncode == 0:
-            meta = json.loads(info_result.stdout)
-            tindex_srs = meta.get("metadata", {}).get("srs", {}).get("compoundwkt") or \
-                        meta.get("metadata", {}).get("spatialreference")
-    except Exception as e:
-        print(f"  Warning: Could not extract SRS for tindex: {e}")
-
-    print(f"  Found {len(source_files)} source files")
-    print(f"  Output: {output_gpkg}")
-
-    # Create file list for pdal tindex (absolute paths, one per line).
-    # Use the path as-is (do not resolve symlinks) so the path keeps .laz/.las extension;
-    # Galaxy stages files as .dat and we symlink to input_dir/*.laz - resolving would give .dat and PDAL would fail.
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-        for pf in source_files:
-            f.write(f"{pf.absolute()}\n")
-        file_list_path = Path(f.name)
-
-    try:
-        pdal_cmd = get_pdal_path()
-        cmd = [
-            pdal_cmd, "tindex", "create",
-            str(output_gpkg),
-            "--filelist", str(file_list_path),
-            "--tindex_name=Location",
-            "--ogrdriver=GPKG",
-            "--fast_boundary",
-            "--write_absolute_path",
-        ]
-        if tindex_srs:
-            cmd.append(f"--t_srs={tindex_srs}")
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"pdal tindex failed: {result.stderr or result.stdout or 'unknown error'}"
-            )
-
-        print(f"  ✓ Tindex created: {output_gpkg}")
-
-    finally:
-        if file_list_path.exists():
-            file_list_path.unlink()
-
-    return output_gpkg
-
-
-def calculate_tile_bounds(
-    tindex_file: Path,
-    tile_length: float,
-    tile_buffer: float,
-    output_dir: Path,
-    grid_offset: float = 1.0
-) -> Tuple[Path, Path, dict]:
-    """
-    Calculate tile bounds from tindex.
-    
-    Uses prepare_tile_jobs.py to compute tile grid based on the
-    spatial extent of input files.
-    
-    Args:
-        tindex_file: Path to tindex GeoPackage
-        tile_length: Tile size in meters
-        tile_buffer: Buffer overlap in meters
-        grid_offset: Offset from min coordinates
-        output_dir: Directory for output files
-    
-    Returns:
-        Tuple of (tile_jobs_file, tile_bounds_json, env_dict)
-    """
-    print()
-    print("=" * 60)
-    print("Step 2: Calculating tile bounds")
-    print("=" * 60)
-    
-    script_dir = Path(__file__).parent
-    prepare_jobs_script = script_dir / "prepare_tile_jobs.py"
-    
-    jobs_file = output_dir / f"tile_jobs_{int(tile_length)}m.txt"
-    bounds_json = output_dir / "tile_bounds_tindex.json"
-    
-    cmd = [
-        sys.executable,
-        str(prepare_jobs_script),
-        str(tindex_file),
-        f"--tile-length={tile_length}",
-        f"--tile-buffer={tile_buffer}",
-        f"--jobs-out={jobs_file}",
-        f"--bounds-out={bounds_json}",
-        f"--grid-offset={grid_offset}"
-    ]
-    
-    print(f"  Tile length: {tile_length}m")
-    print(f"  Tile buffer: {tile_buffer}m")
-    
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    
-    if result.returncode != 0:
-        raise RuntimeError(f"prepare_tile_jobs.py failed: {result.stderr}")
-    
-    # Parse environment variables from output
-    env = {}
-    for line in result.stdout.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            env[key.strip()] = value.strip().strip('"')
-    
-    tile_count = env.get('tile_count', 'unknown')
-    print(f"  ✓ Calculated {tile_count} tiles")
-    print(f"  Jobs file: {jobs_file}")
-    print(f"  Bounds file: {bounds_json}")
-    
-    return jobs_file, bounds_json, env
-
-
-def update_tile_bounds_json_from_files(
-    tile_bounds_json: Path,
-    files_dir: Path,
-    file_glob: str = "*.laz",
-) -> int:
-    """
-    Update tile_bounds_tindex.json so each tile's bounds match the actual
-    file header bounds from the created tiles (e.g. subsampled LAZ).
-    This keeps the JSON in sync with real data extent for remap/merge matching.
-
-    Matches tiles by label c{col:02d}_r{row:02d} (e.g. c00_r00) to filenames
-    that start with that label (e.g. c00_r00_subsampled_1cm.laz).
-
-    Returns:
-        Number of tiles whose bounds were updated.
-    """
-    from merge_tiles import get_tile_bounds_from_header
-
-    if not tile_bounds_json.exists():
-        return 0
-    with tile_bounds_json.open() as f:
-        data = json.load(f)
-    tiles = data.get("tiles", [])
-    if not tiles:
-        return 0
-
-    # Build label -> file path from files_dir
-    label_to_path: Dict[str, Path] = {}
-    for f in files_dir.glob(file_glob):
-        stem = f.stem
-        # Match c00_r00 (prefix before _subsampled or similar)
-        for sep in ("_subsampled", "_chunk", "."):
-            if sep in stem:
-                stem = stem.split(sep)[0]
-                break
-        if stem and stem not in label_to_path:
-            label_to_path[stem] = f
-
-    updated = 0
-    for tile in tiles:
-        col, row = tile["col"], tile["row"]
-        label = f"c{col:02d}_r{row:02d}"
-        path = label_to_path.get(label)
-        if path is None:
-            continue
-        bounds = get_tile_bounds_from_header(path)
-        if bounds is None:
-            continue
-        minx, maxx, miny, maxy = bounds
-        tile["bounds"] = [[minx, maxx], [miny, maxy]]
-        updated += 1
-
-    if updated > 0:
-        with tile_bounds_json.open("w") as f:
-            json.dump(data, f, indent=2)
-    return updated
-
-
-def get_source_files_from_tindex(tindex_file: Path) -> List[str]:
-    """Get list of source point cloud files (LAZ/LAS paths) from tindex database."""
-    import sqlite3
-    
-    conn = sqlite3.connect(str(tindex_file))
-    cursor = conn.cursor()
-    
-    # Get table name from gpkg_contents
-    cursor.execute('SELECT table_name FROM gpkg_contents WHERE data_type = "features" LIMIT 1')
-    result = cursor.fetchone()
-    
-    if not result:
-        conn.close()
-        return []
-    
-    table_name = result[0]
-    cursor.execute(f'SELECT DISTINCT Location FROM "{table_name}"')
-    files = [row[0] for row in cursor.fetchall()]
-    conn.close()
-    
-    return files
-
-
-def get_source_bounds_from_tindex(tindex_file: Path) -> Dict[str, Tuple[float, float, float, float]]:
-    """Get spatial bounds for each source file from tindex GeoPackage geometry.
-    
-    Returns dict mapping file path -> (minx, miny, maxx, maxy).
-    """
-    import sqlite3
-    import struct
-    
-    conn = sqlite3.connect(str(tindex_file))
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT table_name, column_name FROM gpkg_geometry_columns LIMIT 1')
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return {}
-    table_name, geom_col = row
-    
-    cursor.execute(f'SELECT Location, "{geom_col}" FROM "{table_name}"')
-    bounds_map = {}
-    for filepath, geom_blob in cursor.fetchall():
-        if not geom_blob or not filepath:
-            continue
-        try:
-            # GeoPackage geometry binary: header (magic GP, version, flags, srs_id, envelope)
-            # flags byte at offset 3 tells envelope type
-            flags = geom_blob[3]
-            envelope_type = (flags >> 1) & 0x07
-            header_size = 8  # magic(2) + version(1) + flags(1) + srs_id(4)
-            if envelope_type == 1:  # [minx, maxx, miny, maxy]
-                minx, maxx, miny, maxy = struct.unpack_from('<dddd', geom_blob, header_size)
-                bounds_map[filepath] = (minx, miny, maxx, maxy)
-            elif envelope_type == 2:  # [minx, maxx, miny, maxy, minz, maxz]
-                minx, maxx, miny, maxy = struct.unpack_from('<dddd', geom_blob, header_size)
-                bounds_map[filepath] = (minx, miny, maxx, maxy)
-        except (struct.error, IndexError):
-            continue
-    
-    conn.close()
-    return bounds_map
-
-
-def _parse_proj_bounds(proj_bounds: str) -> Optional[Tuple[float, float, float, float]]:
-    """Parse '([xmin,xmax],[ymin,ymax])' into (xmin, ymin, xmax, ymax)."""
-    try:
-        s = proj_bounds.strip().strip("()")
-        parts = s.split("],[")
-        xpart = parts[0].strip("([])").split(",")
-        ypart = parts[1].strip("([])").split(",")
-        xmin, xmax = float(xpart[0]), float(xpart[1])
-        ymin, ymax = float(ypart[0]), float(ypart[1])
-        return (xmin, ymin, xmax, ymax)
-    except (ValueError, IndexError):
-        return None
-
-
-def _bounds_overlap(a: Tuple[float, float, float, float],
-                    b: Tuple[float, float, float, float]) -> bool:
-    """Check if two (minx, miny, maxx, maxy) boxes overlap."""
-    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
-
-
-def _get_bounds(
-    filepath: str,
-    source_bounds: Dict[str, Tuple[float, float, float, float]],
-    bounds_by_basename: Optional[Dict[str, Tuple[float, float, float, float]]] = None,
-) -> Optional[Tuple[float, float, float, float]]:
-    """Look up bounds by path, with basename fallback."""
-    fb = source_bounds.get(filepath)
-    if fb is not None:
-        return fb
-    if bounds_by_basename is not None:
-        return bounds_by_basename.get(Path(filepath).name)
-    return None
-
-
-def filter_source_files_for_tile(
-    source_files: List[str],
-    source_bounds: Dict[str, Tuple[float, float, float, float]],
-    tile_bounds: Tuple[float, float, float, float],
-    bounds_by_basename: Optional[Dict[str, Tuple[float, float, float, float]]] = None,
-) -> List[str]:
-    """Return only source files whose bounds overlap the tile bounds."""
-    result = []
-    for f in source_files:
-        fb = _get_bounds(f, source_bounds, bounds_by_basename)
-        if fb is None:
-            result.append(f)  # no bounds info, keep as candidate
-        elif _bounds_overlap(fb, tile_bounds):
-            result.append(f)
-    return result
+from point_cloud_metadata import point_cloud_files
+from tile_copc import (
+    convert_laz_to_copc as _convert_laz_to_copc,
+    convert_laz_to_copc_pdal as _convert_laz_to_copc_pdal,
+    finalize_tile_to_copc as _finalize_tile_to_copc,
+    finalize_tile_to_copc_pdal as _finalize_tile_to_copc_pdal,
+    finalize_tile_to_copc_untwine as _finalize_tile_to_copc_untwine,
+)
+from tile_tindex import (
+    bounds_overlap as _bounds_overlap,
+    build_tindex,
+    calculate_tile_bounds,
+    filter_source_files_for_tile,
+    get_bounds as _get_bounds,
+    get_pdal_path,
+    get_pdal_wrench_path,
+    get_source_bounds_from_tindex,
+    get_source_files_from_tindex,
+    parse_proj_bounds as _parse_proj_bounds,
+    update_tile_bounds_json_from_files,
+)
+
+
+
+def _tiling_input_files(input_dir: Path) -> List[Path]:
+    """Return tiling inputs, preferring COPC twins over matching raw files."""
+    return point_cloud_files(input_dir)
 
 
 def _make_tile_header(header_snapshot, offsets=None, scales=None):
@@ -694,19 +74,42 @@ def _make_tile_header(header_snapshot, offsets=None, scales=None):
     import laspy
     from laspy.vlrs.vlrlist import VLRList
 
-    hdr = header_snapshot.copy()
+    # Rebuild instead of using header_snapshot.copy(): laspy marks COPC headers
+    # as non-writable even after stale COPC VLRs are removed.
+    hdr = laspy.LasHeader(
+        point_format=header_snapshot.point_format,
+        version=header_snapshot.version,
+    )
     hdr.point_count = 0
     hdr.offsets = offsets if offsets is not None else header_snapshot.offsets
     hdr.scales = scales if scales is not None else header_snapshot.scales
 
+    for attr in (
+        "file_source_id",
+        "global_encoding",
+        "uuid",
+        "system_identifier",
+        "generating_software",
+        "creation_date",
+    ):
+        if hasattr(header_snapshot, attr):
+            try:
+                setattr(hdr, attr, getattr(header_snapshot, attr))
+            except Exception:
+                pass
+
     # COPC hierarchy/index records describe a specific COPC container layout.
     # Tile-part LAZ files and regenerated COPC outputs must not inherit stale ones.
     def is_stale_copc_vlr(vlr) -> bool:
-        return getattr(vlr, "user_id", "") == "copc" and getattr(vlr, "record_id", None) in (1, 2)
+        return getattr(vlr, "user_id", "") == "copc"
 
-    hdr.vlrs = VLRList([vlr for vlr in hdr.vlrs if not is_stale_copc_vlr(vlr)])
-    if getattr(hdr, "evlrs", None) is not None:
-        hdr.evlrs = VLRList([vlr for vlr in hdr.evlrs if not is_stale_copc_vlr(vlr)])
+    hdr.vlrs = VLRList([
+        vlr for vlr in getattr(header_snapshot, "vlrs", [])
+        if not is_stale_copc_vlr(vlr)
+    ])
+    source_evlrs = getattr(header_snapshot, "evlrs", None)
+    if source_evlrs is not None:
+        hdr.evlrs = VLRList([vlr for vlr in source_evlrs if not is_stale_copc_vlr(vlr)])
 
     # Copy extra dimensions
     try:
@@ -794,8 +197,8 @@ def _distribute_source_file(args: Tuple) -> List[Tuple[str, int]]:
 
     Each source file is read exactly once.  Points are streamed in chunks
     of CHUNK_SIZE to limit peak memory, and for each chunk the bounding-box
-    mask is applied for every overlapping tile.  Matching points are
-    appended to per-tile LAZ part files (one per source file).
+    mask is applied for every overlapping tile.  Matching points are written
+    immediately to per-tile LAS part files (one per source/chunk).
 
     When the LazrsParallel backend is used, RAYON_NUM_THREADS is set from the
     threads argument so chunk decompression uses multiple threads.
@@ -828,9 +231,9 @@ def _distribute_source_file(args: Tuple) -> List[Tuple[str, int]]:
             open_kwargs["laz_backend"] = laz_backend
 
         # --- stream through the file in chunks --------------------------------
-        # We accumulate per-tile arrays and flush once at the end so that
-        # each tile gets exactly one part file from this source.
-        tile_arrays: Dict[str, list] = {label: [] for label, _ in overlapping_tiles}
+        # Write chunk parts immediately. The COPC finalization already merges
+        # part_*.las files, so keeping one part per source/chunk avoids holding
+        # all duplicated buffered-tile points in memory for large multi-tile runs.
         tile_counts: Dict[str, int] = {label: 0 for label, _ in overlapping_tiles}
 
         # Build a compact bounds array for vectorised overlap tests
@@ -840,12 +243,13 @@ def _distribute_source_file(args: Tuple) -> List[Tuple[str, int]]:
         tile_ymin = np.array([b[1] for _, b in overlapping_tiles])
         tile_ymax = np.array([b[3] for _, b in overlapping_tiles])
 
-        header_snapshot = None  # will be captured from the first chunk
-
         with laspy.open(src_file, **open_kwargs) as reader:
             header_snapshot = reader.header
+            src_scales = header_snapshot.scales
+            src_offsets = header_snapshot.offsets
+            tile_bounds_map = {lbl: bnds for lbl, bnds in overlapping_tiles}
 
-            for chunk in reader.chunk_iterator(chunk_size):
+            for chunk_index, chunk in enumerate(reader.chunk_iterator(chunk_size)):
                 cx = np.asarray(chunk.x)
                 cy = np.asarray(chunk.y)
 
@@ -859,282 +263,47 @@ def _distribute_source_file(args: Tuple) -> List[Tuple[str, int]]:
                     cnt = int(mask.sum())
                     if cnt == 0:
                         continue
-                    # Store the raw packed array slice (compact, avoids header copy)
-                    tile_arrays[label].append(chunk.array[mask])
+
+                    tile_dir = tiles_dir / label
+                    tile_dir.mkdir(exist_ok=True)
+                    part_file = tile_dir / f"part_{source_idx}_{chunk_index:06d}.las"
+
+                    selected = chunk.array[mask].copy()
+
+                    # Compute tile-centered offsets to keep scaled values within int32.
+                    bxmin, bymin, bxmax, bymax = tile_bounds_map[label]
+                    tile_offsets = np.array([
+                        (bxmin + bxmax) / 2.0,
+                        (bymin + bymax) / 2.0,
+                        src_offsets[2],
+                    ])
+
+                    # Re-encode X/Y with tile-specific offsets.
+                    real_x = selected['X'] * src_scales[0] + src_offsets[0]
+                    real_y = selected['Y'] * src_scales[1] + src_offsets[1]
+                    selected['X'] = np.round((real_x - tile_offsets[0]) / src_scales[0]).astype(np.int32)
+                    selected['Y'] = np.round((real_y - tile_offsets[1]) / src_scales[1]).astype(np.int32)
+
+                    new_header = _make_tile_header(header_snapshot, offsets=tile_offsets)
+                    point_record = laspy.ScaleAwarePointRecord(
+                        selected, new_header.point_format, new_header.scales, new_header.offsets,
+                    )
+                    new_las = laspy.LasData(new_header)
+                    new_las.points = point_record
+                    new_las.write(str(part_file))
+
                     tile_counts[label] += cnt
-
-        if header_snapshot is None:
-            return []
-
-        # --- write one part file per tile that received points -----------------
-        # Keep intermediate parts uncompressed so Phase 1 avoids repeated LAZ
-        # compression work before the final COPC write.
-        # Build per-tile headers with tile-centered offsets to prevent int32
-        # overflow when coordinates are far from the source file's offset.
-        src_scales = header_snapshot.scales
-        src_offsets = header_snapshot.offsets
-        tile_bounds_map = {lbl: bnds for lbl, bnds in overlapping_tiles}
 
         results: List[Tuple[str, int]] = []
         for label in tile_labels:
-            if not tile_arrays[label]:
-                continue
-            tile_dir = tiles_dir / label
-            tile_dir.mkdir(exist_ok=True)
-            part_file = tile_dir / f"part_{source_idx}.las"
-
-            combined = np.concatenate(tile_arrays[label])
-
-            # Compute tile-centered offsets to keep scaled values within int32
-            bxmin, bymin, bxmax, bymax = tile_bounds_map[label]
-            tile_offsets = np.array([
-                (bxmin + bxmax) / 2.0,
-                (bymin + bymax) / 2.0,
-                src_offsets[2],
-            ])
-
-            # Re-encode X/Y with tile-specific offsets
-            real_x = combined['X'] * src_scales[0] + src_offsets[0]
-            real_y = combined['Y'] * src_scales[1] + src_offsets[1]
-            combined['X'] = np.round((real_x - tile_offsets[0]) / src_scales[0]).astype(np.int32)
-            combined['Y'] = np.round((real_y - tile_offsets[1]) / src_scales[1]).astype(np.int32)
-
-            new_header = _make_tile_header(header_snapshot, offsets=tile_offsets)
-            point_record = laspy.ScaleAwarePointRecord(
-                combined, new_header.point_format, new_header.scales, new_header.offsets,
-            )
-            new_las = laspy.LasData(new_header)
-            new_las.points = point_record
-            new_las.write(str(part_file))
-
-            results.append((label, tile_counts[label]))
+            if tile_counts[label] > 0:
+                results.append((label, tile_counts[label]))
 
         return results
 
     except Exception as e:
         print(f"    ⚠ Error processing {Path(src_file).name}: {e}")
         return []
-
-
-def _finalize_tile_to_copc(args: Tuple) -> Tuple[str, bool, str]:
-    """
-    Phase 2: Merge a tile's LAZ part files into a single COPC tile.
-
-    Tries untwine first (fast), falls back to PDAL if unavailable.
-
-    Args:
-        args: (label, tiles_dir, log_dir, tile_bounds)
-              tile_bounds: (xmin, ymin, xmax, ymax) or None
-
-    Returns:
-        (label, success, message)
-    """
-    label, tiles_dir, log_dir, tile_bounds = args
-
-    final_tile = tiles_dir / f"{label}.copc.laz"
-
-    # Skip if already finalised
-    if final_tile.exists() and final_tile.stat().st_size > 0:
-        return (label, True, "Already exists")
-
-    tile_dir = tiles_dir / label
-    if not tile_dir.exists():
-        return (label, True, "No data in bounds")
-
-    parts = sorted(tile_dir.glob("part_*.las"))
-    if not parts:
-        if not any(tile_dir.iterdir()):
-            tile_dir.rmdir()
-        return (label, True, "No data in bounds")
-
-    try:
-        # Try untwine first (fast), fall back to PDAL
-        success, message = _finalize_tile_to_copc_untwine(parts, final_tile, log_dir, label)
-
-        if not success:
-            return (label, False, message)
-
-        crs_source = _first_crs_source(parts)
-        if crs_source is not None:
-            preserved_geotiff, geotiff_message = _append_source_geotiff_projection_evlrs(
-                crs_source, final_tile
-            )
-            if not preserved_geotiff:
-                return (label, False, geotiff_message)
-            valid_crs, crs_message = _copc_preserves_source_crs(crs_source, final_tile)
-            if not valid_crs and message == "untwine":
-                try:
-                    final_tile.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                success, message = _finalize_tile_to_copc_pdal(
-                    parts, final_tile, log_dir, label, tile_bounds
-                )
-                if not success:
-                    return (label, False, f"{message}; after untwine CRS validation failed: {crs_message}")
-                preserved_geotiff, geotiff_message = _append_source_geotiff_projection_evlrs(
-                    crs_source, final_tile
-                )
-                if not preserved_geotiff:
-                    return (label, False, geotiff_message)
-                valid_crs, crs_message = _copc_preserves_source_crs(crs_source, final_tile)
-            if not valid_crs:
-                return (label, False, f"COPC CRS validation failed: {crs_message}")
-
-        # Clean up parts
-        for part in parts:
-            if part.exists():
-                part.unlink()
-        if tile_dir.exists() and not any(tile_dir.iterdir()):
-            tile_dir.rmdir()
-
-        return (label, True, f"{len(parts)} parts merged ({message})")
-
-    except Exception as e:
-        return (label, False, str(e))
-
-
-def _finalize_tile_to_copc_pdal(
-    parts: List[Path],
-    final_tile: Path,
-    log_dir: Path,
-    label: str,
-    tile_bounds: Optional[Tuple[float, float, float, float]] = None,
-) -> Tuple[bool, str]:
-    """Finalize a tile with the existing PDAL merge pipeline."""
-    pdal_cmd = get_pdal_path()
-
-    # Build COPC writer config with explicit offsets from tile bounds
-    # to prevent int32 overflow on scaled coordinate values.
-    writer_opts = {
-        "type": "writers.copc",
-        "filename": str(final_tile),
-        "forward": "all",
-        "extra_dims": "all",
-    }
-    if tile_bounds is not None:
-        bxmin, bymin, bxmax, bymax = tile_bounds
-        writer_opts["offset_x"] = (bxmin + bxmax) / 2.0
-        writer_opts["offset_y"] = (bymin + bymax) / 2.0
-
-    if len(parts) == 1:
-        pipeline = {
-            "pipeline": [
-                {"type": "readers.las", "filename": str(parts[0])},
-                writer_opts,
-            ]
-        }
-    else:
-        readers = [{"type": "readers.las", "filename": str(p)} for p in parts]
-        pipeline = {
-            "pipeline": readers + [
-                {"type": "filters.merge"},
-                writer_opts,
-            ]
-        }
-
-    pipeline_file = log_dir / f"{label}_pipeline.json"
-    with open(pipeline_file, "w") as f:
-        json.dump(pipeline, f)
-
-    try:
-        result = subprocess.run(
-            [pdal_cmd, "pipeline", str(pipeline_file)],
-            capture_output=True, text=True, check=False,
-        )
-    finally:
-        if pipeline_file.exists():
-            pipeline_file.unlink()
-
-    if result.returncode != 0:
-        return (False, f"COPC conversion failed: {result.stderr[:200]}")
-    return (True, "OK")
-
-
-def _finalize_tile_to_copc_untwine(
-    parts: List[Path],
-    final_tile: Path,
-    log_dir: Path,
-    label: str,
-) -> Tuple[bool, str]:
-    """Finalize a tile using untwine for fast COPC conversion.
-
-    Untwine is purpose-built for COPC generation and significantly faster
-    than PDAL's writers.copc, especially for large point clouds.
-
-    For multiple parts, passes all files directly to untwine (it supports
-    multiple input files natively).
-    """
-    untwine_cmd = shutil.which("untwine")
-    if not untwine_cmd:
-        # Fallback to PDAL if untwine is not installed
-        success, msg = _finalize_tile_to_copc_pdal(parts, final_tile, log_dir, label)
-        if success:
-            return (True, "pdal")
-        return (False, msg)
-
-    try:
-        input_args = []
-        for p in parts:
-            input_args.extend(["-i", str(p)])
-        srs_arg = _first_srs_assignment(parts)
-        srs_args = ["--a_srs", srs_arg] if srs_arg else []
-
-        result = subprocess.run(
-            [untwine_cmd] + input_args + ["-o", str(final_tile)] + srs_args,
-            capture_output=True, text=True, check=False,
-        )
-
-        if result.returncode != 0:
-            return (False, f"untwine failed: {result.stderr[:200]}")
-
-        if not final_tile.exists() or final_tile.stat().st_size == 0:
-            return (False, "untwine produced no output")
-
-        return (True, "untwine")
-
-    except Exception as e:
-        return (False, f"untwine error: {e}")
-
-
-def _convert_laz_to_copc(input_laz: Path, output_copc: Path) -> bool:
-    """Convert a single LAZ/LAS file to COPC.
-
-    Tries untwine first (fast), falls back to PDAL if unavailable.
-    """
-    untwine_cmd = shutil.which("untwine")
-    if untwine_cmd:
-        try:
-            srs_arg = _srs_assignment_from_file(input_laz)
-            srs_args = ["--a_srs", srs_arg] if srs_arg else []
-            r = subprocess.run(
-                [untwine_cmd, "-i", str(input_laz), "-o", str(output_copc)] + srs_args,
-                capture_output=True, text=True, check=False,
-            )
-            if r.returncode == 0 and output_copc.exists() and output_copc.stat().st_size > 0:
-                _append_source_geotiff_projection_evlrs(input_laz, output_copc)
-                valid_crs, _ = _copc_preserves_source_crs(input_laz, output_copc)
-                if valid_crs:
-                    return True
-                try:
-                    output_copc.unlink(missing_ok=True)
-                except OSError:
-                    pass
-        except Exception:
-            pass
-
-    if not _convert_laz_to_copc_pdal(input_laz, output_copc):
-        return False
-    preserved_geotiff, message = _append_source_geotiff_projection_evlrs(
-        input_laz, output_copc
-    )
-    if not preserved_geotiff:
-        print(f"  Warning: COPC GeoTIFF projection preservation failed for {output_copc.name}: {message}")
-        return False
-    valid_crs, message = _copc_preserves_source_crs(input_laz, output_copc)
-    if not valid_crs:
-        print(f"  Warning: COPC CRS validation failed for {output_copc.name}: {message}")
-    return valid_crs
 
 
 def create_tiles(
@@ -1322,34 +491,6 @@ def create_tiles(
     return list(tiles_dir.glob("*.copc.laz"))
 
 
-def _convert_laz_to_copc_pdal(input_laz: Path, output_copc: Path) -> bool:
-    """Convert a single LAZ file to COPC using PDAL."""
-    pipeline = {
-        "pipeline": [
-            {"type": "readers.las", "filename": str(input_laz)},
-            {
-                "type": "writers.copc",
-                "filename": str(output_copc),
-                "forward": "all",
-                "extra_dims": "all",
-            },
-        ]
-    }
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(pipeline, f)
-        pipeline_file = Path(f.name)
-    try:
-        pdal_cmd = get_pdal_path()
-        r = subprocess.run(
-            [pdal_cmd, "pipeline", str(pipeline_file)],
-            capture_output=True, text=True, check=False,
-        )
-        return r.returncode == 0 and output_copc.exists() and output_copc.stat().st_size > 0
-    finally:
-        if pipeline_file.exists():
-            pipeline_file.unlink()
-
-
 def run_tiling_pipeline(
     input_dir: Path,
     output_dir: Path,
@@ -1406,8 +547,7 @@ def run_tiling_pipeline(
     # Check if we should skip tiling (single small file)
     should_skip_tiling = False
     if tiling_threshold is not None:
-        input_files = list(input_dir.glob("*.laz")) + list(input_dir.glob("*.las"))
-        input_files = [f for f in input_files if not f.name.endswith(".copc.laz")]
+        input_files = _tiling_input_files(input_dir)
 
         if len(input_files) == 1:
             original_size_mb = input_files[0].stat().st_size / (1024 * 1024)
@@ -1419,13 +559,12 @@ def run_tiling_pipeline(
                 print(f"  Single file detected: {input_files[0].name}")
                 print(f"  Original file size: {original_size_mb:.2f} MB")
                 print(f"  Threshold: {tiling_threshold} MB")
-                print(f"  Decision: Will skip tiling, convert to COPC with PDAL")
+                print("  Decision: Will skip tiling and use a COPC source for subsampling")
                 print("=" * 60)
                 print()
 
     # Validate input
-    source_files = list(input_dir.glob("*.laz")) + list(input_dir.glob("*.las"))
-    source_files = [f for f in source_files if not f.name.endswith(".copc.laz")]
+    source_files = _tiling_input_files(input_dir)
     if not source_files:
         raise ValueError(f"No LAZ/LAS files found in {input_dir}")
 
@@ -1456,16 +595,28 @@ def run_tiling_pipeline(
         print("=" * 60)
         print("Skipping Tiling (Single Small File)")
         print("=" * 60)
-        laz_file = [f for f in source_files if not f.name.endswith(".copc.laz")][0]
+        source_file = source_files[0]
         copc_single_dir = output_dir / "copc_single"
         copc_single_dir.mkdir(parents=True, exist_ok=True)
-        out_copc = copc_single_dir / f"{laz_file.stem}.copc.laz"
+        if source_file.name.lower().endswith(".copc.laz"):
+            out_copc = copc_single_dir / source_file.name
+            if not out_copc.exists() or out_copc.stat().st_size == 0:
+                print("  Reusing uploaded COPC without conversion...")
+                shutil.copy2(source_file, out_copc)
+                print(f"  ✓ Copied {out_copc.name}")
+            else:
+                print(f"  Using existing {out_copc.name}")
+            print("  Returning COPC directory for direct subsampling")
+            print("=" * 60)
+            return copc_single_dir
+
+        out_copc = copc_single_dir / f"{source_file.stem}.copc.laz"
         rebuild_copc = not out_copc.exists() or out_copc.stat().st_size == 0
         if not rebuild_copc:
             preserved_geotiff, geotiff_message = _append_source_geotiff_projection_evlrs(
-                laz_file, out_copc
+                source_file, out_copc
             )
-            valid_crs, crs_message = _copc_preserves_source_crs(laz_file, out_copc)
+            valid_crs, crs_message = _copc_preserves_source_crs(source_file, out_copc)
             if not preserved_geotiff or not valid_crs:
                 if not preserved_geotiff:
                     print(f"  Existing COPC GeoTIFF preservation failed: {geotiff_message}")
@@ -1478,8 +629,8 @@ def run_tiling_pipeline(
                 rebuild_copc = True
         if rebuild_copc:
             print("  Converting LAZ to COPC...")
-            if not _convert_laz_to_copc(laz_file, out_copc):
-                raise RuntimeError(f"LAZ→COPC conversion failed: {laz_file}")
+            if not _convert_laz_to_copc(source_file, out_copc):
+                raise RuntimeError(f"LAZ→COPC conversion failed: {source_file}")
             print(f"  ✓ Created {out_copc.name}")
         else:
             print(f"  Using existing {out_copc.name}")
@@ -1515,28 +666,28 @@ def main():
         description="3DTrees Tiling Pipeline - laspy + PDAL tiling from LAZ/LAS input",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    
+
     parser.add_argument(
         "--input_dir", "-i",
         type=Path,
         required=True,
         help="Input directory containing LAZ files"
     )
-    
+
     parser.add_argument(
         "--output_dir", "-o",
         type=Path,
         required=True,
         help="Output directory for all stages"
     )
-    
+
     parser.add_argument(
         "--tile_length",
         type=float,
         default=TILE_PARAMS.get('tile_length', 100),
         help=f"Tile size in meters (default: {TILE_PARAMS.get('tile_length', 100)})"
     )
-    
+
     parser.add_argument(
         "--tile_buffer",
         type=float,
@@ -1550,14 +701,14 @@ def main():
         default=TILE_PARAMS.get('workers', 4),
         help=f"Number of parallel workers (default: {TILE_PARAMS.get('workers', 4)})"
     )
-    
+
     parser.add_argument(
         "--threads",
         type=int,
         default=TILE_PARAMS.get('threads', 5),
         help=f"Threads per COPC writer (default: {TILE_PARAMS.get('threads', 5)})"
     )
-    
+
     parser.add_argument(
         "--max_tile_procs",
         type=int,
@@ -1571,12 +722,12 @@ def main():
         help="Points per chunk when reading LAZ/LAS (default: 2_000_000; smaller = less peak RAM)",
     )
     args = parser.parse_args()
-    
+
     # Validate input
     if not args.input_dir.exists():
         print(f"Error: Input directory does not exist: {args.input_dir}")
         sys.exit(1)
-    
+
     # Run pipeline
     try:
         tiles_dir = run_tiling_pipeline(

@@ -40,7 +40,8 @@ Modern airborne and terrestrial LiDAR surveys can produce datasets with billions
 
 ### The Solution
 
-This pipeline provides an end-to-end solution with two primary tasks:
+This pipeline provides an end-to-end solution with five user-facing task modes:
+`tile`, `merge`, `filter`, `remap`, and `create_merged_file`.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -122,7 +123,7 @@ This pipeline provides an end-to-end solution with two primary tasks:
 ### Multi-Resolution Processing
 - **Dual subsampling** - generates both 1cm and 10cm resolution outputs (configurable)
 - **Selectable voxel subsampling** - defaults to SmartTile `center-of-mass` XYZ averaging; `nearest-to-centroid` preserves the previous PDAL voxel centroid nearest-neighbor behavior
-- **Dimension preservation** - all extra dimensions (PredInstance, species_id, etc.) are maintained by default
+- **Explicit dimension policy** - intermediate COPC conversion strips extra point attributes by default; prod-merged creation preserves enriched dimensions
 
 ### Smart Instance Merging
 - **Centroid-based filtering** - removes duplicate instances in buffer zones
@@ -233,16 +234,43 @@ python src/run.py --task merge \
 
 Optional: add `--original-input-dir /path/to/original` to also write `original_with_predictions/`.
 
+### Basic Filter Task
+
+Filter segmented or remapped tiles by removing instances whose centroids sit in
+overlap buffers facing neighboring tiles:
+
+```bash
+python src/run.py --task filter \
+    --input-dir /path/to/segmented_remapped \
+    --output-dir /path/to/filtered_tiles \
+    --buffer 10.0 \
+    --instance-dimension PredInstance
+```
+
+The filter task writes one output file per input file and preserves all point
+dimensions in the kept points. Use `--filter-suffix` to change the default
+`_filtered` filename suffix. Use `--filter-output-extension .laz` when mixed
+LAZ/LAS inputs should be collected as LAZ outputs.
+
 ### Create Prod-Merged Products
 
-Create user-facing prod-merged files from `original_with_predictions/`. Inputs are first staged
-through COPC using the same SmartTile untwine-first / PDAL-fallback conversion used by tiling,
-then real original points are selected with nearest-to-centroid product downsampling:
+Create user-facing prod-merged files from `original_with_predictions/`. This mode serves two
+production goals:
+
+1. Write a final merged point-cloud product next to the enriched original files after remap.
+2. Merge multiple uploaded source files into one point-cloud product while preserving CRS,
+   source dimensions, scales, offsets, and truthful LAS/COPC metadata as far as the output
+   format allows.
+
+Inputs are first staged through preservation-mode COPC, then real original points are
+selected with nearest-to-centroid product downsampling:
 
 ```bash
 python src/run.py --task create_merged_file \
     --original-with-predictions-dir /path/to/original_with_predictions \
     --output-dir /path/to/products \
+    --staged-copc-dir /path/to/already_converted_original_with_predictions_copc \
+    --standardization-json /path/to/collection_summary.json \
     --merged-resolutions res1,res2 \
     --merged-output-formats copc.laz
 ```
@@ -251,6 +279,8 @@ By default this writes `prod_merged_1cm.copc.laz` and `prod_merged_10cm.copc.laz
 Use `--merged-output-formats laz,copc.laz,ply` to write multiple formats for each selected resolution.
 The intermediate COPC files are written under `original_with_predictions_copc/` in the output directory.
 If matching `.copc.laz` files are already present for an Original-with-predictions source, they are reused and the matching raw LAZ/LAS file is not staged a second time.
+Use `--staged-copc-dir` to reuse an explicit COPC cache from a previous product or validation run. SmartTile checks that each staged COPC has a readable header before using it, so interrupted partial conversions are ignored and rebuilt in the current output directory.
+Use `--standardization-json` with the tool_standard `collection_summary.json` to validate that staged Original-with-predictions COPCs and LAS/COPC prod-merged outputs still expose the expected standardized source dimensions. This restores the v2.1 schema guard; it does not filter prediction dimensions.
 
 ### Basic Remap Task (merged file → original files)
 
@@ -265,6 +295,68 @@ python src/run.py --task remap \
     --merged-resolutions res1,res2 \
     --merged-output-formats laz,copc.laz
 ```
+
+When `--merged-laz` points to a `.copc.laz` file, SmartTile uses a bounded
+streaming remap path: uploaded original LAZ/LAS files are read in
+`--chunk-size` point chunks, each original chunk queries the merged COPC by its
+XY bounds plus remap buffer, a local KDTree is built only for that window, and
+the enriched original chunk is written immediately. This keeps the uploaded
+LAZ/LAS file as the metadata and geometry source while avoiding a full-original
+or full-merged KDTree in memory. Plain merged `.laz` inputs fall back to the
+legacy loaded-merged-cloud path.
+
+### Multi-Collection Remap Task (prediction collections → original files)
+
+Finalized prediction collections can be remapped together onto the original
+files. This is intended for model outputs that have already been filtered and
+merged independently. SmartTile preserves prediction dimension names exactly as
+provided; model-specific names such as `PredInstance_SAT`,
+`PredInstance_ForestMamba`, `species_id_sat`, and `species_prob_foma` must be
+present before this step.
+
+```bash
+python src/run.py --task remap \
+    --segmented-folders /path/to/sat_predictions,/path/to/foma_predictions,/path/to/species_predictions \
+    --original-copc-input-dir /path/to/original_copc_files \
+    --original-laz-input-dir /path/to/uploaded/raw_laz_files \
+    --original-laz-output-dir /path/to/original_with_predictions_raw \
+    --remap-dims PredInstance_SAT,PredSemantic_SAT,PredInstance_ForestMamba,species_id_sat,species_prob_sat,species_id_foma,species_prob_foma \
+    --chunk-size 10000000 \
+    --merged-resolutions 1cm \
+    --merged-output-formats laz
+```
+
+If `--remap-dims` is omitted, all extra dimensions from every prediction
+collection are transferred. Duplicate extra-dimension names across prediction
+collections fail early; SmartTile does not auto-rename them to `_2`, `_3`, or
+add late model suffixes during final remap.
+
+Multi-collection remap writes each Original-with-predictions file in one pass:
+for every original-point chunk it loads the overlapping prediction points from
+each finalized collection, transfers all selected dimensions, and writes the
+enriched original chunk once. This avoids temporary per-collection LAZ rewrites.
+Use `--chunk-size` to tune the memory/speed tradeoff. Larger chunks reduce
+repeated prediction-window scans but increase peak memory; for large two-file
+datasets under a 30GB container cap, `10000000` points per chunk has been a
+useful validation setting.
+
+Prediction collections stored as COPC are loaded with bounded COPC spatial
+queries when remap needs a local prediction window.
+
+For production downloads, pass the uploaded LAZ/LAS files to
+`--original-laz-input-dir`; this is the writer and metadata source for
+`original_with_predictions_raw/`. `--original-input-dir` remains accepted as a
+legacy alias for the same LAZ/LAS source. If original COPCs are available, pass
+them to `--original-copc-input-dir` only as a matching/validation lane. SmartTile
+validates that COPC and LAZ sources match, but it does not write an enriched
+COPC-original intermediate. Selected prediction dimensions are written directly
+onto the uploaded LAZ/LAS files, so headers, GeoTIFF/GeoKey VLRs, scales,
+offsets, point format, and non-prediction dimensions come from the uploaded file
+itself. Prod-merged `copc.laz`, `laz`, and `ply` outputs are then created from
+the enriched uploaded LAZ/LAS files. COPC-derived products preserve CRS
+semantically, but a LAZ -> COPC conversion may represent the same CRS as WKT VLR
+rather than the original GeoKey VLRs. Therefore SmartTile does not promise that a
+COPC-derived LAZ is byte-identical to enriching the raw uploaded LAZ directly.
 
 ### View Current Parameters
 
@@ -286,6 +378,8 @@ python src/run.py --task tile \
     --tile-buffer 20 \                     # Buffer overlap in meters (default: 20)
     --resolution-1 0.01 \                  # First resolution (default: 1cm)
     --resolution-2 0.1 \                   # Second resolution (default: 10cm)
+    --output-copc-res1 True \              # 1cm output as COPC LAZ (default: True)
+    --output-copc-res2 False \             # 10cm output as regular LAZ (default: False)
     --workers 8 \                          # Parallel workers (default: 4)
     --threads 10                           # Threads per COPC writer (default: 10)
 ```
@@ -299,13 +393,32 @@ python src/run.py --task create_merged_file \
     --resolution-1 0.01 \
     --resolution-2 0.1 \
     --merged-resolutions res1,res2 \
-    --merged-output-formats laz,copc.laz,ply
+    --merged-output-formats laz,copc.laz,ply \
+    --staged-copc-dir /path/to/products/original_with_predictions_copc \
+    --standardization-json /path/to/collection_summary.json \
+    --num-spatial-chunks 10
 ```
 
 `--merged-resolutions` accepts `res1`, `res2`, numeric meter values such as `0.05`, or centimeter labels such as `1cm,10cm`.
 `--merged-output-formats` accepts `laz`, `copc.laz`, and `ply`; it can contain one or several comma-separated formats.
-The task stages LAZ/LAS inputs to COPC with untwine when available, falling back to PDAL `writers.copc`, before merging and product downsampling. Existing matching `.copc.laz` files are reused so one source is not merged twice.
+The task stages LAZ/LAS inputs to COPC in preservation mode with untwine when available, falling back to PDAL `writers.copc`, before merging and product downsampling. Existing matching `.copc.laz` files are reused so one source is not merged twice.
+`--staged-copc-dir` points to a reusable cache of already converted Original-with-predictions COPCs. This is recommended for repeat validation runs and production reruns where the enriched originals have not changed.
+`--standardization-json` points to the standardization `collection_summary.json` and validates that expected non-constant source dimensions survived into the staged COPCs and final LAS/COPC prod-merged products.
 LAZ and COPC outputs use LAS/COPC metadata forwarding. PLY outputs carry point dimensions as PLY properties, but do not preserve LAS/COPC VLR metadata such as CRS records.
+`--num-spatial-chunks` controls bounded COPC reads for prod-merged creation. For large UTM datasets, prefer setting it to the available CPU budget (for example `10`) instead of using a single global merge.
+For COPC output, SmartTile first writes bounded LAZ chunks and then prefers direct `untwine` chunk-to-COPC finalization. This keeps RAM bounded and avoids a giant merged temporary LAZ, but it still needs scratch disk for the chunk files and untwine hierarchy/output staging. Direct untwine output is accepted only when its point count exactly matches the source chunk total; otherwise SmartTile falls back to the PDAL merge/conversion path.
+When multiple product formats are selected for the same resolution, SmartTile generates one canonical set of nearest-to-centroid chunk LAZ files and writes all selected formats from those same chunks. This avoids repeated chunk computation and keeps LAZ, COPC LAZ, and PLY point counts aligned for a given resolution.
+Chunked nearest-to-centroid product generation is designed to preserve product metadata, CRS, scales, offsets, and dimensions. It should not be treated as a bit-for-bit reproducible operation: different chunking, PDAL/untwine versions, or parallel execution details may change the selected representative point at voxel boundaries while preserving the same spatial extent and metadata contract.
+
+### Local Validation
+
+Run the unit suite from the tool directory:
+
+```bash
+python -m unittest discover -s tests -p 'test_*.py'
+```
+
+The suite covers output format validation, metadata/header preservation helpers, COM subsampling method selection, scientific-notation bounds parsing, one-pass multi-collection remap behavior, and instance-label dtype rules.
 
 ### Merge Task Options
 
@@ -318,7 +431,8 @@ python src/run.py --task merge \
     --tile_bounds_json /path/to/tile_bounds_tindex.json \
     --output-folder /path/to/out \                  # Optional; default: parent of segmented
     --output-merged-laz /path/to/out/merged.laz \  # Optional; merged LAZ path
-    --original-input-dir /path/to/original \        # Optional; for per-original-file outputs
+    --original-copc-input-dir /path/to/original_copc \ # Optional; matching/validation source
+    --original-laz-input-dir /path/to/raw_original \   # Optional; uploaded LAZ/LAS source to enrich
     --merged-resolutions res1,res2 \                # Prod-merged outputs from original_with_predictions
     --buffer 10.0 \                                # Buffer zone distance (default: 10m)
     --overlap-threshold 0.3 \                      # Instance matching (default: 0.3)
@@ -367,15 +481,18 @@ Each source file is read once using laspy (in memory-efficient chunks controlled
 
 #### Phase 2: COPC Conversion
 
-All part files for each tile are merged and converted to COPC format. The pipeline tries **untwine** first (fast, purpose-built for COPC generation) and automatically falls back to PDAL's `writers.copc` if untwine is not available.
+All part files for each tile are merged and converted to COPC format. Untwine is preferred for COPC writing. Intermediate COPC conversion strips extra point attributes while forwarding header metadata and CRS records. SmartTile first asks Untwine for an empty extra-dimension keep-list with `--dims ""`. If the installed Untwine rejects that form or the output still contains extra dimensions, SmartTile writes a temporary standard-dimension LAZ and then converts that file with Untwine. Prod-merged creation is the explicit exception and preserves enriched dimensions for final products.
+
+The SmartTile Docker image has been validated against Untwine 1.5.1: direct `--dims ""` is rejected, `--dims Classification` does not strip all extra dimensions on real inputs, and long explicit standard-dimension lists such as `--dims Red,Green,Blue` are not used because they can crash this build. Keep the output-header validation and fallback in place when changing this path.
 
 **Parallelization**: Multiple tiles converted concurrently (controlled by `--workers`).
 
 **Output**: `c{col}_r{row}.copc.laz` files in `tiles_{tile_length}m/`.
 
 **Options**:
-- **Default (preserve all dimensions)**: Keeps all point attributes (PredInstance, species_id, etc.)
-- **XYZ-only**: Set `--skip-dimension-reduction false` to reduce to X, Y, Z only (useful for raw pre-segmentation data)
+- **Default**: Keep standard LAS dimensions and strip extra point attributes from intermediate COPC outputs.
+- **Preserved LAZ intermediates**: Set `--skip-dimension-reduction true` only when non-COPC intermediate files must keep extra dimensions.
+- **Prod-merged exception**: `create_merged_file` preserves extra dimensions in staged COPCs and final LAZ/COPC products.
 
 ### Stage 4-5: Multi-Resolution Subsampling
 
@@ -393,8 +510,8 @@ All part files for each tile are merged and converted to COPC format. The pipeli
 4. Results are merged back into single file
 
 **Outputs**:
-- `subsampled_1cm/`: Resolution_1 files
-- `subsampled_10cm/`: Resolution_2 files
+- `subsampled_res1/`: Resolution_1 files, default 1cm COPC LAZ (`*.copc.laz`)
+- `subsampled_res2/`: Resolution_2 files, default 10cm regular LAZ (`*.laz`)
 
 ### The Merge Process in Detail
 
@@ -580,11 +697,11 @@ Tile A (east border)         Tile B (west border)
 
 ---
 
-### Stage 7: Original File Remapping (Optional)
+### Stage 7: Uploaded Original Remapping (Optional)
 
-**What it does**: If `--original-input-dir` is provided, maps the final merged instance IDs back to the original input LAZ files (before any tiling was done). This is useful when you want predictions on the exact original files.
+**What it does**: If `--original-laz-input-dir` is provided, maps the final merged prediction dimensions back to the uploaded original LAZ/LAS files before tiling. `--original-input-dir` remains a legacy alias for this raw-LAZ lane. If matching original COPCs are available, pass them via `--original-copc-input-dir` for source matching/validation; SmartTile still writes enriched originals from the uploaded LAZ/LAS files so the original metadata/VLRs remain the writer source.
 
-**How it works**: Same algorithm as Stage 6 (spatial filter + cKDTree build + nearest-neighbor query), but applied to the original pre-tiling files instead of the tile files. Every point gets the instance ID of its nearest merged point (no distance cutoff).
+**How it works**: For a plain merged LAZ source, SmartTile uses spatial filtering plus a local cKDTree. For a merged COPC source, uploaded originals are streamed in chunks; each chunk queries only the overlapping merged-COPC window and writes enriched original chunks immediately. Multi-collection remap follows the same original-writer contract while transferring already model-named prediction attributes.
 
 ---
 
@@ -601,9 +718,11 @@ Tile A (east border)         Tile B (west border)
 | `--num-spatial-chunks` | `--workers` | Per-file subsampling parallelism for COM windows or stripe chunks |
 | `--resolution-1` | 0.01 | First subsampling resolution (1cm) |
 | `--resolution-2` | 0.1 | Second subsampling resolution (10cm) |
+| `--output-copc-res1` | True | Write first-resolution subsampled outputs as COPC LAZ (`*.copc.laz`) |
+| `--output-copc-res2` | False | Write second-resolution subsampled outputs as COPC LAZ; default keeps 10cm as regular LAZ |
 | `--subsampling-method` | center-of-mass | Subsampling method: `center-of-mass` or `nearest-to-centroid` |
-| `--skip-dimension-reduction` | False | Skip XYZ-only reduction, keep all point dimensions |
-| `--chunk-size` | 20000000 | Points per chunk when reading LAZ/LAS in Phase 1 (smaller = less peak RAM) |
+| `--skip-dimension-reduction` | False | Keep extra dimensions in LAZ intermediates; intermediate COPC conversion still strips extra attributes by default |
+| `--chunk-size` | 20000000 | Points per chunk when reading LAZ/LAS in tiling Phase 1, multi-collection remap, and merged-COPC-to-original remap (smaller = less peak RAM; larger = fewer scans) |
 | `--tiling-threshold` | None | File size threshold in MB for skipping tiling on single small files |
 
 ### Merge Task Parameters
@@ -617,7 +736,9 @@ Tile A (east border)         Tile B (west border)
 | `--max-centroid-distance` | 3.0 | Max centroid distance to merge (meters) |
 | `--max-volume-for-merge` | 4.0 | Max volume for small instance merge (m³) |
 | `--min-cluster-size` | 300 | Minimum cluster size in points for reassignment |
-| `--original-input-dir` | None | Optional: directory with original input LAZ files for per-file outputs |
+| `--original-laz-input-dir` | None | Optional: uploaded original LAZ/LAS files to enrich; `--original-input-dir` is a legacy alias |
+| `--original-laz-output-dir` | None | Optional output directory for enriched uploaded originals |
+| `--original-copc-input-dir` | None | Optional matching original COPC LAZ files for source matching/validation |
 | `--merged-resolutions` | res1,res2 | Prod-merged output resolutions when original inputs are available |
 | `--merged-output-formats` | copc.laz | Prod-merged output formats: `laz`, `copc.laz`, `ply` |
 | `--skip-merged-file` | False | Skip creating the processed merged LAZ intermediate (prod-merged outputs still come from Original-with-predictions when enabled) |
@@ -628,9 +749,20 @@ Tile A (east border)         Tile B (west border)
 
 *Retile buffer is fixed internally at 2.0 m; correspondence tolerance is no longer a user parameter.*
 
+### Filter Task Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--input-dir` | **Required** | Directory with segmented/remapped LAZ/LAS tile files |
+| `--output-dir` | **Required** | Directory for filtered tile outputs |
+| `--buffer` | 10.0 | Buffer distance in meters |
+| `--instance-dimension` | PredInstance | Instance ID dimension to filter; falls back to `treeID` when absent |
+| `--filter-suffix` | _filtered | Suffix added to output filenames |
+| `--filter-output-extension` | None | Optional extension override such as `.laz`; by default the input extension is preserved |
+
 ### Understanding `--workers`, `--threads`, and `--num-spatial-chunks`
 
-These two parameters control different aspects of parallelism:
+These parameters control different aspects of parallelism:
 
 #### `--workers` (Global Parallelism)
 
@@ -640,8 +772,9 @@ Controls how many files/tasks run simultaneously using Python's `ProcessPoolExec
 |------|---------------------------|
 | **Tile Task** | Parallel COPC conversions, parallel tile creation |
 | **Merge Task** | Parallel tile loading, parallel convex hull computation, KDTree queries |
+| **Remap Task** | Parallel files/tiles; KDTree query workers are divided across those outer workers |
 
-**Memory impact**: Higher values = more files in memory simultaneously
+**Memory impact**: Higher values = more files in memory simultaneously. Remap keeps the total KDTree CPU budget bounded by sharing `--workers` across outer remap workers and inner SciPy query workers.
 
 #### `--threads` (COPC Writer Threads)
 
@@ -649,19 +782,22 @@ Controls tiling/COPC writer threading. It does not control subsampling paralleli
 
 #### `--num-spatial-chunks` (Subsampling Parallelism)
 
-Controls per-file parallelism during **subsampling only**:
+Controls per-file or per-product spatial chunking:
 
 - COPC `center-of-mass` uses `--num-spatial-chunks` voxel-aligned COPC window workers
 - Other paths split each tile into `--num-spatial-chunks` spatial chunks along the X-axis
-- Chunks/windows are processed in parallel using `ProcessPoolExecutor`
-- Files are processed **sequentially** (one at a time), but each file's chunks run in parallel
+- `create_merged_file` uses `--num-spatial-chunks` for bounded COPC product reads before final COPC/LAZ/PLY writing
+- Remap uses `--num-spatial-chunks` as the number of native COPC spatial-query windows when original files are COPC
+- Subsampling chunks/windows are processed in parallel using `ProcessPoolExecutor`
+- Product chunks are currently processed sequentially to keep memory and disk pressure predictable
 
 ```
 Example with --num-spatial-chunks=5:
   tile.laz → [chunk/window 0..4] → parallel subsample → merge
+  original_with_predictions/*.copc.laz → [bounds 0..4] → product chunks → prod_merged_*.copc.laz
 ```
 
-**Memory impact**: Higher values = more concurrent readers/workers; tune down if memory or storage I/O becomes the bottleneck.
+**Memory and disk impact**: Higher values increase subsampling worker concurrency and reduce per-product read windows. Tune down if memory or storage I/O becomes the bottleneck; tune up when bounded product chunks are still too large.
 
 If not specified, this defaults to `--workers`.
 
@@ -690,23 +826,23 @@ output_dir/
 ├── tiles_100m/                  # Tiled point clouds (100m default)
 │   ├── c00_r00.copc.laz         # COPC tiles (Phase 2 output)
 │   ├── c00_r01.copc.laz
-│   ├── c01_r00.copc.laz
-│   │
-│   ├── subsampled_1cm/          # Resolution 1 subsamples (1cm default)
-│   │   ├── output_100m_c00_r00_1cm.laz
-│   │   └── ...
-│   │
-│   ├── subsampled_10cm/         # Resolution 2 subsamples
-│   │   ├── output_100m_c00_r00_10cm.laz
-│   │   └── ...
-│   │
-│   ├── segmented_remapped/      # Remapped predictions (merge task)
-│   │   ├── c00_r00_segmented_remapped.laz
-│   │   └── ...
-│   │
-│   └── output_tiles/            # Final per-tile outputs with merged IDs
-│       ├── c00_r00.copc.laz
-│       └── ...
+│   └── c01_r00.copc.laz
+│
+├── subsampled_res1/             # Resolution 1 subsamples (1cm COPC LAZ by default)
+│   ├── output_100m_c00_r00_subsampled_1cm.copc.laz
+│   └── ...
+│
+├── subsampled_res2/             # Resolution 2 subsamples (10cm regular LAZ by default)
+│   ├── output_100m_c00_r00_subsampled_10cm.laz
+│   └── ...
+│
+├── segmented_remapped/          # Remapped predictions (merge task)
+│   ├── c00_r00_segmented_remapped.laz
+│   └── ...
+│
+├── output_tiles/                # Final per-tile outputs with merged IDs
+│   ├── c00_r00.copc.laz
+│   └── ...
 │
 ├── original_with_predictions/   # Original files with PredInstance (merge task)
 │   ├── input_file_1.laz
@@ -731,8 +867,8 @@ output_dir/
 
 #### Tile Task Output
 - `X`, `Y`, `Z`: 3D coordinates
-- All extra dimensions preserved by default (PredInstance, species_id, etc.)
-- Set `--skip-dimension-reduction false` to reduce to XYZ only (for raw pre-segmentation data)
+- Intermediate COPC conversion strips extra dimensions by default.
+- `create_merged_file` preserves enriched dimensions for prod-merged outputs.
 
 #### Merge Task Output
 - `X`, `Y`, `Z`: 3D coordinates
@@ -866,7 +1002,7 @@ This automated workflow:
 - Check PATH environment variable
 
 #### "untwine: command not found"
-- The pipeline automatically falls back to PDAL's `writers.copc` if untwine is not installed, so this is not an error — just slower COPC conversion.
+- The pipeline automatically falls back to PDAL's `writers.copc` if untwine is not installed or if the preferred untwine path fails validation, so this is not an error — just slower COPC conversion.
 - To install for better performance: `conda install -c conda-forge untwine`
 - Verify: `untwine --help`
 
@@ -875,6 +1011,12 @@ This automated workflow:
 - Decrease `--workers` to limit concurrent memory usage
 - Decrease `--num-spatial-chunks` to limit per-file subsampling workers
 - Use `--resolution-1` and `--resolution-2` with larger values
+
+#### "No space left on device" during `create_merged_file`
+- Use an output directory on local scratch storage, not network storage
+- Increase free scratch space; direct untwine COPC finalization can temporarily need many times the final COPC size
+- Reduce simultaneous jobs writing to the same disk
+- Keep `--num-spatial-chunks` enabled so SmartTile avoids one giant temporary merged LAZ
 
 #### "CRS mismatch" or "Coordinates appear projected"
 - Ensure all input files are in the same coordinate reference system
@@ -931,14 +1073,20 @@ htop -p $(pgrep -f "python src/run.py")
 │   ├── main_tile.py                    # Tiling pipeline
 │   ├── main_subsample.py               # Subsampling pipeline
 │   ├── main_remap.py                   # Prediction remapping
+│   ├── main_create_merged_file.py      # Prod-merged product creation
 │   ├── main_merge.py                   # Merge wrapper
-│   ├── merge_tiles.py                  # Core merge implementation
+│   ├── merge_tiles.py                  # Merge compatibility/core entry points
+│   ├── merge_*.py                      # Merge internals
+│   ├── tile_*.py                       # Tiling internals
+│   ├── subsample_*.py                  # Subsampling internals
+│   ├── copc_*.py                       # COPC metadata and staging helpers
 │   ├── filter_buffer_instances.py      # Buffer zone filtering
 │   ├── prepare_tile_jobs.py            # Tile job generation
 │   ├── get_bounds_from_tindex.py       # Extent calculation
 │   └── plot_tiles_and_copc.py          # Visualization
 │
 ├── README.md                           # This documentation
+├── CONTEXT.md                          # Agent/developer context and invariants
 ├── AUTOMATION_README.md                # Automation and Docker guide
 ├── CLAUDE.md                           # Quick reference for developers
 ├── Dockerfile                          # Container configuration
@@ -958,8 +1106,11 @@ htop -p $(pgrep -f "python src/run.py")
 | `main_tile.py` | Two-phase tiling (distribute + COPC conversion), tindex creation |
 | `main_subsample.py` | Parallel voxel-based subsampling |
 | `main_remap.py` | KDTree-based prediction remapping |
+| `main_create_merged_file.py` | Prod-merged product creation from Original-with-predictions files |
 | `main_merge.py` | Merge task orchestration |
-| `merge_tiles.py` | Core merging algorithms (Union-Find, overlap ratio) |
+| `merge_tiles.py`, `merge_*.py` | Merge orchestration and internals |
+| `tile_*.py`, `subsample_*.py` | Extracted tiling and subsampling helpers |
+| `copc_*.py`, `point_cloud_*.py` | COPC staging, metadata preservation, and output helpers |
 | `filter_buffer_instances.py` | Centroid-based buffer zone filtering |
 | `prepare_tile_jobs.py` | Tile grid calculation and job list generation |
 | `get_bounds_from_tindex.py` | Extent extraction from spatial index |

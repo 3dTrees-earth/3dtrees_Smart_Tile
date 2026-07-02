@@ -50,7 +50,7 @@ COPY src/ /src/
 # Create a non-root user for running the application
 # Create data directories with proper permissions (owned by appuser)
 RUN mkdir -p /in /out /src/out
-RUN chmod -R 755 /in /out /src/out
+RUN chmod -R a+rX /src && chmod -R 755 /in /out /src/out
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

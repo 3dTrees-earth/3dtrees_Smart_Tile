@@ -13,7 +13,7 @@ Subsampling, tiling, and merging of point clouds for the 3DTrees segmentation pi
 
 
 \noindent\textbf{Run order} \\
-\textbf{Tile task.} \texttt{run.py} loads \texttt{parameters.py} (Pydantic), then calls \texttt{run\_tile\_task}. \texttt{main\_tile.run\_tiling\_pipeline} converts input LAZ/LAS to COPC via \texttt{untwine} (optionally with dimension reduction to XYZ-only), builds a tindex with PDAL, computes tile bounds via \texttt{prepare\_tile\_jobs} and \texttt{get\_bounds\_from\_tindex} (tile length and buffer). If a single file is below \texttt{tiling\_threshold} (MB), tiling is skipped and the COPC is used as a single ``tile''. \texttt{plot\_tiles\_and\_copc} writes \texttt{overview\_copc\_tiles.png}. Tiles are created with PDAL. \texttt{main\_subsample.run\_subsample\_pipeline} subsamples each tile to resolution 1 and resolution 2 (PDAL subprocess per tile), writing to \texttt{subsampled\_res1} and \texttt{subsampled\_res2}. \\
+\textbf{Tile task.} \texttt{run.py} loads \texttt{parameters.py} (Pydantic), then calls \texttt{run\_tile\_task}. \texttt{main\_tile.run\_tiling\_pipeline} converts input LAZ/LAS to COPC via \texttt{untwine} (optionally reducing to standard LAS dimensions only), builds a tindex with PDAL, computes tile bounds via \texttt{prepare\_tile\_jobs} and \texttt{get\_bounds\_from\_tindex} (tile length and buffer). If a single file is below \texttt{tiling\_threshold} (MB), tiling is skipped and the COPC is used as a single ``tile''. \texttt{plot\_tiles\_and\_copc} writes \texttt{overview\_copc\_tiles.png}. Tiles are created with PDAL. \texttt{main\_subsample.run\_subsample\_pipeline} subsamples each tile to resolution 1 and resolution 2 (PDAL subprocess per tile), writing to \texttt{subsampled\_res1} and \texttt{subsampled\_res2}. \\
 \textbf{Merge task.} \texttt{run.py} calls \texttt{run\_merge\_task}. If \texttt{--subsampled-segmented-folder} is provided, \texttt{main\_remap.remap\_all\_tiles} runs first: source (segmented) and target (subsampled) files are matched by spatial bounds, and point attributes (e.g.\ PredInstance, PredSemantic) are remapped via cKDTree nearest-neighbor to the target resolution. Then \texttt{main\_merge.run\_merge} invokes \texttt{merge\_tiles.merge\_tiles}: load segmented tiles, filter by buffer, assign global instance IDs, perform cross-tile instance matching (overlap and centroid criteria), merge and deduplicate, apply small-volume instance merging, retile to original tile layout, and optionally remap to original input files. Per-tile LAZ and a single merged LAZ are written. \\
 
 
@@ -61,11 +61,11 @@ First subsampling resolution in meters (default: \texttt{0.01}). \\
 \textbf{\texttt{--resolution-2}} &
 Second subsampling resolution in meters (default: \texttt{0.1}). \\
 \textbf{\texttt{--skip-dimension-reduction}} &
-If set, keep all point dimensions; if unset, reduce to XYZ-only for COPC (default: True). \\
+If set, keep extra dimensions in LAZ intermediates; intermediate COPC conversion still strips extra dimensions by default. \\
 \textbf{\texttt{--workers}} &
 Number of parallel workers (Galaxy may pass \texttt{\${GALAXY\_SLOTS:-4}}). \\
 \textbf{\texttt{--num-spatial-chunks}} &
-Spatial chunks for subsampling (default: workers). \\
+Spatial chunks for subsampling and bounded prod-merged creation (default: workers). \\
 \textbf{\texttt{--threads}} &
 Threads per COPC writer (Galaxy: \texttt{\${GALAXY\_SLOTS:-4}}). \\
 \end{longtable}
@@ -77,8 +77,10 @@ Threads per COPC writer (Galaxy: \texttt{\${GALAXY\_SLOTS:-4}}). \\
 Collection of subsampled LAZ files with predictions (e.g.\ PredInstance, PredSemantic), e.g.\ 10\,cm segmented. Galaxy: \texttt{input\_segmented}. \\
 \textbf{\texttt{input\_res1}} &
 Collection of subsampled LAZ files at target resolution for remapping (e.g.\ 1\,cm). Galaxy: \texttt{input\_res1}. \\
-\textbf{\texttt{input\_original}} &
-Optional. Collection of original input LAZ files for final remap to original resolution. \\
+\textbf{\texttt{input\_original\_laz}} &
+Optional. Uploaded original LAZ/LAS files to enrich at original resolution. \\
+\textbf{\texttt{input\_original\_copc}} &
+Optional. Matching original COPC LAZ files used for source matching/validation; enriched originals are still written from the uploaded LAZ/LAS files. \\
 \end{longtable}
 
 \noindent\textbf{Outputs}
@@ -95,8 +97,20 @@ Single merged LAZ file \texttt{merged.laz}. \\
 Folder with segmented (e.g.\ 10\,cm) LAZ files; Galaxy: \texttt{input\_segmented} copied to \texttt{input\_segmented/}. \\
 \textbf{\texttt{--subsampled-target-folder}} &
 Folder with target-resolution LAZ for remap; Galaxy: \texttt{input\_res1} copied to \texttt{input\_res1/}. \\
-\textbf{\texttt{--original-input-dir}} &
-Optional. Directory of original LAZ for final remap; Galaxy: \texttt{input\_original}. \\
+\textbf{\texttt{--original-laz-input-dir}} &
+Optional. Directory of uploaded original LAZ/LAS files for final remap; Galaxy: \texttt{input\_original\_laz}. Legacy \texttt{--original-input-dir} is still accepted as the same raw-LAZ lane. \\
+\textbf{\texttt{--original-copc-input-dir}} &
+Optional directory of matching original COPC LAZ files for validation/source matching; Galaxy: \texttt{input\_original\_copc}. \\
+\textbf{\texttt{--segmented-folders}} &
+For final multi-collection remap, comma-separated finalized prediction collections. Prediction extra dimensions are copied as named by the producing model; duplicate dimension names across collections fail instead of being auto-suffixed. \\
+\textbf{\texttt{--remap-dims}} &
+Optional comma-separated allowlist of prediction extra dimensions to transfer during multi-collection remap. If omitted, all prediction extra dimensions are transferred. \\
+\textbf{\texttt{--chunk-size}} &
+Points per streaming chunk for tiling Phase 1 and multi-collection remap. Larger values reduce repeated prediction-window scans but increase peak memory. \\
+\textbf{\texttt{--merged-resolutions}} / \textbf{\texttt{--merged-output-formats}} &
+Optional prod-merged products from Original-with-predictions files. COPC output preserves CRS and extra dimensions as far as LAS/COPC allows, but final direct \texttt{untwine} creation needs local scratch space for temporary hierarchy/output staging and is not guaranteed bit-for-bit point-count reproducible across chunking/tool versions. \\
+\textbf{\texttt{--staged-copc-dir}} &
+Optional directory with already converted Original-with-predictions COPCs. Matching readable COPCs are reused instead of restaging raw LAZ/LAS inputs. \\
 \textbf{\texttt{--output-tiles-folder}} &
 Output folder for per-tile results (default: \texttt{output\_dir/output\_tiles}). \\
 \textbf{\texttt{--buffer}} &

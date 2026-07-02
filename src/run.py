@@ -5,13 +5,15 @@ Main orchestrator script for the 3DTrees smart tiling pipeline.
 Routes to appropriate task modules based on --task parameter:
 - tile: XYZ reduction, COPC conversion, tiling, and subsampling (1cm and 10cm)
 - merge: Remap predictions and merge tiles with instance matching
+- filter: Remove duplicate buffer-zone instances from segmented/remapped tiles
 - remap: Remap merged file dimensions to original input files
 - create_merged_file: Create prod-merged files from original_with_predictions
 
 Usage:
     python src/run.py --task tile --input-dir /path/to/input --output-dir /path/to/output
     python src/run.py --task merge --subsampled-10cm-folder /path/to/10cm --original-input-dir /path/to/input
-    python src/run.py --task remap --merged-laz /path/to/merged.laz --original-input-dir /path/to/originals --output-dir /path/to/output
+    python src/run.py --task filter --input-dir /path/to/segmented_remapped --output-dir /path/to/filtered
+    python src/run.py --task remap --merged-laz /path/to/merged.laz --original-laz-input-dir /path/to/originals --original-laz-output-dir /path/to/output
     python src/run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output
 """
 
@@ -55,6 +57,10 @@ def _create_prod_merged_outputs(
     print("=" * 60)
     print(f"Original-with-predictions dir: {original_with_predictions_dir}")
     print(f"Output dir: {output_dir}")
+    if params.staged_copc_dir:
+        print(f"Staged COPC dir: {params.staged_copc_dir}")
+    if params.standardization_json:
+        print(f"Standardization JSON: {params.standardization_json}")
     print(f"Selected resolutions: {params.merged_resolutions}")
     print(f"Selected output formats: {params.merged_output_formats}")
     print("Product subsampling method: nearest-to-centroid")
@@ -67,22 +73,131 @@ def _create_prod_merged_outputs(
         output_format_selector=params.merged_output_formats,
         res1=params.resolution_1,
         res2=params.resolution_2,
+        num_spatial_chunks=params.num_spatial_chunks or params.workers,
+        staged_copc_dir=params.staged_copc_dir,
+        standardization_json=params.standardization_json,
     )
     print("  Prod-merged outputs:")
     for output in outputs:
         print(f"    {output}")
 
 
+def _raw_original_output_dir(params: Parameters, raw_input_dir: Path) -> Path:
+    """Return the output directory for raw uploaded Original-with-predictions files."""
+    if params.original_raw_output_dir:
+        return Path(params.original_raw_output_dir)
+    if params.output_dir:
+        return Path(params.output_dir)
+    return raw_input_dir.parent / "original_with_predictions"
+
+
+def _validate_raw_original_lane(
+    raw_input_dir: Path,
+    raw_output_dir: Path,
+) -> None:
+    """Fail early on ambiguous raw-download lane configuration."""
+    if not raw_input_dir.exists():
+        print(f"Error: LAZ original input directory not found: {raw_input_dir}")
+        sys.exit(1)
+    if raw_output_dir.resolve() == raw_input_dir.resolve():
+        print(
+            "Error: --original-laz-output-dir/--output-dir must differ from --original-laz-input-dir."
+        )
+        sys.exit(1)
+
+
+def _validate_copc_original_lane(copc_input_dir: Path) -> None:
+    """Fail early when the explicit COPC lane does not contain COPC LAZ files."""
+    if not copc_input_dir.exists():
+        print(f"Error: COPC original input directory not found: {copc_input_dir}")
+        sys.exit(1)
+    try:
+        from point_cloud_metadata import copc_files
+    except ImportError as e:
+        print(f"Error: Could not import COPC discovery helpers: {e}")
+        sys.exit(1)
+    if not copc_files(copc_input_dir):
+        print(
+            f"Error: --original-copc-input-dir must contain *.copc.laz files: {copc_input_dir}"
+        )
+        sys.exit(1)
+
+
+def _validate_copc_laz_source_pairs(copc_input_dir: Path, laz_input_dir: Path) -> None:
+    """Validate that explicit COPC and LAZ original dirs describe the same sources."""
+    try:
+        import laspy
+        from point_cloud_metadata import copc_files, point_cloud_source_key, raw_point_cloud_files
+    except ImportError as e:
+        print(f"Error: Could not import source-pair validation helpers: {e}")
+        sys.exit(1)
+
+    copc_by_key = {point_cloud_source_key(path): path for path in copc_files(copc_input_dir)}
+    laz_by_key = {point_cloud_source_key(path): path for path in raw_point_cloud_files(laz_input_dir)}
+    if not laz_by_key:
+        print(f"Error: --original-laz-input-dir must contain non-COPC LAZ/LAS files: {laz_input_dir}")
+        sys.exit(1)
+    missing = sorted(set(laz_by_key) - set(copc_by_key))
+    if missing:
+        print(
+            "Error: --original-copc-input-dir is missing COPC twins for uploaded LAZ/LAS sources: "
+            + ", ".join(missing)
+        )
+        sys.exit(1)
+
+    for key, laz_path in laz_by_key.items():
+        copc_path = copc_by_key[key]
+        with laspy.open(str(laz_path), laz_backend=laspy.LazBackend.LazrsParallel) as laz_reader:
+            laz_header = laz_reader.header
+            laz_bounds = (
+                float(laz_header.x_min),
+                float(laz_header.x_max),
+                float(laz_header.y_min),
+                float(laz_header.y_max),
+                float(laz_header.z_min),
+                float(laz_header.z_max),
+            )
+            laz_count = int(laz_header.point_count)
+        with laspy.open(str(copc_path), laz_backend=laspy.LazBackend.LazrsParallel) as copc_reader:
+            copc_header = copc_reader.header
+            copc_bounds = (
+                float(copc_header.x_min),
+                float(copc_header.x_max),
+                float(copc_header.y_min),
+                float(copc_header.y_max),
+                float(copc_header.z_min),
+                float(copc_header.z_max),
+            )
+            copc_count = int(copc_header.point_count)
+        if laz_count != copc_count:
+            print(
+                f"Error: COPC/LAZ source pair point-count mismatch for {key}: "
+                f"{copc_path.name} has {copc_count:,}, {laz_path.name} has {laz_count:,}"
+            )
+            sys.exit(1)
+        if any(abs(a - b) > 0.02 for a, b in zip(laz_bounds, copc_bounds)):
+            print(
+                f"Error: COPC/LAZ source pair bounds mismatch for {key}: "
+                f"{copc_path.name} {copc_bounds} vs {laz_path.name} {laz_bounds}"
+            )
+            sys.exit(1)
+
+    print(
+        f"  COPC/LAZ source validation: matched {len(laz_by_key)} source pair(s)",
+        flush=True,
+    )
+
+
 def run_tile_task(params: Parameters):
     """
-    Run the tile task: XYZ reduction, COPC conversion, tiling, and subsampling.
+    Run the tile task: COPC conversion, tiling, and subsampling.
 
     Pipeline:
-    1. Convert LAZ to XYZ-only COPC (via main_tile.py)
+    1. Convert LAZ/LAS inputs to intermediate COPC with standard LAS dimensions by default
     2. Build spatial index
     3. Calculate tile bounds
     4. Create overlapping tiles
-    5. Subsample to resolution 1 (2cm)
+    5. Subsample to resolution 1 (1cm by default)
     6. Subsample to resolution 2 (10cm)
     """
     # Import Python modules
@@ -124,6 +239,8 @@ def run_tile_task(params: Parameters):
     subsampling_chunks = num_spatial_chunks or workers
     res1 = params.resolution_1
     res2 = params.resolution_2
+    output_copc_res1 = params.output_copc_res1
+    output_copc_res2 = params.output_copc_res2
     subsampling_method = params.subsampling_method
     tiling_threshold = params.tiling_threshold
     chunk_size = params.chunk_size
@@ -137,11 +254,13 @@ def run_tile_task(params: Parameters):
     print(f"Workers: {workers}")
     print(f"Threads per writer: {threads}")
     print(f"Subsampling spatial chunks/window workers: {subsampling_chunks}")
-    print(f"Skip dimension reduction: {skip_dimension_reduction}")
+    print(f"Keep extra dimensions in LAZ intermediates: {skip_dimension_reduction}")
     dimension_reduction = not skip_dimension_reduction
     print(f"Subsampling dimensions: {'minimal (standard dims only)' if dimension_reduction else 'keep all (including extra_dims)'}")
     print(f"Subsampling method: {subsampling_method}")
     print(f"Resolutions: {res1}m ({int(res1*100)}cm), {res2}m ({int(res2*100)}cm)")
+    print(f"Resolution 1 output: {'COPC LAZ' if output_copc_res1 else 'LAZ'}")
+    print(f"Resolution 2 output: {'COPC LAZ' if output_copc_res2 else 'LAZ'}")
     if tiling_threshold is not None:
         print(f"Tiling threshold: {tiling_threshold} MB")
     print(f"Chunk size: {chunk_size:,} points")
@@ -176,7 +295,14 @@ def run_tile_task(params: Parameters):
             for copc_file in tiles_dir.glob("*.copc.laz"):
                 dest_file = tiles_dir_normalized / copc_file.name
                 if not dest_file.exists():
-                    shutil.copy2(copc_file, dest_file)
+                    try:
+                        shutil.copy2(copc_file, dest_file)
+                    except OSError as exc:
+                        print(
+                            "  Warning: metadata-preserving copy failed "
+                            f"({exc}); retrying as data-only copy"
+                        )
+                        shutil.copyfile(copc_file, dest_file)
 
             # Update tiles_dir to use normalized structure
             tiles_dir = tiles_dir_normalized
@@ -197,6 +323,8 @@ def run_tile_task(params: Parameters):
             output_base_dir=output_dir,  # Output directly to output_dir, not under tiles_dir
             dimension_reduction=dimension_reduction,  # True = minimal (standard dims only); False = keep extra_dims
             subsampling_method=subsampling_method,
+            output_copc_res1=output_copc_res1,
+            output_copc_res2=output_copc_res2,
         )
 
         # Step 7: Update tile_bounds_tindex.json with actual bounds from created tiles
@@ -237,9 +365,9 @@ def run_merge_task(params: Parameters):
     """
     # Import Python modules
     try:
+        from instance_labels import MERGED_OUTPUT_SCALES
         from main_remap import remap_all_tiles
         from main_merge import run_merge
-        from merge_tiles import MERGED_OUTPUT_SCALES
     except ImportError as e:
         print(f"Error: Could not import required modules: {e}")
         print("Make sure main_remap.py and main_merge.py exist.")
@@ -321,7 +449,7 @@ def run_merge_task(params: Parameters):
                         remap_tile_bounds_json = p
                         break
 
-            # Remap - source is 10cm segmented, target is 2cm subsampled
+            # Remap - source is segmented, target is the configured resolution-1 subsample
             segmented_remapped_folder = remap_all_tiles(
                 source_folder=subsampled_10cm_dir,
                 target_folder=target_folder,
@@ -350,14 +478,25 @@ def run_merge_task(params: Parameters):
         print(f"Buffer: {buffer}m")
         print(f"Overlap threshold: {overlap_threshold}")
         print(f"Workers: {workers}")
-        if params.original_input_dir:
-            print(f"Original input dir: {params.original_input_dir}")
+        if params.original_raw_input_dir or params.original_input_dir:
+            print(f"LAZ original input dir: {params.original_raw_input_dir or params.original_input_dir}")
+        if params.original_copc_input_dir:
+            print(f"COPC matching original input dir: {params.original_copc_input_dir}")
         print()
 
         output_merged = params.output_merged_laz
         output_tiles_dir = params.output_tiles_folder
         original_tiles_dir = params.original_tiles_dir
-        original_input_dir = params.original_input_dir
+        original_input_dir = params.original_raw_input_dir or params.original_input_dir
+        if params.original_copc_input_dir and original_input_dir:
+            _validate_copc_original_lane(Path(params.original_copc_input_dir))
+            _validate_copc_laz_source_pairs(Path(params.original_copc_input_dir), Path(original_input_dir))
+        elif params.original_copc_input_dir:
+            print(
+                "Error: --original-laz-input-dir is required when --original-copc-input-dir "
+                "is used for merge/remap-to-originals."
+            )
+            sys.exit(1)
 
         # Auto-derive paths if not provided
         parent_dir = segmented_remapped_folder.parent
@@ -371,6 +510,11 @@ def run_merge_task(params: Parameters):
         if original_tiles_dir is None:
             # Try to find the tiles directory (parent of subsampled folders)
             original_tiles_dir = parent_dir
+        if original_input_dir:
+            _validate_raw_original_lane(
+                Path(original_input_dir),
+                Path(output_tiles_dir).parent / "original_with_predictions",
+            )
 
         # tile_bounds_json is required for merge (no fallback)
         tile_bounds_json = params.tile_bounds_json
@@ -439,76 +583,200 @@ def run_merge_task(params: Parameters):
 
 def run_remap_task(params: Parameters):
     """
-    Run the remap task: one merged LAZ file -> original files folder.
-    3DTrees dimensions from the merged file are added to each original file.
+    Run the remap task.
+
+    Supported modes:
+    - --segmented-folders: finalized prediction collections -> original files folder.
+      Extra dimensions are preserved as-is and duplicate prediction names fail.
+    - --merged-laz: one merged LAZ/COPC LAZ file -> original files folder.
+      3DTrees dimensions are suffixed during transfer.
     """
     try:
+        from prediction_collection_remap import remap_prediction_collections_to_original_files
         from merge_tiles import (
             load_merged_file,
+            reassign_small_instances_in_dims,
             remap_to_original_input_files,
         )
+        from output_remap import remap_merged_file_to_original_input_files
+        from point_cloud_outputs import write_loaded_point_cloud
     except ImportError as e:
         print(f"Error: Could not import required modules: {e}")
         sys.exit(1)
 
-    if not params.merged_laz:
-        print("Error: --merged-laz is required for remap task")
+    if not params.original_raw_input_dir and not params.original_input_dir:
+        print("Error: --original-laz-input-dir is required for remap task")
+        print("       Legacy --original-input-dir is still accepted as a LAZ/LAS source for compatibility.")
         sys.exit(1)
-    if not params.original_input_dir:
-        print("Error: --original-input-dir is required for remap task")
-        sys.exit(1)
-
-    merged_laz = Path(params.merged_laz)
-    original_input_dir = Path(params.original_input_dir)
-    if not merged_laz.exists():
-        print(f"Error: Merged file not found: {merged_laz}")
-        sys.exit(1)
-    if not original_input_dir.exists():
-        print(f"Error: Original input directory not found: {original_input_dir}")
+    if not params.segmented_folders and not params.merged_laz:
+        print("Error: --segmented-folders or --merged-laz is required for remap task")
         sys.exit(1)
 
-    output_dir = params.output_dir
-    if output_dir is None:
-        output_dir = original_input_dir.parent / "original_with_predictions"
-    else:
-        output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    laz_input_dir = Path(params.original_raw_input_dir or params.original_input_dir)
+    laz_output_dir = _raw_original_output_dir(params, laz_input_dir)
+    _validate_raw_original_lane(laz_input_dir, laz_output_dir)
+
+    copc_input_dir = Path(params.original_copc_input_dir) if params.original_copc_input_dir else None
+    using_explicit_copc_dir = params.original_copc_input_dir is not None
+    if using_explicit_copc_dir:
+        _validate_copc_original_lane(copc_input_dir)
+        _validate_copc_laz_source_pairs(copc_input_dir, laz_input_dir)
 
     workers = max(1, params.workers)
     retile_buffer = 2.0
     tolerance = 0.1
 
+    if params.segmented_folders:
+        collections = [Path(p.strip()) for p in params.segmented_folders.split(",") if p.strip()]
+        target_dims = {d.strip() for d in params.remap_dims.split(",") if d.strip()} if params.remap_dims else None
+
+        print("=" * 60)
+        print("Remap: prediction collections -> original files")
+        print("=" * 60)
+        print(f"Collections: {[str(c) for c in collections]}")
+        if copc_input_dir is not None:
+            print(f"COPC matching original input dir: {copc_input_dir}")
+        else:
+            print("COPC matching original input dir: not provided")
+        print(f"LAZ original input dir: {laz_input_dir}")
+        print(f"LAZ output dir: {laz_output_dir}")
+        print("COPC-original enrichment output: disabled")
+        print(f"Remap dims: {sorted(target_dims) if target_dims else 'all extra dimensions'}")
+        print()
+
+        try:
+            print()
+            print("=" * 60)
+            print("Remap: prediction collections -> uploaded LAZ originals")
+            print("=" * 60)
+            remap_prediction_collections_to_original_files(
+                collections,
+                laz_input_dir,
+                laz_output_dir,
+                tolerance=tolerance,
+                num_threads=workers,
+                retile_buffer=retile_buffer,
+                target_dims=target_dims,
+                chunk_size=params.chunk_size or 5_000_000,
+                num_spatial_chunks=params.num_spatial_chunks or params.workers,
+                prefer_copc_sources=False,
+            )
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+        if params.transfer_original_dims_to_merged:
+            product_output_dir = laz_output_dir.parent
+            _create_prod_merged_outputs(
+                original_with_predictions_dir=laz_output_dir,
+                output_dir=product_output_dir,
+                params=params,
+            )
+        else:
+            print("  Skipping prod-merged output creation (disabled).")
+
+        print()
+        print("Remap complete.")
+        return
+
+    merged_laz = Path(params.merged_laz)
+    if not merged_laz.exists():
+        print(f"Error: Merged file not found: {merged_laz}")
+        sys.exit(1)
+
     print("=" * 60)
     print("Remap: merged file -> original files")
     print("=" * 60)
     print(f"Merged file: {merged_laz}")
-    print(f"Original input dir: {original_input_dir}")
-    print(f"Output dir: {output_dir}")
+    if copc_input_dir is not None:
+        print(f"COPC matching original input dir: {copc_input_dir}")
+    else:
+        print("COPC matching original input dir: not provided")
+    print(f"LAZ original input dir: {laz_input_dir}")
+    print(f"LAZ output dir: {laz_output_dir}")
     print()
 
     # Parse 3DTrees dimension branding params
     threedtrees_dims = [d.strip() for d in params.threedtrees_dims.split(",") if d.strip()] if params.threedtrees_dims else None
     threedtrees_suffix = params.threedtrees_suffix
 
-    merged_points, merged_extra_dims, merged_extra_dim_params = load_merged_file(merged_laz)
-    remap_to_original_input_files(
-        merged_points,
-        merged_extra_dims,
-        merged_extra_dim_params,
-        original_input_dir,
-        output_dir,
-        tolerance=tolerance,
-        num_threads=workers,
-        retile_buffer=retile_buffer,
-        threedtrees_dims=threedtrees_dims,
-        threedtrees_suffix=threedtrees_suffix,
-    )
+    if not params.pre_remap_reassign_instances:
+        remap_merged_file_to_original_input_files(
+            merged_laz,
+            laz_input_dir,
+            laz_output_dir,
+            tolerance=tolerance,
+            num_threads=workers,
+            retile_buffer=retile_buffer,
+            threedtrees_dims=threedtrees_dims,
+            threedtrees_suffix=threedtrees_suffix,
+            num_spatial_chunks=params.num_spatial_chunks or params.workers,
+            chunk_size=params.chunk_size or 5_000_000,
+            prefer_copc_sources=False,
+        )
+    else:
+        merged_points, merged_extra_dims, merged_extra_dim_params = load_merged_file(merged_laz)
+        candidate_dims = [d.strip() for d in params.threedtrees_dims.split(",") if d.strip()]
+        instance_dimension = params.pre_remap_reassign_instance_dimension
+        if instance_dimension is None:
+            instance_dimension = next((d for d in candidate_dims if "instance" in d.lower()), None)
+        if instance_dimension is None:
+            print("Error: --pre-remap-reassign-instances requires an instance dimension")
+            sys.exit(1)
+
+        print()
+        print("Pre-remap small instance reassignment")
+        print(f"  Instance dimension: {instance_dimension}")
+        print(f"  Reassign point-count clusters below: {params.pre_remap_reassign_min_cluster_size}")
+        print(f"  Hull check for clusters below: {params.pre_remap_reassign_hull_point_threshold}")
+        print(f"  Reassign hull volume below: {params.pre_remap_reassign_max_volume} m3")
+        reassignment_stats = reassign_small_instances_in_dims(
+            merged_points,
+            merged_extra_dims,
+            instance_dimension=instance_dimension,
+            min_cluster_size=params.pre_remap_reassign_min_cluster_size,
+            hull_point_threshold=params.pre_remap_reassign_hull_point_threshold,
+            max_volume_for_merge=params.pre_remap_reassign_max_volume,
+            max_search_radius=float("inf"),
+            num_threads=workers,
+            verbose=bool(params.verbose),
+        )
+        print(
+            "  Reassignment result: "
+            f"{reassignment_stats['changed_points']:,} points changed, "
+            f"{reassignment_stats['instances_before']:,} -> "
+            f"{reassignment_stats['instances_after']:,} instances"
+        )
+        if params.pre_remap_reassigned_laz:
+            reassigned_laz = Path(params.pre_remap_reassigned_laz)
+            print(f"  Saving reassigned segmented point cloud: {reassigned_laz}")
+            write_loaded_point_cloud(
+                source_file=merged_laz,
+                output_file=reassigned_laz,
+                points=merged_points,
+                all_dims=merged_extra_dims,
+            )
+
+        remap_to_original_input_files(
+            merged_points,
+            merged_extra_dims,
+            merged_extra_dim_params,
+            laz_input_dir,
+            laz_output_dir,
+            tolerance=tolerance,
+            num_threads=workers,
+            retile_buffer=retile_buffer,
+            threedtrees_dims=threedtrees_dims,
+            threedtrees_suffix=threedtrees_suffix,
+            num_spatial_chunks=params.num_spatial_chunks or params.workers,
+            prefer_copc_sources=False,
+        )
 
     # Create prod-merged files from the enriched original outputs (optional).
     if params.transfer_original_dims_to_merged:
-        product_output_dir = output_dir.parent
+        product_output_dir = laz_output_dir.parent
         _create_prod_merged_outputs(
-            original_with_predictions_dir=output_dir,
+            original_with_predictions_dir=laz_output_dir,
             output_dir=product_output_dir,
             params=params,
         )
@@ -543,6 +811,10 @@ def run_create_merged_file_task(params: Parameters):
     print("=" * 60)
     print(f"Original-with-predictions dir: {input_dir}")
     print(f"Output dir: {output_dir}")
+    if params.staged_copc_dir:
+        print(f"Staged COPC dir: {params.staged_copc_dir}")
+    if params.standardization_json:
+        print(f"Standardization JSON: {params.standardization_json}")
     print(f"Selected resolutions: {params.merged_resolutions}")
     print(f"Selected output formats: {params.merged_output_formats}")
     print(f"Resolution 1: {params.resolution_1:g}m")
@@ -558,6 +830,9 @@ def run_create_merged_file_task(params: Parameters):
             output_format_selector=params.merged_output_formats,
             res1=params.resolution_1,
             res2=params.resolution_2,
+            num_spatial_chunks=params.num_spatial_chunks or params.workers,
+            staged_copc_dir=params.staged_copc_dir,
+            standardization_json=params.standardization_json,
         )
     except Exception as e:
         print(f"Error: {e}")
@@ -571,6 +846,61 @@ def run_create_merged_file_task(params: Parameters):
         print(f"  {output}")
 
 
+def run_filter_task(params: Parameters):
+    """Filter buffer-zone duplicate instances from segmented/remapped tiles."""
+    try:
+        from filter_buffer_instances import filter_buffer_instances_dir
+    except ImportError as e:
+        print(f"Error: Could not import filter_buffer_instances.py: {e}")
+        sys.exit(1)
+
+    if not params.input_dir:
+        print("Error: --input-dir is required for filter task")
+        sys.exit(1)
+    if not params.output_dir:
+        print("Error: --output-dir is required for filter task")
+        sys.exit(1)
+
+    input_dir = Path(params.input_dir)
+    output_dir = Path(params.output_dir)
+    if not input_dir.exists():
+        print(f"Error: Input directory does not exist: {input_dir}")
+        sys.exit(1)
+    if output_dir.resolve() == input_dir.resolve() and params.filter_suffix == "":
+        print("Error: --output-dir must differ from --input-dir when --filter-suffix is empty")
+        sys.exit(1)
+
+    print("=" * 60)
+    print("Running Filter Task")
+    print("=" * 60)
+    print(f"Input directory: {input_dir}")
+    print(f"Output directory: {output_dir}")
+    print(f"Buffer: {params.buffer}m")
+    print(f"Instance dimension: {params.instance_dimension}")
+    print(f"Output suffix: {params.filter_suffix!r}")
+    if params.filter_output_extension:
+        print(f"Output extension: {params.filter_output_extension}")
+    print()
+
+    try:
+        summary = filter_buffer_instances_dir(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            buffer=params.buffer,
+            suffix=params.filter_suffix,
+            instance_dimension=params.instance_dimension,
+            output_extension=params.filter_output_extension,
+        )
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    print()
+    print("Filter task complete.")
+    print(f"  Files processed: {summary['input_files']}")
+    print(f"  Output files: {len(summary['output_files'])}")
+
+
 def preprocess_boolean_flags(args_list):
     """
     Preprocess CLI args to convert boolean flags to explicit True/False for Pydantic.
@@ -581,6 +911,9 @@ def preprocess_boolean_flags(args_list):
         '--skip-dimension-reduction', '--skip_dimension_reduction',
         '--disable-matching', '--disable_matching',
         '--disable-volume-merge', '--disable_volume_merge',
+        '--pre-remap-reassign-instances', '--pre_remap_reassign_instances',
+        '--output-copc-res1', '--output_copc_res1',
+        '--output-copc-res2', '--output_copc_res2',
         '--skip-merged-file', '--skip_merged_file',
         '--verbose', '-v'
     ]
@@ -591,7 +924,7 @@ def preprocess_boolean_flags(args_list):
         arg = args_list[i]
         if arg in boolean_flags:
             # Check if next arg is already True/False
-            if i + 1 < len(args_list) and args_list[i + 1] in ['True', 'False']:
+            if i + 1 < len(args_list) and args_list[i + 1].lower() in ['true', 'false']:
                 processed.extend([arg, args_list[i + 1]])
                 i += 2
             else:
@@ -602,6 +935,47 @@ def preprocess_boolean_flags(args_list):
             processed.append(arg)
             i += 1
     return processed
+
+
+def _accepted_cli_flags() -> set[str]:
+    """Return long CLI flags accepted by Parameters or the run.py preprocessor."""
+    accepted = {"show-params", "show_params", "no-transfer-original-dims-to-merged"}
+    for field_name, field in Parameters.model_fields.items():
+        accepted.add(field_name)
+        accepted.add(field_name.replace("_", "-"))
+        validation_alias = field.validation_alias
+        if validation_alias is None:
+            continue
+        choices = getattr(validation_alias, "choices", None)
+        if choices is None:
+            accepted.add(str(validation_alias))
+        else:
+            accepted.update(str(choice) for choice in choices)
+    return accepted
+
+
+def _unknown_cli_flags(args_list) -> list[str]:
+    """Return unknown long CLI flags from args_list."""
+    accepted = _accepted_cli_flags()
+    unknown = []
+    for raw_arg in args_list:
+        if not raw_arg.startswith("--") or raw_arg == "--":
+            continue
+        flag = raw_arg[2:].split("=", 1)[0]
+        if flag and flag not in accepted:
+            unknown.append(flag)
+    return sorted(set(unknown))
+
+
+def _validate_known_cli_flags(args_list) -> None:
+    """Fail fast on typoed or unsupported long CLI flags."""
+    unknown = _unknown_cli_flags(args_list)
+    if unknown:
+        print(
+            "Error: Unknown SmartTile CLI argument(s): "
+            + ", ".join(f"--{flag}" for flag in unknown)
+        )
+        sys.exit(1)
 
 
 def main():
@@ -627,6 +1001,8 @@ def main():
         else:
             mapped_args.append(arg)
     remaining_args = mapped_args
+
+    _validate_known_cli_flags(remaining_args)
 
     # Preprocess boolean flags for Pydantic
     processed_args = [sys.argv[0]] + preprocess_boolean_flags(remaining_args)
@@ -655,6 +1031,7 @@ def main():
         print("Error: --task is required (unless using --show-params)")
         print("Usage: python run.py --task tile --input-dir /path/to/input --output-dir /path/to/output")
         print("       python run.py --task merge --subsampled-10cm-folder /path/to/10cm")
+        print("       python run.py --task filter --input-dir /path/to/segmented_remapped --output-dir /path/to/filtered")
         print("       python run.py --task remap --merged-laz /path/to/merged.laz --original-input-dir /path/to/originals")
         print("       python run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output")
         print("       python run.py --show-params")
@@ -665,13 +1042,15 @@ def main():
         run_tile_task(params)
     elif params.task == "merge":
         run_merge_task(params)
+    elif params.task == "filter":
+        run_filter_task(params)
     elif params.task == "remap":
         run_remap_task(params)
     elif params.task == "create_merged_file":
         run_create_merged_file_task(params)
     else:
         print(f"Error: Unknown task: {params.task}")
-        print("Valid tasks: tile, merge, remap, create_merged_file")
+        print("Valid tasks: tile, merge, filter, remap, create_merged_file")
         sys.exit(1)
 
 
