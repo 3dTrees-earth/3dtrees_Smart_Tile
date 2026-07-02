@@ -73,7 +73,7 @@ def load_extent_from_tindex(tindex_path: Path):
         return (minx, miny, maxx, maxy), srs_info
 
 
-def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, grid_offset=0.0):
+def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False):
     """Build tile grid.
 
     Args:
@@ -81,7 +81,6 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, gri
         length: Tile size in units
         buffer: Buffer size in units
         align_to_grid: If True, snap to grid.
-        grid_offset: Offset in units
     """
     # Validate inputs - check for infinity or NaN
     if not all(math.isfinite(v) for v in [minx, miny, maxx, maxy]):
@@ -91,13 +90,13 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, gri
         )
 
     if align_to_grid:
-        start_x = math.floor((minx + grid_offset) / length) * length
-        start_y = math.floor((miny + grid_offset) / length) * length
+        start_x = math.floor(minx / length) * length
+        start_y = math.floor(miny / length) * length
         end_x = math.ceil(maxx / length) * length
         end_y = math.ceil(maxy / length) * length
     else:
-        start_x = minx + grid_offset
-        start_y = miny + grid_offset
+        start_x = minx
+        start_y = miny
         x_range = maxx - minx
         y_range = maxy - miny
         if not math.isfinite(x_range) or not math.isfinite(y_range):
@@ -141,6 +140,7 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, gri
                     "col": col,
                     "row": row,
                     "core": [core_x, core_y],
+                    "planned_bounds": [buffered_x, buffered_y],
                     "bounds": [buffered_x, buffered_y],
                 }
             )
@@ -185,12 +185,6 @@ def main():
         default=Path("tile_bounds_tindex.json"),
         help="Where to write the tile bounds JSON summary",
     )
-    parser.add_argument(
-        "--grid-offset",
-        type=float,
-        default=0.0,
-        help="Offset in units to add before starting grid (default: 0.0)",
-    )
     args = parser.parse_args()
 
     (minx, miny, maxx, maxy), srs = load_extent_from_tindex(args.tindex_path)
@@ -207,7 +201,6 @@ def main():
         proj_minx, proj_miny, proj_maxx, proj_maxy,
         args.tile_length, args.tile_buffer,
         align_to_grid=False,
-        grid_offset=args.grid_offset
     )
 
     summary = {

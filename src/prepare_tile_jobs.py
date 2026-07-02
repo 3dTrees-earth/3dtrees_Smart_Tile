@@ -27,7 +27,7 @@ except ImportError as exc:  # pragma: no cover
 DEFAULT_BOUNDS_JSON = Path("tile_bounds_tindex.json")
 
 
-def run_get_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, bounds_json_path: Path, grid_offset: float = 0.0) -> dict:
+def run_get_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, bounds_json_path: Path) -> dict:
     cmd = [
         sys.executable,
         str(Path(__file__).with_name("get_bounds_from_tindex.py")),
@@ -36,8 +36,6 @@ def run_get_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, bo
         f"--tile-buffer={tile_buffer}",
         f"--out={bounds_json_path}",
     ]
-    if grid_offset != 0.0:
-        cmd.append(f"--grid-offset={grid_offset}")
     print(f"[prepare_tile_jobs] running: {' '.join(cmd)}", file=sys.stderr)
     completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
@@ -122,15 +120,9 @@ def main():
         default=DEFAULT_BOUNDS_JSON,
         help="Path to write the tile bounds JSON file",
     )
-    parser.add_argument(
-        "--grid-offset",
-        type=float,
-        default=0.0,
-        help="Offset in meters to add to minx and miny before starting grid (default: 0.0)",
-    )
     args = parser.parse_args()
 
-    env = run_get_bounds(args.tindex_path, args.tile_length, args.tile_buffer, args.bounds_out, args.grid_offset)
+    env = run_get_bounds(args.tindex_path, args.tile_length, args.tile_buffer, args.bounds_out)
     bounds_json = args.bounds_out
     write_job_list(bounds_json, args.jobs_out)
 
