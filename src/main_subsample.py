@@ -881,7 +881,6 @@ def run_subsample_pipeline(
     print(f"Resolution 2: {res2}m ({res2_cm}cm)")
     print(f"CPU cores: {num_cores}")
     print(f"Threads (chunks per file): {num_threads}")
-    print(f"Dimension reduction: {dimension_reduction} ({'minimal (standard dims only)' if dimension_reduction else 'keep all (extra_dims preserved)'})")
     print(f"Subsampling method: {subsampling_method}")
     print(f"Resolution 1 output: {'COPC LAZ' if output_copc_res1 else 'LAZ'}")
     print(f"Resolution 2 output: {'COPC LAZ' if output_copc_res2 else 'LAZ'}")

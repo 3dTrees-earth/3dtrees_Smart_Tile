@@ -115,7 +115,12 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
                     "remap",
                     "--subsampled-segmented-folder",
                     "segmented",
+                    "--produce-merged-file",
+                    "--no-produce-merged-file",
+                    "--no-produce_merged_file",
                     "--no-transfer-original-dims-to-merged",
+                    "--no-transfer_original_dims_to_merged",
+                    "--transfer-original-dims-to-merged",
                     "--show-params",
                     "--output-copc-res1",
                     "True",
@@ -123,6 +128,25 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
             ),
             [],
         )
+
+    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
+    def test_cli_help_lists_current_options_without_removed_dimension_flags(self):
+        import io
+        from contextlib import redirect_stdout
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            run._print_cli_help()
+        help_text = stdout.getvalue()
+
+        self.assertIn("--task", help_text)
+        self.assertIn("--subsampled-10cm-folder", help_text)
+        self.assertIn("--segmented-folders", help_text)
+        self.assertIn("--produce-merged-file", help_text)
+        self.assertIn("--no-produce-merged-file", help_text)
+        self.assertNotIn("skip-dimension-reduction", help_text)
+        self.assertNotIn("dimension_reduction", help_text)
+        self.assertNotIn("keep all dims", help_text.lower())
 
 
 if __name__ == "__main__":

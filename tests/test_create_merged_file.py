@@ -1,6 +1,8 @@
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -11,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from main_create_merged_file import (  # noqa: E402
     _merge_chunk_files_pipeline,
     _merge_prod_chunks,
+    _create_prod_merged_chunks,
     _untwine_chunk_files_to_copc,
     _validate_expected_dims,
     _validate_preserved_product_dims,
@@ -343,6 +346,44 @@ class CreateMergedFileTests(unittest.TestCase):
         self.assertTrue(first_chunk_set)
         for chunk_set, _, _ in merge_calls:
             self.assertEqual(chunk_set, first_chunk_set)
+
+    def test_chunk_creation_uses_capped_parallel_workers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source = tmp_path / "source.copc.laz"
+            source.write_text("copc")
+            work_dir = tmp_path / "chunks"
+            work_dir.mkdir()
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+
+            def run_pipeline(pipeline, *_):
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                try:
+                    time.sleep(0.05)
+                    Path(pipeline["pipeline"][-1]["filename"]).write_text("chunk")
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+                finally:
+                    with lock:
+                        active -= 1
+
+            with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline):
+                chunks = _create_prod_merged_chunks(
+                    [source],
+                    work_dir,
+                    "prod_merged",
+                    ["bounds-a", "bounds-b", "bounds-c", "bounds-d"],
+                    0.1,
+                    {},
+                    chunk_workers=2,
+                )
+
+        self.assertEqual(len(chunks), 4)
+        self.assertEqual(max_active, 2)
 
     def test_single_copc_pipeline_validates_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:

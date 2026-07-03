@@ -111,6 +111,7 @@ This pipeline provides an end-to-end solution with five user-facing task modes:
 - **Parallel processing** using Python's `ProcessPoolExecutor` for multi-core utilization
 - **COPC format output** via untwine (with automatic PDAL fallback) for efficient spatial queries and streaming access
 - **Memory-efficient chunking** - tiles are processed independently to minimize memory footprint
+- **Single-source range parallelism** - one large input file is split by point range during tile distribution so `--workers` can be used before COPC finalization
 - **Parallel subsampling** - each tile is spatially divided into chunks processed concurrently
 
 ### Intelligent Tiling
@@ -123,7 +124,7 @@ This pipeline provides an end-to-end solution with five user-facing task modes:
 ### Multi-Resolution Processing
 - **Dual subsampling** - generates both 1cm and 10cm resolution outputs (configurable)
 - **Selectable voxel subsampling** - defaults to SmartTile `center-of-mass` XYZ averaging; `nearest-to-centroid` preserves the previous PDAL voxel centroid nearest-neighbor behavior
-- **Explicit dimension policy** - intermediate COPC conversion strips extra point attributes by default; prod-merged creation preserves enriched dimensions
+- **Explicit dimension policy** - intermediate COPC conversion strips extra dimensions by default, trying Untwine `--dims Classification` first and falling back to PDAL if validation shows extras remain; prod-merged creation preserves enriched dimensions
 
 ### Smart Instance Merging
 - **Centroid-based filtering** - removes duplicate instances in buffer zones
@@ -220,8 +221,11 @@ python src/run.py --task tile \
 
 ### Basic Merge Task
 
-Merge segmented tiles and create processed per-tile outputs plus the current processed merged LAZ
-(requires **tile_bounds_tindex.json** from the Tile task):
+Filter duplicate buffer-zone instances from segmented predictions, remap the
+filtered predictions to the target resolution, then merge the remapped tiles.
+The task always writes merged per-tile outputs for downstream processing and can
+also write the current processed merged LAZ (requires **tile_bounds_tindex.json**
+from the Tile task):
 
 ```bash
 python src/run.py --task merge \
@@ -232,7 +236,9 @@ python src/run.py --task merge \
     --output-merged-laz /path/to/out/merged.laz
 ```
 
-Optional: add `--original-input-dir /path/to/original` to also write `original_with_predictions/`.
+Optional: add `--original-laz-input-dir /path/to/original` to enrich uploaded
+originals from the merged 1cm tile outputs. Use `--original-laz-output-dir` to
+choose that folder.
 
 ### Basic Filter Task
 
@@ -322,6 +328,7 @@ python src/run.py --task remap \
     --original-laz-output-dir /path/to/original_with_predictions_raw \
     --remap-dims PredInstance_SAT,PredSemantic_SAT,PredInstance_ForestMamba,species_id_sat,species_prob_sat,species_id_foma,species_prob_foma \
     --chunk-size 10000000 \
+    --produce-merged-file \
     --merged-resolutions 1cm \
     --merged-output-formats laz
 ```
@@ -339,6 +346,15 @@ Use `--chunk-size` to tune the memory/speed tradeoff. Larger chunks reduce
 repeated prediction-window scans but increase peak memory; for large two-file
 datasets under a 30GB container cap, `10000000` points per chunk has been a
 useful validation setting.
+When there is only one raw LAZ/LAS original, SmartTile can still use the worker
+budget by enriching multiple original chunks concurrently. `--num-spatial-chunks`
+caps that raw chunk concurrency; if omitted, it defaults to `--workers`.
+
+Prod-merged output creation is controlled by `--produce-merged-file` /
+`--no-produce-merged-file` (aliases for the existing
+`--transfer-original-dims-to-merged` toggle). When enabled, the outputs are
+created from `original_with_predictions_raw/` using `--merged-resolutions`,
+`--merged-output-formats`, `--staged-copc-dir`, and `--standardization-json`.
 
 Prediction collections stored as COPC are loaded with bounded COPC spatial
 queries when remap needs a local prediction window.
@@ -475,23 +491,22 @@ python src/run.py --task merge \
 
 #### Phase 1: Distribute
 
-Each source file is read once using laspy (in memory-efficient chunks controlled by `--chunk-size`). Points are distributed to all overlapping tiles as intermediate `.las` part files. Per-tile offsets are computed from tile bounds to prevent int32 overflow in scaled coordinates.
+Each source file is read with laspy in memory-efficient chunks controlled by `--chunk-size`. Points are distributed to all overlapping tiles as intermediate `.las` part files. Per-tile offsets are computed from tile bounds to prevent int32 overflow in scaled coordinates.
 
-**Parallelization**: One source file at a time, but tile writing is batched.
+**Parallelization**: Multiple source files are distributed in parallel. If there is only one large source file, SmartTile splits it into bounded point ranges so `--workers` can be used before Untwine/PDAL finalizes the tile COPCs. The per-worker point chunk is reduced from `--chunk-size` so peak concurrent memory stays close to the caller's chunk budget.
 
 #### Phase 2: COPC Conversion
 
-All part files for each tile are merged and converted to COPC format. Untwine is preferred for COPC writing. Intermediate COPC conversion strips extra point attributes while forwarding header metadata and CRS records. If the input has no extra dimensions, SmartTile uses plain Untwine. If extra dimensions are present, SmartTile first tries Untwine's `--dims Classification` keep-list path so COPC creation can strip model/vendor extra bytes without a temporary PDAL rewrite. If direct Untwine dimension limiting fails or the output still contains extra dimensions, SmartTile caches that extra-dimension schema as unsupported, writes a temporary standard-dimension LAZ, and then converts that file with Untwine. Prod-merged creation is the explicit exception and preserves enriched dimensions for final products.
+All part files for each tile are merged and converted to COPC format. Untwine is preferred for COPC writing. Intermediate COPC conversion uses Untwine's `--dims Classification` path by default while forwarding header metadata and CRS records, then validates that no extra byte dimensions remain. If Untwine fails, CRS validation fails, or extra dimensions remain, SmartTile falls back to PDAL `writers.copc` without `extra_dims=all`. Prod-merged creation is the explicit exception and preserves enriched dimensions for final products.
 
-The SmartTile Docker image has been validated against Untwine 1.5.1: `--dims ""` is rejected; `--dims Classification` strips extra dimensions on some inputs but can leave prediction extras on dataset 480-style enriched files; and long explicit standard-dimension lists such as `--dims Red,Green,Blue` are not used because they can crash this build. Keep the output-header validation, schema cache, and fallback in place when changing this path.
+The SmartTile Docker image has been validated against Untwine 1.5.1: `--dims ""` is rejected; `--dims Classification` can leave prediction or source extras on enriched files; and long explicit standard-dimension lists such as `--dims Red,Green,Blue` are not used because they can crash this build. SmartTile therefore treats Untwine dimension limiting as the first attempt and accepts it only after output inspection confirms there are no extra byte dimensions.
 
 **Parallelization**: Multiple tiles converted concurrently (controlled by `--workers`).
 
 **Output**: `c{col}_r{row}.copc.laz` files in `tiles_{tile_length}m/`.
 
 **Options**:
-- **Default**: Keep standard LAS dimensions and strip extra point attributes from intermediate COPC outputs.
-- **Preserved LAZ intermediates**: Set `--skip-dimension-reduction true` only when non-COPC intermediate files must keep extra dimensions.
+- **Default**: Try Untwine `--dims Classification`, inspect the COPC output, and fall back to PDAL standard-dimension output if extra dimensions remain.
 - **Prod-merged exception**: `create_merged_file` preserves extra dimensions in staged COPCs and final LAZ/COPC products.
 
 ### Stage 4-5: Multi-Resolution Subsampling
@@ -555,9 +570,23 @@ Below is each stage explained.
 
 ---
 
-### Stage 1: Load and Filter (Centroid-Based Buffer Filtering)
+### Stage 0b: Pre-Merge Buffer Filtering
 
-**What it does**: Loads all tiles and removes instances whose centroid is in the buffer zone on any side that has a neighbor tile. This eliminates most duplicates before the expensive matching stage.
+**What it does**: Filters segmented prediction tiles before remap. In the
+standard merge lane, `task merge` writes filtered 10 cm predictions to
+`segmented_filtered/`, remaps that directory to the target resolution, and feeds
+the remapped output into merge.
+
+**Why**: Filtering is part of the production merge lane, so operators do not
+need to run a separate `filter` task before merge.
+
+---
+
+### Stage 1: Load and Merge Filtered Predictions
+
+**What it does**: Loads filtered-then-remapped target-resolution prediction tiles and prepares
+kept instances, border-region candidates, and recoverable filtered instances for
+cross-tile matching.
 
 **How it works**:
 
@@ -699,9 +728,19 @@ Tile A (east border)         Tile B (west border)
 
 ### Stage 7: Uploaded Original Remapping (Optional)
 
-**What it does**: If `--original-laz-input-dir` is provided, maps the final merged prediction dimensions back to the uploaded original LAZ/LAS files before tiling. `--original-input-dir` remains a legacy alias for this raw-LAZ lane. If matching original COPCs are available, pass them via `--original-copc-input-dir` for source matching/validation; SmartTile still writes enriched originals from the uploaded LAZ/LAS files so the original metadata/VLRs remain the writer source.
+**What it does**: If `--original-laz-input-dir` is provided, maps the final
+merged 1 cm tile prediction dimensions back to the uploaded original LAZ/LAS
+files before tiling. `--original-input-dir` remains a legacy alias for this
+raw-LAZ lane. If matching original COPCs are available, pass them via
+`--original-copc-input-dir` for source matching/validation; SmartTile still
+writes enriched originals from the uploaded LAZ/LAS files so the original
+metadata/VLRs remain the writer source.
 
-**How it works**: For a plain merged LAZ source, SmartTile uses spatial filtering plus a local cKDTree. For a merged COPC source, uploaded originals are streamed in chunks; each chunk queries only the overlapping merged-COPC window and writes enriched original chunks immediately. Multi-collection remap follows the same original-writer contract while transferring already model-named prediction attributes.
+**How it works**: Merge uses the same prediction-collection-to-original remap
+helper as the `remap` task. The post-merge 1 cm `output_tiles/` directory is the
+prediction collection, so uploaded originals receive the globally merged IDs from
+the per-tile products. `--skip-merged-file` can be used with original remap when
+only per-tile outputs, enriched originals, or prod-merged products are needed.
 
 ---
 
@@ -721,7 +760,6 @@ Tile A (east border)         Tile B (west border)
 | `--output-copc-res1` | True | Write first-resolution subsampled outputs as COPC LAZ (`*.copc.laz`) |
 | `--output-copc-res2` | False | Write second-resolution subsampled outputs as COPC LAZ; default keeps 10cm as regular LAZ |
 | `--subsampling-method` | center-of-mass | Subsampling method: `center-of-mass` or `nearest-to-centroid` |
-| `--skip-dimension-reduction` | False | Keep extra dimensions in LAZ intermediates; intermediate COPC conversion still strips extra attributes by default |
 | `--chunk-size` | 20000000 | Points per chunk when reading LAZ/LAS in tiling Phase 1, multi-collection remap, and merged-COPC-to-original remap (smaller = less peak RAM; larger = fewer scans) |
 | `--tiling-threshold` | None | File size threshold in MB for skipping tiling on single small files |
 
@@ -741,7 +779,7 @@ Tile A (east border)         Tile B (west border)
 | `--original-copc-input-dir` | None | Optional matching original COPC LAZ files for source matching/validation |
 | `--merged-resolutions` | res1,res2 | Prod-merged output resolutions when original inputs are available |
 | `--merged-output-formats` | copc.laz | Prod-merged output formats: `laz`, `copc.laz`, `ply` |
-| `--skip-merged-file` | False | Skip creating the processed merged LAZ intermediate (prod-merged outputs still come from Original-with-predictions when enabled) |
+| `--skip-merged-file` | False | Skip creating the processed merged LAZ; per-tile outputs and optional original/prod-merged outputs can still be written |
 | `--disable-matching` | False | Disable cross-tile instance matching |
 | `--disable-volume-merge` | False | Disable small volume instance merging |
 | `--workers` | 4 | Parallel processing (tile loading, KDTree queries) |
@@ -770,11 +808,13 @@ Controls how many files/tasks run simultaneously using Python's `ProcessPoolExec
 
 | Task | What `--workers` Controls |
 |------|---------------------------|
-| **Tile Task** | Parallel COPC conversions, parallel tile creation |
+| **Tile Task** | Parallel source-file distribution; one large source is split into point ranges; tile COPC finalization runs in parallel |
 | **Merge Task** | Parallel tile loading, parallel convex hull computation, KDTree queries |
-| **Remap Task** | Parallel files/tiles; KDTree query workers are divided across those outer workers |
+| **Remap Task** | Parallel files/tiles; for one raw original, parallel original chunks; KDTree query workers are divided across the active workers |
 
-**Memory impact**: Higher values = more files in memory simultaneously. Remap keeps the total KDTree CPU budget bounded by sharing `--workers` across outer remap workers and inner SciPy query workers.
+**Memory impact**: Higher values = more files or remap chunks in memory simultaneously. Remap keeps the total KDTree CPU budget bounded by sharing `--workers` across outer remap workers, raw chunk workers, and inner SciPy query workers.
+
+For tile distribution of a single large source, SmartTile caps each worker's laspy chunk size to approximately `--chunk-size / --workers` with a 100k-point floor. This prevents `--workers=20 --chunk-size=20_000_000` from trying to hold 20 full 20M-point chunks at once.
 
 #### `--threads` (COPC Writer Threads)
 
@@ -788,6 +828,7 @@ Controls per-file or per-product spatial chunking:
 - Other paths split each tile into `--num-spatial-chunks` spatial chunks along the X-axis
 - `create_merged_file` uses `--num-spatial-chunks` for bounded COPC product reads before final COPC/LAZ/PLY writing
 - Remap uses `--num-spatial-chunks` as the number of native COPC spatial-query windows when original files are COPC
+- Remap uses `--num-spatial-chunks` as the maximum number of concurrent raw LAZ/LAS original chunks when only one original file is being enriched
 - Subsampling chunks/windows are processed in parallel using `ProcessPoolExecutor`
 - Product chunks are currently processed sequentially to keep memory and disk pressure predictable
 
@@ -795,6 +836,7 @@ Controls per-file or per-product spatial chunking:
 Example with --num-spatial-chunks=5:
   tile.laz → [chunk/window 0..4] → parallel subsample → merge
   original_with_predictions/*.copc.laz → [bounds 0..4] → product chunks → prod_merged_*.copc.laz
+  original.laz → [chunk 0..4] → parallel prediction remap → original_with_predictions/original.laz
 ```
 
 **Memory and disk impact**: Higher values increase subsampling worker concurrency and reduce per-product read windows. Tune down if memory or storage I/O becomes the bottleneck; tune up when bounded product chunks are still too large.
@@ -836,7 +878,11 @@ output_dir/
 │   ├── output_100m_c00_r00_subsampled_10cm.laz
 │   └── ...
 │
-├── segmented_remapped/          # Remapped predictions (merge task)
+├── segmented_filtered/          # Filtered segmented predictions before remap (merge task)
+│   ├── c00_r00_segmented_filtered.laz
+│   └── ...
+│
+├── segmented_remapped/          # Filtered predictions remapped to target resolution (merge task)
 │   ├── c00_r00_segmented_remapped.laz
 │   └── ...
 │
@@ -867,7 +913,7 @@ output_dir/
 
 #### Tile Task Output
 - `X`, `Y`, `Z`: 3D coordinates
-- Intermediate COPC conversion strips extra dimensions by default.
+- Intermediate COPC conversion strips extra dimensions by default; Untwine `--dims Classification` is accepted only when output inspection confirms no extra byte dimensions remain.
 - `create_merged_file` preserves enriched dimensions for prod-merged outputs.
 
 #### Merge Task Output
@@ -951,38 +997,22 @@ Build the Docker image:
 docker build -t 3dtrees_smart_tile .
 ```
 
-Run the pipeline in Docker:
+Run a task in Docker by mounting input and output folders and calling `run.py`:
 
 ```bash
-./run_docker.sh              # Tile task: input → tiled + subsampled (1cm, 10cm)
-./run_docker_merge.sh        # Merge task: segmented 10cm + 1cm + tile_bounds JSON → merged.laz
-./run_docker_remap.sh        # Remap task: merged.laz + original files → originals with all merged dimensions
+docker run --rm --user "$(id -u):$(id -g)" --cpus=20 --memory=50g \
+  -v /path/to/input:/in:ro \
+  -v /path/to/output:/out \
+  3dtrees_smart_tile \
+  python -u /src/run.py --task tile --input-dir /in --output-dir /out
 ```
 
-Edit the path variables at the top of each script to match your data. Merge requires `tile_bounds_tindex.json` from the Tile task output.
-
-### Automated Pipeline
-
-For fully automated execution with resource monitoring, see [AUTOMATION_README.md](AUTOMATION_README.md).
-
-Quick start:
-
-```bash
-./run_automated_pipeline.sh 1
-```
-
-This automated workflow:
-- Downloads data from S3
-- Runs tile task (COPC conversion, tiling, subsampling)
-- Adds dummy PredInstance dimension (for testing)
-- Runs remap_merge task with auto-detection of single vs multi-file workflows
-- Tracks CPU and RAM usage throughout the process
-- Generates resource usage logs
+Merge requires `tile_bounds_tindex.json` from the Tile task output. The Galaxy
+wrapper uses the same `run.py` task surface inside
+`ghcr.io/3dtrees-earth/3dtrees_smart_tile:2.2`.
 
 ### Additional Documentation
 
-- [AUTOMATION_README.md](AUTOMATION_README.md) - Detailed automation and Docker workflow guide
-- [CLAUDE.md](CLAUDE.md) - Quick reference for AI assistants and developers
 - [Dockerfile](Dockerfile) - Container configuration
 
 ---
@@ -1009,6 +1039,7 @@ This automated workflow:
 #### "Memory allocation failed"
 - Reduce `--tile-length` for smaller tiles
 - Decrease `--workers` to limit concurrent memory usage
+- Decrease `--chunk-size` if single-source tile distribution still uses too much memory
 - Decrease `--num-spatial-chunks` to limit per-file subsampling workers
 - Use `--resolution-1` and `--resolution-2` with larger values
 
@@ -1087,13 +1118,9 @@ htop -p $(pgrep -f "python src/run.py")
 │
 ├── README.md                           # This documentation
 ├── CONTEXT.md                          # Agent/developer context and invariants
-├── AUTOMATION_README.md                # Automation and Docker guide
-├── CLAUDE.md                           # Quick reference for developers
 ├── Dockerfile                          # Container configuration
-├── run_automated_pipeline.sh           # Automated workflow orchestrator
-├── run_docker.sh                       # Docker: Tile task
-├── run_docker_merge.sh                 # Docker: Merge task (requires tile_bounds JSON)
-├── run_docker_remap.sh                 # Docker: Remap task (merged file → original files)
+├── tests/                              # Unit and integration tests
+├── tool_appendix.txt                   # Paper/tool appendix table
 └── .gitignore                          # Git ignore rules
 ```
 

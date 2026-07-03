@@ -30,8 +30,10 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 - `tile`: converts uploaded LAZ/LAS/COPC inputs into spatial COPC tiles, then
   creates subsampled products. The default first resolution is 1cm COPC LAZ; the
   default second resolution is 10cm regular LAZ.
-- `merge`: merges segmented tile predictions and can create Original-with-
-  predictions outputs through the remap path.
+- `merge`: filters duplicate buffer-zone instances from segmented predictions,
+  remaps the filtered predictions to the target resolution, merges the remapped
+  predictions into per-tile 1cm products, and can enrich uploaded originals from
+  those per-tile products before optional prod-merged creation.
 - `filter`: removes duplicate buffer-zone instances from segmented/remapped
   tile files before downstream merge/remap workflows.
 - `remap`: transfers prediction dimensions back to original source points. It
@@ -180,9 +182,9 @@ Important test areas:
 - scale/offset preservation during remap
 
 For production-like checks, use small real datasets first, then run a multi-file
-dataset through tiling, segmentation, filter/remap, detailview/remap, and
-`create_merged_file`. Compare output headers and dimensions against the original
-source files.
+dataset through tiling, segmentation, merge's built-in prediction filter/remap
+lane, optional original remap, and `create_merged_file`. Compare output headers
+and dimensions against the original source files.
 
 ## Current Watch Items
 

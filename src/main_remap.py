@@ -732,22 +732,28 @@ def remap_all_tiles(
         n_procs = min(max(1, num_workers), len(work_items))
         query_workers = kdtree_query_workers(num_workers, n_procs)
         work_items = [(*item, query_workers) for item in work_items]
+        executor_label = "main process" if n_procs == 1 else f"{n_procs} workers"
         print(
-            f"  Processing {len(work_items)} tiles with {n_procs} workers; "
+            f"  Processing {len(work_items)} tiles with {executor_label}; "
             f"{query_workers} KDTree query worker(s) each..."
         )
 
-        with ProcessPoolExecutor(max_workers=n_procs) as executor:
-            for i, result in enumerate(executor.map(_remap_worker_item, work_items)):
-                tile_id_result, success, message, point_count = result
-                tile_id = work_items[i][3]
-                if success:
-                    successful += 1
-                    total_points += point_count
-                    print(f"  [{i+1}/{len(work_items)}] ✓ {tile_id}: {point_count:,} points")
-                else:
-                    failed += 1
-                    print(f"  [{i+1}/{len(work_items)}] ✗ {tile_id}: {message}")
+        if n_procs == 1:
+            results = [_remap_worker_item(item) for item in work_items]
+        else:
+            with ProcessPoolExecutor(max_workers=n_procs) as executor:
+                results = list(executor.map(_remap_worker_item, work_items))
+
+        for i, result in enumerate(results):
+            _tile_id_result, success, message, point_count = result
+            tile_id = work_items[i][3]
+            if success:
+                successful += 1
+                total_points += point_count
+                print(f"  [{i+1}/{len(work_items)}] ✓ {tile_id}: {point_count:,} points")
+            else:
+                failed += 1
+                print(f"  [{i+1}/{len(work_items)}] ✗ {tile_id}: {message}")
 
     # Summary
     print()

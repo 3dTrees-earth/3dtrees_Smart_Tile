@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
@@ -449,6 +450,95 @@ def _chunked_prod_merged_pipeline(
     return {"pipeline": stages}
 
 
+def _create_prod_merged_chunk(
+    copc_input_files: List[Path],
+    work_dir: Path,
+    output_stem: str,
+    chunk_idx: int,
+    bounds_str: str,
+    resolution: float,
+    scale_offset_options: dict,
+) -> Optional[Path]:
+    """Create one bounded prod-merged LAZ chunk and return it when non-empty."""
+    chunk_file = work_dir / f"{output_stem}_chunk{chunk_idx:04d}.laz"
+    pipeline = _chunked_prod_merged_pipeline(
+        copc_input_files,
+        chunk_file,
+        bounds_str,
+        resolution,
+        scale_offset_options,
+    )
+    result = _run_pdal_pipeline(pipeline, work_dir / f"_chunk{chunk_idx:04d}.json")
+    if result.returncode != 0:
+        raise RuntimeError(f"PDAL prod-merged chunk {chunk_idx + 1} failed: {_pdal_error(result)}")
+    if not chunk_file.exists() or chunk_file.stat().st_size == 0:
+        return None
+    return chunk_file
+
+
+def _create_prod_merged_chunks(
+    copc_input_files: List[Path],
+    work_dir: Path,
+    output_stem: str,
+    chunk_bounds: List[str],
+    resolution: float,
+    scale_offset_options: dict,
+    chunk_workers: Optional[int] = None,
+) -> List[Path]:
+    """Create bounded prod-merged chunks using a capped parallel worker budget."""
+    workers = min(
+        max(1, int(chunk_workers or 1)),
+        len(chunk_bounds),
+    )
+    print(f"    Spatial chunks: {len(chunk_bounds)}")
+    if workers > 1:
+        print(f"    Chunk workers: {workers}")
+
+    chunk_by_idx: dict[int, Optional[Path]] = {}
+    if workers == 1:
+        for chunk_idx, bounds_str in enumerate(chunk_bounds):
+            chunk_file = _create_prod_merged_chunk(
+                copc_input_files,
+                work_dir,
+                output_stem,
+                chunk_idx,
+                bounds_str,
+                resolution,
+                scale_offset_options,
+            )
+            chunk_by_idx[chunk_idx] = chunk_file
+            message = "empty" if chunk_file is None else f"complete: {chunk_file.name}"
+            print(f"    Chunk {chunk_idx + 1}/{len(chunk_bounds)}: {message}")
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_idx = {
+                executor.submit(
+                    _create_prod_merged_chunk,
+                    copc_input_files,
+                    work_dir,
+                    output_stem,
+                    chunk_idx,
+                    bounds_str,
+                    resolution,
+                    scale_offset_options,
+                ): chunk_idx
+                for chunk_idx, bounds_str in enumerate(chunk_bounds)
+            }
+            for future in as_completed(future_to_idx):
+                chunk_idx = future_to_idx[future]
+                chunk_file = future.result()
+                chunk_by_idx[chunk_idx] = chunk_file
+                message = "empty" if chunk_file is None else f"complete: {chunk_file.name}"
+                print(f"    Chunk {chunk_idx + 1}/{len(chunk_bounds)}: {message}")
+
+    return [
+        chunk_file
+        for chunk_idx in range(len(chunk_bounds))
+        for chunk_file in [chunk_by_idx.get(chunk_idx)]
+        if chunk_file is not None
+    ]
+
+
 def _merge_chunk_files_pipeline(
     chunk_files: List[Path],
     output_file: Path,
@@ -703,6 +793,7 @@ def create_chunked_prod_merged_file(
     resolution: float,
     output_format: str,
     num_spatial_chunks: int,
+    chunk_workers: Optional[int] = None,
 ) -> Path:
     """Create one prod-merged product using bounded COPC reads per spatial chunk."""
     chunk_bounds = _prod_merged_chunk_bounds(copc_input_files, resolution, num_spatial_chunks)
@@ -719,24 +810,15 @@ def create_chunked_prod_merged_file(
     chunk_files: List[Path] = []
     success = False
     try:
-        print(f"    Spatial chunks: {len(chunk_bounds)}")
-        for chunk_idx, bounds_str in enumerate(chunk_bounds):
-            chunk_file = work_dir / f"{output_file.stem}_chunk{chunk_idx:04d}.laz"
-            pipeline = _chunked_prod_merged_pipeline(
-                copc_input_files,
-                chunk_file,
-                bounds_str,
-                resolution,
-                scale_offset_options,
-            )
-            result = _run_pdal_pipeline(pipeline, work_dir / f"_chunk{chunk_idx:04d}.json")
-            if result.returncode != 0:
-                raise RuntimeError(f"PDAL prod-merged chunk {chunk_idx + 1} failed: {_pdal_error(result)}")
-            if not chunk_file.exists() or chunk_file.stat().st_size == 0:
-                print(f"    Chunk {chunk_idx + 1}/{len(chunk_bounds)}: empty")
-                continue
-            chunk_files.append(chunk_file)
-            print(f"    Chunk {chunk_idx + 1}/{len(chunk_bounds)} complete: {chunk_file.name}")
+        chunk_files = _create_prod_merged_chunks(
+            copc_input_files,
+            work_dir,
+            output_file.stem,
+            chunk_bounds,
+            resolution,
+            scale_offset_options,
+            chunk_workers=chunk_workers,
+        )
 
         if not chunk_files:
             raise RuntimeError("No prod-merged chunks were created")
@@ -763,6 +845,7 @@ def create_chunked_prod_merged_files_for_resolution(
     outputs: List[Tuple[Path, str]],
     resolution: float,
     num_spatial_chunks: int,
+    chunk_workers: Optional[int] = None,
 ) -> List[Path]:
     """Create multiple output formats from one canonical set of chunk files."""
     if not copc_input_files:
@@ -788,24 +871,15 @@ def create_chunked_prod_merged_files_for_resolution(
     created: List[Path] = []
     success = False
     try:
-        print(f"    Spatial chunks: {len(chunk_bounds)}")
-        for chunk_idx, bounds_str in enumerate(chunk_bounds):
-            chunk_file = work_dir / f"prod_merged_chunk{chunk_idx:04d}.laz"
-            pipeline = _chunked_prod_merged_pipeline(
-                copc_input_files,
-                chunk_file,
-                bounds_str,
-                resolution,
-                scale_offset_options,
-            )
-            result = _run_pdal_pipeline(pipeline, work_dir / f"_chunk{chunk_idx:04d}.json")
-            if result.returncode != 0:
-                raise RuntimeError(f"PDAL prod-merged chunk {chunk_idx + 1} failed: {_pdal_error(result)}")
-            if not chunk_file.exists() or chunk_file.stat().st_size == 0:
-                print(f"    Chunk {chunk_idx + 1}/{len(chunk_bounds)}: empty")
-                continue
-            chunk_files.append(chunk_file)
-            print(f"    Chunk {chunk_idx + 1}/{len(chunk_bounds)} complete: {chunk_file.name}")
+        chunk_files = _create_prod_merged_chunks(
+            copc_input_files,
+            work_dir,
+            "prod_merged",
+            chunk_bounds,
+            resolution,
+            scale_offset_options,
+            chunk_workers=chunk_workers,
+        )
 
         if not chunk_files:
             raise RuntimeError("No prod-merged chunks were created")
@@ -837,6 +911,7 @@ def create_prod_merged_file(
     resolution: float,
     output_format: str = "copc.laz",
     num_spatial_chunks: Optional[int] = None,
+    chunk_workers: Optional[int] = None,
 ) -> Path:
     """Create one prod-merged product at the requested resolution and format."""
     if not copc_input_files:
@@ -851,6 +926,7 @@ def create_prod_merged_file(
             resolution,
             output_format,
             num_spatial_chunks,
+            chunk_workers=chunk_workers,
         )
 
     pipeline = prod_merged_pipeline(copc_input_files, output_file, resolution, output_format)
@@ -882,6 +958,7 @@ def create_prod_merged_files(
     res1: float,
     res2: float,
     num_spatial_chunks: Optional[int] = None,
+    chunk_workers: Optional[int] = None,
     staged_copc_dir: Optional[Path] = None,
     standardization_json: Optional[Path] = None,
 ) -> List[Path]:
@@ -923,6 +1000,7 @@ def create_prod_merged_files(
                 selected_outputs,
                 resolution,
                 num_spatial_chunks,
+                chunk_workers=chunk_workers,
             )
         else:
             created_outputs = [
@@ -932,6 +1010,7 @@ def create_prod_merged_files(
                     resolution,
                     output_format,
                     num_spatial_chunks=num_spatial_chunks,
+                    chunk_workers=chunk_workers,
                 )
                 for output_file, output_format in selected_outputs
             ]

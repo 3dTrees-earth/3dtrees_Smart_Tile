@@ -308,6 +308,14 @@ def _copy_record_dimensions(source_points, out_record) -> None:
             out_record[dim.name] = source_points[dim.name]
 
 
+def _branded_prediction_name(dim_name: str, threedtrees_suffix: str) -> str:
+    """Apply the 3DTrees suffix unless the prediction dimension already has it."""
+    if not threedtrees_suffix:
+        return dim_name
+    suffix = f"_{threedtrees_suffix}"
+    return dim_name if dim_name.endswith(suffix) else f"{dim_name}{suffix}"
+
+
 def _original_remap_output_header(source_header, merged_extra_dims, merged_extra_dim_params, threedtrees_dims, threedtrees_suffix):
     """Build output header for original-with-predictions remap products."""
     new_header = copy_single_source_header(
@@ -331,7 +339,7 @@ def _original_remap_output_header(source_header, merged_extra_dims, merged_extra
     ]
     branded_names = {}
     for dim_name in selected_names:
-        desired_name = f"{dim_name}_{threedtrees_suffix}" if threedtrees_suffix else dim_name
+        desired_name = _branded_prediction_name(dim_name, threedtrees_suffix)
         out_name = (
             next_available_suffix(desired_name, added_extra_names)
             if desired_name in added_extra_names
@@ -380,7 +388,7 @@ def _original_remap_output_header_from_params(
     ]
     branded_names = {}
     for dim_name in selected_names:
-        desired_name = f"{dim_name}_{threedtrees_suffix}" if threedtrees_suffix else dim_name
+        desired_name = _branded_prediction_name(dim_name, threedtrees_suffix)
         out_name = (
             next_available_suffix(desired_name, added_extra_names)
             if desired_name in added_extra_names
@@ -861,10 +869,7 @@ def _process_single_original_input_file(args):
 
         branded_names = {}
         for dim_name in filtered_extras:
-            if threedtrees_suffix:
-                branded_names[dim_name] = f"{dim_name}_{threedtrees_suffix}"
-            else:
-                branded_names[dim_name] = dim_name
+            branded_names[dim_name] = _branded_prediction_name(dim_name, threedtrees_suffix)
 
         new_header = copy_single_source_header(
             input_las.header,
@@ -1026,7 +1031,7 @@ def remap_to_original_input_files(
 
     available_3dt = sorted(threedtrees_dims_set & set(merged_extra_dims.keys()))
     expected_output_dims = [
-        f"{d}_{threedtrees_suffix}" if threedtrees_suffix else d
+        _branded_prediction_name(d, threedtrees_suffix)
         for d in available_3dt
     ]
     if available_3dt:
@@ -1200,7 +1205,7 @@ def remap_merged_file_to_original_input_files(
     threedtrees_dims_set = set(threedtrees_dims)
     available_3dt = sorted(threedtrees_dims_set & set(merged_extra_dim_params.keys()))
     if available_3dt:
-        branded = [f"{d}_{threedtrees_suffix}" if threedtrees_suffix else d for d in available_3dt]
+        branded = [_branded_prediction_name(d, threedtrees_suffix) for d in available_3dt]
         print(f"  3DTrees dimensions to transfer: {', '.join(available_3dt)} -> {', '.join(branded)}", flush=True)
     else:
         print(
@@ -1218,7 +1223,7 @@ def remap_merged_file_to_original_input_files(
     output_dir.mkdir(parents=True, exist_ok=True)
     spatial_buffer = max(tolerance * 2, 1.0) + retile_buffer
     expected_output_dims = [
-        f"{d}_{threedtrees_suffix}" if threedtrees_suffix else d
+        _branded_prediction_name(d, threedtrees_suffix)
         for d in available_3dt
     ]
     files_to_process, skipped, stale = _queue_original_outputs(

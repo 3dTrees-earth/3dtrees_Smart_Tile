@@ -121,6 +121,38 @@ class OutputRemapTests(unittest.TestCase):
             np.testing.assert_array_equal(out.PredInstance_SAT, np.array([1, 0, 2], dtype=np.uint16))
             np.testing.assert_array_equal(out.PredSemantic_SAT, np.array([1, 0, 1], dtype=np.uint8))
 
+    def test_remap_to_original_does_not_double_suffix_predictions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_dir = root / "originals"
+            output_dir = root / "out"
+            original_dir.mkdir()
+            points = _write_original(original_dir / "source.las")
+
+            remap_to_original_input_files(
+                merged_points=points,
+                merged_extra_dims={
+                    "PredInstance_SAT": np.array([1, 0, 2], dtype=np.uint16),
+                    "PredSemantic_SAT": np.array([1, 0, 1], dtype=np.uint8),
+                },
+                merged_extra_dim_params=None,
+                original_input_dir=original_dir,
+                output_dir=output_dir,
+                tolerance=0.001,
+                num_threads=1,
+                threedtrees_dims=["PredInstance_SAT", "PredSemantic_SAT"],
+                threedtrees_suffix="SAT",
+            )
+
+            out = laspy.read(output_dir / "source.las")
+            dims = set(out.point_format.dimension_names) | {dim.name for dim in out.point_format.extra_dimensions}
+            self.assertIn("PredInstance_SAT", dims)
+            self.assertIn("PredSemantic_SAT", dims)
+            self.assertNotIn("PredInstance_SAT_SAT", dims)
+            self.assertNotIn("PredSemantic_SAT_SAT", dims)
+            np.testing.assert_array_equal(out.PredInstance_SAT, np.array([1, 0, 2], dtype=np.uint16))
+            np.testing.assert_array_equal(out.PredSemantic_SAT, np.array([1, 0, 1], dtype=np.uint8))
+
     def test_remap_to_original_preserves_prediction_extra_byte_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

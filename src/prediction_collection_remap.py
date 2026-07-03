@@ -9,7 +9,7 @@ across collections fail early instead of being renamed at product time.
 from __future__ import annotations
 
 import gc
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -21,9 +21,11 @@ from point_cloud_metadata import (
     bounds_overlap_xy,
     copy_single_source_header,
     extra_bytes_params_from_dimension_info,
+    extra_bytes_params_from_params,
     point_cloud_files,
     raw_point_cloud_files,
 )
+from dimension_transfer import next_available_suffix
 from worker_budget import kdtree_query_workers
 
 
@@ -104,6 +106,42 @@ def scan_prediction_collection_metadata(
     return collection_meta
 
 
+def _prediction_output_names_for_used_dims(
+    dim_names: List[str],
+    used_names: Set[str],
+) -> Dict[str, str]:
+    """Resolve prediction output names against dimensions already on the original."""
+    resolved: Dict[str, str] = {}
+    for dim_name in dim_names:
+        output_name = dim_name if dim_name not in used_names else next_available_suffix(dim_name, used_names)
+        resolved[dim_name] = output_name
+        used_names.add(output_name)
+    return resolved
+
+
+def _prediction_output_names_for_header(
+    header,
+    collection_meta: List[Dict[str, object]],
+) -> Dict[str, str]:
+    used_names = set(header.point_format.dimension_names)
+    used_names.update(dim.name for dim in header.point_format.extra_dimensions)
+    dim_names = [
+        dim_name
+        for coll_meta in collection_meta
+        for dim_name in coll_meta["dims"]
+    ]
+    return _prediction_output_names_for_used_dims(dim_names, used_names)
+
+
+def _log_prediction_name_collisions(output_names: Dict[str, str], input_name: str) -> None:
+    renamed = [f"{src}->{dst}" for src, dst in output_names.items() if src != dst]
+    if renamed:
+        print(
+            f"  Prediction dimensions renamed for {input_name}: {', '.join(renamed)}",
+            flush=True,
+        )
+
+
 def load_collection_subset_for_bounds(
     coll_meta: Dict[str, object],
     bounds: Tuple[float, float, float, float],
@@ -171,26 +209,36 @@ def stream_add_collections_to_file(
     tolerance: float,
     chunk_size: int = 5_000_000,
     kdtree_workers: int = 1,
+    chunk_parallel_workers: int = 1,
 ) -> Tuple[int, int]:
     """Stream all prediction collections onto one original file in one write pass."""
     output_file.parent.mkdir(parents=True, exist_ok=True)
     chunk_spatial_buffer = max(spatial_buffer, tolerance * 2.0, 0.25)
+    requested_chunk_workers = max(1, int(chunk_parallel_workers or 1))
+    read_chunk_size, chunk_parallel_workers = _parallel_raw_chunk_plan(
+        chunk_size,
+        requested_chunk_workers,
+    )
+    if requested_chunk_workers > 1:
+        print(
+            f"    Raw chunk parallelism: {chunk_parallel_workers} worker(s), "
+            f"{read_chunk_size:,} points/chunk/worker "
+            f"(requested {requested_chunk_workers} worker(s), "
+            f"chunk budget {chunk_size:,})",
+            flush=True,
+        )
 
     with laspy.open(str(input_file), laz_backend=laspy.LazBackend.LazrsParallel) as reader:
         header = copy_single_source_header(reader.header, preserve_extra_dimensions=True)
-        existing_names = set(header.point_format.dimension_names)
-        existing_names.update(dim.name for dim in header.point_format.extra_dimensions)
+        output_names = _prediction_output_names_for_header(header, collection_meta)
+        _log_prediction_name_collisions(output_names, input_file.name)
         extra_dims_to_add = []
         for coll_meta in collection_meta:
             for dim_name in coll_meta["dims"]:
-                if dim_name in existing_names:
-                    raise ValueError(
-                        f"Prediction dimension {dim_name} from collection {coll_meta['path']} "
-                        f"collides with an existing dimension in {input_file.name}"
-                    )
                 params = coll_meta["extra_params"][dim_name]
-                extra_dims_to_add.append(params)
-                existing_names.add(dim_name)
+                extra_dims_to_add.append(
+                    extra_bytes_params_from_params(params, name=output_names[dim_name])
+                )
         if extra_dims_to_add:
             header.add_extra_dims(extra_dims_to_add)
 
@@ -202,71 +250,119 @@ def stream_add_collections_to_file(
             header=header,
             laz_backend=laspy.LazBackend.LazrsParallel,
         ) as writer:
-            for chunk in reader.chunk_iterator(chunk_size):
-                chunk_points = np.column_stack([chunk.x, chunk.y, chunk.z])
-                chunk_bounds = (
-                    float(np.min(chunk_points[:, 0])),
-                    float(np.max(chunk_points[:, 0])),
-                    float(np.min(chunk_points[:, 1])),
-                    float(np.max(chunk_points[:, 1])),
-                )
-                out_chunk = laspy.ScaleAwarePointRecord.zeros(len(chunk), header=header)
-                for dim_name in chunk.point_format.dimension_names:
-                    if dim_name in out_chunk.point_format.dimension_names:
-                        out_chunk[dim_name] = chunk[dim_name]
-
-                for coll_meta in collection_meta:
-                    source_points, source_dims = load_collection_subset_for_bounds(
-                        coll_meta,
-                        chunk_bounds,
+            if chunk_parallel_workers <= 1:
+                for chunk in reader.chunk_iterator(read_chunk_size):
+                    out_chunk, chunk_matches = _enrich_original_chunk(
+                        chunk,
+                        header,
+                        collection_meta,
                         chunk_spatial_buffer,
+                        tolerance,
+                        kdtree_workers,
+                        input_file.name,
+                        output_names,
                     )
-                    tree = cKDTree(source_points)
-                    distances, indices = tree.query(chunk_points, workers=kdtree_workers)
-                    matched = distances <= tolerance
-                    matched_count = int(np.count_nonzero(matched))
-                    if matched_count != len(chunk):
-                        raise ValueError(
-                            f"Prediction collection {coll_meta['path']} matched "
-                            f"{matched_count:,}/{len(chunk):,} points in chunk from {input_file.name} "
-                            f"within tolerance {tolerance} m"
+                    writer.write_points(out_chunk)
+                    n_points += len(chunk)
+                    matched_total += chunk_matches
+                    del out_chunk
+                    if n_points % 25_000_000 < len(chunk):
+                        print(
+                            f"    prediction collections -> {output_file.name}: "
+                            f"{n_points:,} points",
+                            flush=True,
                         )
-                    for dim_name, values in source_dims.items():
-                        out_chunk[dim_name] = values[indices]
-                    matched_total += matched_count
-                    del source_points, source_dims, tree, distances, indices
+            else:
+                ready_chunks: Dict[int, Tuple[object, int, int]] = {}
+                future_to_idx = {}
+                next_submit_idx = 0
+                next_write_idx = 0
+                max_in_flight = chunk_parallel_workers
 
-                writer.write_points(out_chunk)
-                n_points += len(chunk)
-                del chunk_points, out_chunk
-                if n_points % 25_000_000 < len(chunk):
-                    print(
-                        f"    prediction collections -> {output_file.name}: "
-                        f"{n_points:,} points",
-                        flush=True,
-                    )
+                with ThreadPoolExecutor(max_workers=chunk_parallel_workers) as executor:
+                    for chunk in reader.chunk_iterator(read_chunk_size):
+                        while len(future_to_idx) >= max_in_flight:
+                            done, _ = wait(future_to_idx, return_when=FIRST_COMPLETED)
+                            for future in done:
+                                idx = future_to_idx.pop(future)
+                                out_chunk, chunk_matches = future.result()
+                                ready_chunks[idx] = (out_chunk, chunk_matches, len(out_chunk))
+                            next_write_idx, n_points, matched_total = _write_ready_chunks_in_order(
+                                writer,
+                                ready_chunks,
+                                next_write_idx,
+                                output_file.name,
+                                n_points,
+                                matched_total,
+                            )
+
+                        future = executor.submit(
+                            _enrich_original_chunk,
+                            chunk,
+                            header,
+                            collection_meta,
+                            chunk_spatial_buffer,
+                            tolerance,
+                            kdtree_workers,
+                            input_file.name,
+                            output_names,
+                        )
+                        future_to_idx[future] = next_submit_idx
+                        next_submit_idx += 1
+
+                    while future_to_idx:
+                        done, _ = wait(future_to_idx, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            idx = future_to_idx.pop(future)
+                            out_chunk, chunk_matches = future.result()
+                            ready_chunks[idx] = (out_chunk, chunk_matches, len(out_chunk))
+                        next_write_idx, n_points, matched_total = _write_ready_chunks_in_order(
+                            writer,
+                            ready_chunks,
+                            next_write_idx,
+                            output_file.name,
+                            n_points,
+                            matched_total,
+                        )
 
     gc.collect()
     return n_points, matched_total
 
 
-def _add_prediction_dims_to_header(header, collection_meta: List[Dict[str, object]], input_name: str) -> None:
-    """Add selected prediction dimensions to an output header, failing on collisions."""
-    existing_names = set(header.point_format.dimension_names)
-    existing_names.update(dim.name for dim in header.point_format.extra_dimensions)
+def _parallel_raw_chunk_plan(chunk_size: int, requested_workers: int) -> Tuple[int, int]:
+    """Plan raw chunk reads so total in-flight points stay near the chunk budget."""
+    chunk_size = max(1, int(chunk_size or 1))
+    requested_workers = max(1, int(requested_workers or 1))
+    if requested_workers <= 1:
+        return chunk_size, 1
+
+    min_parallel_chunk_size = min(chunk_size, 5_000_000)
+    read_chunk_size = min(
+        chunk_size,
+        max(min_parallel_chunk_size, int(np.ceil(chunk_size / requested_workers))),
+    )
+    active_workers = min(requested_workers, int(np.ceil(chunk_size / read_chunk_size)))
+    return read_chunk_size, max(1, active_workers)
+
+
+def _add_prediction_dims_to_header(
+    header,
+    collection_meta: List[Dict[str, object]],
+    input_name: str,
+) -> Dict[str, str]:
+    """Add selected prediction dimensions to an output header with collision-safe names."""
+    output_names = _prediction_output_names_for_header(header, collection_meta)
+    _log_prediction_name_collisions(output_names, input_name)
     extra_dims_to_add = []
     for coll_meta in collection_meta:
         for dim_name in coll_meta["dims"]:
-            if dim_name in existing_names:
-                raise ValueError(
-                    f"Prediction dimension {dim_name} from collection {coll_meta['path']} "
-                    f"collides with an existing dimension in {input_name}"
-                )
             params = coll_meta["extra_params"][dim_name]
-            extra_dims_to_add.append(params)
-            existing_names.add(dim_name)
+            extra_dims_to_add.append(
+                extra_bytes_params_from_params(params, name=output_names[dim_name])
+            )
     if extra_dims_to_add:
         header.add_extra_dims(extra_dims_to_add)
+    return output_names
 
 
 def _copy_source_record_dimensions(source_points, out_record) -> None:
@@ -279,6 +375,80 @@ def _copy_source_record_dimensions(source_points, out_record) -> None:
     for dim in source_points.point_format.extra_dimensions:
         if dim.name in output_dim_names:
             out_record[dim.name] = source_points[dim.name]
+
+
+def _enrich_original_chunk(
+    chunk,
+    header,
+    collection_meta: List[Dict[str, object]],
+    chunk_spatial_buffer: float,
+    tolerance: float,
+    kdtree_workers: int,
+    input_name: str,
+    output_names: Dict[str, str],
+) -> Tuple[object, int]:
+    """Copy one original chunk and add prediction collection dimensions."""
+    chunk_points = np.column_stack([chunk.x, chunk.y, chunk.z])
+    chunk_bounds = (
+        float(np.min(chunk_points[:, 0])),
+        float(np.max(chunk_points[:, 0])),
+        float(np.min(chunk_points[:, 1])),
+        float(np.max(chunk_points[:, 1])),
+    )
+    out_chunk = laspy.ScaleAwarePointRecord.zeros(len(chunk), header=header)
+    for dim_name in chunk.point_format.dimension_names:
+        if dim_name in out_chunk.point_format.dimension_names:
+            out_chunk[dim_name] = chunk[dim_name]
+
+    matched_total = 0
+    for coll_meta in collection_meta:
+        source_points, source_dims = load_collection_subset_for_bounds(
+            coll_meta,
+            chunk_bounds,
+            chunk_spatial_buffer,
+        )
+        tree = cKDTree(source_points)
+        distances, indices = tree.query(chunk_points, workers=kdtree_workers)
+        matched = distances <= tolerance
+        matched_count = int(np.count_nonzero(matched))
+        if matched_count != len(chunk):
+            raise ValueError(
+                f"Prediction collection {coll_meta['path']} matched "
+                f"{matched_count:,}/{len(chunk):,} points in chunk from {input_name} "
+                f"within tolerance {tolerance} m"
+            )
+        for dim_name, values in source_dims.items():
+            out_chunk[output_names[dim_name]] = values[indices]
+        matched_total += matched_count
+        del source_points, source_dims, tree, distances, indices
+
+    del chunk_points
+    return out_chunk, matched_total
+
+
+def _write_ready_chunks_in_order(
+    writer,
+    ready_chunks: Dict[int, Tuple[object, int, int]],
+    next_write_idx: int,
+    output_name: str,
+    n_points: int,
+    matched_total: int,
+) -> Tuple[int, int, int]:
+    """Write completed chunk results while preserving source point order."""
+    while next_write_idx in ready_chunks:
+        out_chunk, chunk_matches, chunk_len = ready_chunks.pop(next_write_idx)
+        writer.write_points(out_chunk)
+        n_points += chunk_len
+        matched_total += chunk_matches
+        del out_chunk
+        if n_points % 25_000_000 < chunk_len:
+            print(
+                f"    prediction collections -> {output_name}: "
+                f"{n_points:,} points",
+                flush=True,
+            )
+        next_write_idx += 1
+    return next_write_idx, n_points, matched_total
 
 
 def _copc_spatial_windows(header, num_spatial_chunks: int) -> List[Tuple[float, float, bool]]:
@@ -323,7 +493,7 @@ def stream_add_collections_to_copc_file_spatial(
     with laspy.CopcReader.open(str(input_file)) as copc_reader:
         source_header = copc_reader.header
         header = copy_single_source_header(source_header, preserve_extra_dimensions=True)
-        _add_prediction_dims_to_header(header, collection_meta, input_file.name)
+        output_names = _add_prediction_dims_to_header(header, collection_meta, input_file.name)
         windows = _copc_spatial_windows(source_header, num_spatial_chunks)
 
         n_points = 0
@@ -377,7 +547,7 @@ def stream_add_collections_to_copc_file_spatial(
                             f"within tolerance {tolerance} m"
                         )
                     for dim_name, values in prediction_dims.items():
-                        out_chunk[dim_name] = values[indices]
+                        out_chunk[output_names[dim_name]] = values[indices]
                     matched_total += matched_count
                     del prediction_points, prediction_dims, tree, distances, indices
 
@@ -407,14 +577,18 @@ def _existing_output_is_reusable(
             expected_count = int(input_reader.header.point_count)
             input_dims = set(input_reader.header.point_format.dimension_names)
             input_dims.update(dim.name for dim in input_reader.header.point_format.extra_dimensions)
-            if input_dims & set(expected_prediction_dims):
-                return False
+            expected_output_dims = set(
+                _prediction_output_names_for_used_dims(
+                    expected_prediction_dims,
+                    set(input_dims),
+                ).values()
+            )
         with laspy.open(str(output_file), laz_backend=laspy.LazBackend.LazrsParallel) as output_reader:
             if int(output_reader.header.point_count) != expected_count:
                 return False
             output_dims = set(output_reader.header.point_format.dimension_names)
             output_dims.update(dim.name for dim in output_reader.header.point_format.extra_dimensions)
-        return set(expected_prediction_dims).issubset(output_dims)
+        return expected_output_dims.issubset(output_dims)
     except Exception as exc:
         print(f"  Existing output is not reusable ({output_file.name}): {exc}", flush=True)
         return False
@@ -519,6 +693,7 @@ def remap_prediction_collections_to_original_files(
                     tolerance,
                     chunk_size=chunk_size,
                     kdtree_workers=query_workers,
+                    chunk_parallel_workers=active_raw_chunk_workers,
                 )
             if stage_points != n_points:
                 raise ValueError(
@@ -534,9 +709,18 @@ def remap_prediction_collections_to_original_files(
     total_points = 0
     total_matches = 0
     parallel_workers = min(max(1, num_threads), len(files_to_process))
-    query_workers = kdtree_query_workers(num_threads, parallel_workers)
+    if parallel_workers == 1:
+        raw_chunk_workers = max(1, min(num_threads, num_spatial_chunks or num_threads))
+        _, active_raw_chunk_workers = _parallel_raw_chunk_plan(chunk_size, raw_chunk_workers)
+        query_workers = kdtree_query_workers(num_threads, active_raw_chunk_workers)
+    else:
+        raw_chunk_workers = 1
+        active_raw_chunk_workers = 1
+        query_workers = kdtree_query_workers(num_threads, parallel_workers)
     print(
         f"  Processing {len(files_to_process)} original files with {parallel_workers} worker(s); "
+        f"{active_raw_chunk_workers} raw chunk worker(s)"
+        f"{f' (requested {raw_chunk_workers})' if raw_chunk_workers != active_raw_chunk_workers else ''}; "
         f"{query_workers} KDTree query worker(s) each",
         flush=True,
     )

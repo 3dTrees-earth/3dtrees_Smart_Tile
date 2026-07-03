@@ -20,15 +20,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import shutil
 import sys
 from pathlib import Path
 from typing import List, Optional
 
+import laspy
+import numpy as np
+
 # Import parameters and core merge function
 from instance_labels import MERGED_OUTPUT_SCALES, validate_merged_output_contract
+from instance_labels import cast_instances_for_output, instance_extra_bytes_params
 from parameters import MERGE_PARAMS
 from merge_tiles import merge_tiles as core_merge_tiles
+from point_cloud_outputs import merged_product_header
 from point_cloud_metadata import point_cloud_files as _point_cloud_files
 
 
@@ -37,6 +43,58 @@ def _original_with_predictions_name(path: Path) -> str:
     if name.lower().endswith(".copc.laz"):
         return name[:-9] + ".laz"
     return name
+
+
+def _write_direct_merged_file(
+    source_file: Path,
+    output_file: Path,
+    source_dir: Path,
+    instance_dimension: str,
+) -> tuple[int, list[int]]:
+    """Write a one-tile target-resolution merge while enforcing output schema."""
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with laspy.open(str(source_file), laz_backend=laspy.LazBackend.LazrsParallel) as reader:
+        las = reader.read()
+
+    points = np.column_stack((las.x, las.y, las.z))
+    header = merged_product_header(points, None, source_dir)
+    output_las = laspy.LasData(header)
+    output_las.x = points[:, 0]
+    output_las.y = points[:, 1]
+    output_las.z = points[:, 2]
+
+    if instance_dimension in las.point_format.dimension_names:
+        instances = np.asarray(getattr(las, instance_dimension))
+    else:
+        instances = np.zeros(len(points), dtype=np.uint16)
+
+    extra_params = [instance_extra_bytes_params(instance_dimension, instances)]
+    passenger_dims: dict[str, np.ndarray] = {}
+    for dim_name in las.point_format.extra_dimension_names:
+        if dim_name == instance_dimension:
+            continue
+        passenger_dims[dim_name] = np.asarray(getattr(las, dim_name))
+        extra_params.append(
+            laspy.ExtraBytesParams(name=dim_name, type=passenger_dims[dim_name].dtype)
+        )
+
+    output_las.add_extra_dims(extra_params)
+    setattr(
+        output_las,
+        instance_dimension,
+        cast_instances_for_output(instances, instance_dimension),
+    )
+    for dim_name, values in passenger_dims.items():
+        setattr(output_las, dim_name, values)
+
+    output_las.write(
+        str(output_file),
+        do_compress=output_file.name.lower().endswith(".laz"),
+        laz_backend=laspy.LazBackend.LazrsParallel,
+    )
+
+    final_instance_ids = sorted(int(v) for v in np.unique(instances[instances > 0]))
+    return len(points), final_instance_ids
 
 
 def run_merge(
@@ -123,6 +181,59 @@ def run_merge(
     # OPTIMIZATION: If only one file in each folder, skip merge and just remap
     segmented_files = _point_cloud_files(segmented_dir)
     original_tiles_files = _point_cloud_files(original_tiles_dir)
+
+    if len(segmented_files) == 1 and not original_tiles_files and original_input_dir is None:
+        print("\n" + "=" * 60)
+        print("SINGLE TARGET-RESOLUTION FILE DETECTED - Using direct merge path")
+        print("=" * 60)
+        print("Skipping cross-tile matching and deduplication; only one tile is present.")
+
+        source_file = segmented_files[0]
+        output_tiles_dir.mkdir(parents=True, exist_ok=True)
+        output_merged = Path(output_merged)
+
+        output_tile = output_tiles_dir / source_file.name
+        if not skip_merged_file:
+            output_merged.parent.mkdir(parents=True, exist_ok=True)
+            point_count, final_instance_ids = _write_direct_merged_file(
+                source_file,
+                output_merged,
+                segmented_dir,
+                instance_dimension,
+            )
+            print(f"  Merged file written: {output_merged}")
+            validate_merged_output_contract(output_merged, instance_dimension)
+            if output_tile != output_merged:
+                shutil.copy2(str(output_merged), str(output_tile))
+                print(f"  Output tile written: {output_tile}")
+        else:
+            point_count, final_instance_ids = _write_direct_merged_file(
+                source_file,
+                output_tile,
+                segmented_dir,
+                instance_dimension,
+            )
+            print(f"  Output tile written: {output_tile}")
+
+        csv_output_path = output_merged.parent / f"{output_merged.stem}_instance_metadata.csv"
+        csv_output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(csv_output_path, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow([instance_dimension, "has_added_clusters"])
+            for final_id in final_instance_ids:
+                writer.writerow([final_id, 0])
+
+        csv_copy_path = output_tiles_dir / csv_output_path.name
+        if csv_copy_path != csv_output_path:
+            shutil.copy2(str(csv_output_path), str(csv_copy_path))
+
+        print(f"  Instance metadata CSV: {csv_output_path}")
+        print(f"  Points: {point_count:,}")
+        print(f"  Instances: {len(final_instance_ids):,}")
+        print("\n" + "=" * 60)
+        print("Direct merge complete")
+        print("=" * 60)
+        return output_merged
 
     # Check if we should use the single-file optimization
     use_single_file_optimization = False

@@ -19,7 +19,6 @@ from copc_metadata import (
 )
 
 UNTWINE_STRIP_EXTRA_DIMS_ARG = "Classification"
-_DIRECT_UNTWINE_STRIP_BY_SCHEMA: dict[Tuple[Tuple[str, str], ...], bool] = {}
 
 
 def get_pdal_path() -> str:
@@ -45,8 +44,8 @@ def _run_untwine(
     # Untwine treats --dims as an extra-dimension keep-list while X/Y/Z and the
     # standard LAS fields remain loaded. An empty keep-list is rejected by
     # Untwine 1.5.1, so Classification is used as a stable standard LAS
-    # dimension to activate dimension limiting without retaining model/vendor
-    # extra bytes.
+    # dimension to activate Untwine's dimension-limiting path. Callers inspect
+    # the output and fall back to PDAL when extra bytes remain.
     dims_args = ["--dims", UNTWINE_STRIP_EXTRA_DIMS_ARG] if strip_extra_dims else []
     srs_args = ["--a_srs", srs_arg] if srs_arg else []
     try:
@@ -66,6 +65,7 @@ def _run_untwine(
 
 
 def _has_extra_dimensions(path: Path) -> bool:
+    """Return True when a LAS/LAZ/COPC file exposes extra byte dimensions."""
     import laspy
 
     from copc_metadata import laspy_laz_backend
@@ -75,89 +75,11 @@ def _has_extra_dimensions(path: Path) -> bool:
 
 
 def _output_has_no_extra_dimensions(path: Path) -> bool:
+    """Validate that dimension-reduced output does not retain extra bytes."""
     try:
         return not _has_extra_dimensions(path)
     except Exception:
         return False
-
-
-def _input_extra_dimension_schema(paths: List[Path]) -> Optional[Tuple[Tuple[str, str], ...]]:
-    """Return a stable extra-dimension schema for direct Untwine strip caching."""
-    schema = set()
-    try:
-        import laspy
-
-        from copc_metadata import laspy_laz_backend
-
-        for path in paths:
-            with laspy.open(str(path), laz_backend=laspy_laz_backend()) as reader:
-                for dim in reader.header.point_format.extra_dimensions:
-                    schema.add((dim.name, str(dim.dtype)))
-    except Exception:
-        return None
-    return tuple(sorted(schema))
-
-
-def _direct_untwine_strip_allowed(schema: Optional[Tuple[Tuple[str, str], ...]]) -> bool:
-    if schema is None:
-        return True
-    if not schema:
-        return False
-    return _DIRECT_UNTWINE_STRIP_BY_SCHEMA.get(schema, True)
-
-
-def _record_direct_untwine_strip_result(
-    schema: Optional[Tuple[Tuple[str, str], ...]],
-    success: bool,
-) -> None:
-    if schema:
-        _DIRECT_UNTWINE_STRIP_BY_SCHEMA[schema] = success
-
-
-def _strip_las_to_standard_dims(
-    input_files: List[Path],
-    output_laz: Path,
-    tile_bounds: Optional[Tuple[float, float, float, float]] = None,
-) -> Tuple[bool, str]:
-    """Write a temporary LAZ with standard LAS dimensions only."""
-    writer_opts = {
-        "type": "writers.las",
-        "filename": str(output_laz),
-        "compression": True,
-        "forward": "all",
-        "minor_version": 2,
-        "dataformat_id": 0,
-    }
-    if tile_bounds is not None:
-        bxmin, bymin, bxmax, bymax = tile_bounds
-        writer_opts["offset_x"] = (bxmin + bxmax) / 2.0
-        writer_opts["offset_y"] = (bymin + bymax) / 2.0
-
-    stages = [{"type": "readers.las", "filename": str(path)} for path in input_files]
-    if len(stages) > 1:
-        stages.append({"type": "filters.merge"})
-    stages.append(writer_opts)
-    pipeline = {"pipeline": stages}
-
-    output_laz.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
-        json.dump(pipeline, handle)
-        pipeline_file = Path(handle.name)
-    try:
-        result = subprocess.run(
-            [get_pdal_path(), "pipeline", str(pipeline_file)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        if pipeline_file.exists():
-            pipeline_file.unlink()
-    if result.returncode != 0:
-        return (False, f"standard-dimension LAZ strip failed: {result.stderr[:200]}")
-    if not output_laz.exists() or output_laz.stat().st_size == 0:
-        return (False, "standard-dimension LAZ strip produced no output")
-    return (True, "stripped-laz")
 
 
 def finalize_tile_to_copc(args: Tuple) -> Tuple[str, bool, str]:
@@ -198,7 +120,7 @@ def finalize_tile_to_copc(args: Tuple) -> Tuple[str, bool, str]:
             if not preserved_geotiff:
                 return (label, False, geotiff_message)
             valid_crs, crs_message = copc_preserves_source_crs(crs_source, final_tile)
-            if not valid_crs and message == "untwine":
+            if not valid_crs and message.startswith("untwine"):
                 try:
                     final_tile.unlink(missing_ok=True)
                 except OSError:
@@ -297,55 +219,20 @@ def finalize_tile_to_copc_untwine(
     if not preserve_extra_dims:
         untwine_cmd = shutil.which("untwine")
         if untwine_cmd:
-            extra_schema = _input_extra_dimension_schema(parts)
-            if extra_schema == ():
-                success, message = _run_untwine(
-                    parts,
-                    final_tile,
-                    first_srs_assignment(parts),
-                    strip_extra_dims=False,
-                )
-                if success and _output_has_no_extra_dimensions(final_tile):
-                    return (True, "untwine")
-                try:
-                    final_tile.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            elif _direct_untwine_strip_allowed(extra_schema):
-                success, message = _run_untwine(
-                    parts,
-                    final_tile,
-                    first_srs_assignment(parts),
-                    strip_extra_dims=True,
-                )
-                if success and _output_has_no_extra_dimensions(final_tile):
-                    _record_direct_untwine_strip_result(extra_schema, True)
-                    return (True, "untwine-stripped")
-                _record_direct_untwine_strip_result(extra_schema, False)
-                try:
-                    final_tile.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            with tempfile.TemporaryDirectory(prefix=f"_{label}_strip_", dir=final_tile.parent) as tmpdir:
-                stripped_laz = Path(tmpdir) / f"{label}.stripped.laz"
-                success, message = _strip_las_to_standard_dims(
-                    parts,
-                    stripped_laz,
-                    tile_bounds=tile_bounds,
-                )
-                if success:
-                    success, message = _run_untwine(
-                        [stripped_laz],
-                        final_tile,
-                        first_srs_assignment(parts),
-                        strip_extra_dims=False,
-                    )
-                    if success and _output_has_no_extra_dimensions(final_tile):
-                        return (True, "pdal-strip+untwine")
-                    try:
-                        final_tile.unlink(missing_ok=True)
-                    except OSError:
-                        pass
+            success, message = _run_untwine(
+                parts,
+                final_tile,
+                first_srs_assignment(parts),
+                strip_extra_dims=True,
+            )
+            if success and _output_has_no_extra_dimensions(final_tile):
+                return (True, "untwine-dims-classification")
+            if success:
+                message = "untwine --dims Classification retained extra dimensions"
+            try:
+                final_tile.unlink(missing_ok=True)
+            except OSError:
+                pass
         success, message = finalize_tile_to_copc_pdal(
             parts,
             final_tile,
@@ -401,78 +288,31 @@ def convert_laz_to_copc(
 ) -> bool:
     """Convert a single LAZ/LAS file to COPC with CRS/GeoTIFF validation.
 
-    The default SmartTile COPC conversion strips extra point attributes while
-    forwarding header metadata/CRS. Prod-merged creation passes
+    The default SmartTile COPC conversion first tries Untwine's
+    ``--dims Classification`` path while forwarding header metadata/CRS, then
+    validates that no extra byte dimensions remain. If Untwine retains extras,
+    SmartTile falls back to PDAL's standard-dimension writer path. Prod-merged creation passes
     preserve_extra_dims=True because those products must retain enriched
     prediction and source attributes.
     """
     if not preserve_extra_dims:
         untwine_cmd = shutil.which("untwine")
         if untwine_cmd:
-            extra_schema = _input_extra_dimension_schema([input_laz])
-            if extra_schema == ():
-                success, _ = _run_untwine(
-                    [input_laz],
-                    output_copc,
-                    srs_assignment_from_file(input_laz),
-                    strip_extra_dims=False,
-                )
-                if success and _output_has_no_extra_dimensions(output_copc):
+            success, _ = _run_untwine(
+                [input_laz],
+                output_copc,
+                srs_assignment_from_file(input_laz),
+                strip_extra_dims=True,
+            )
+            if success:
+                if _output_has_no_extra_dimensions(output_copc):
                     append_source_geotiff_projection_evlrs(input_laz, output_copc)
                     valid_crs, message = copc_preserves_source_crs(input_laz, output_copc)
                     if valid_crs:
                         return True
                     print(f"  Warning: untwine COPC CRS validation failed for {output_copc.name}: {message}; retrying with PDAL")
-                try:
-                    output_copc.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            elif _direct_untwine_strip_allowed(extra_schema):
-                success, _ = _run_untwine(
-                    [input_laz],
-                    output_copc,
-                    srs_assignment_from_file(input_laz),
-                    strip_extra_dims=True,
-                )
-                if success and _output_has_no_extra_dimensions(output_copc):
-                    _record_direct_untwine_strip_result(extra_schema, True)
-                    append_source_geotiff_projection_evlrs(input_laz, output_copc)
-                    valid_crs, message = copc_preserves_source_crs(input_laz, output_copc)
-                    if valid_crs:
-                        return True
-                    print(f"  Warning: untwine COPC CRS validation failed for {output_copc.name}: {message}; retrying with stripped LAZ + untwine")
-                elif success:
-                    print(f"  Warning: untwine dimension limiting kept extra dimensions for {output_copc.name}; retrying with stripped LAZ + untwine")
                 else:
-                    print(f"  Warning: untwine dimension limiting failed for {output_copc.name}; retrying with stripped LAZ + untwine")
-                _record_direct_untwine_strip_result(extra_schema, False)
-                try:
-                    output_copc.unlink(missing_ok=True)
-                except OSError:
-                    pass
-        if untwine_cmd:
-            with tempfile.TemporaryDirectory(prefix=f"_{output_copc.stem}_strip_", dir=output_copc.parent) as tmpdir:
-                stripped_laz = Path(tmpdir) / f"{output_copc.stem}.stripped.laz"
-                success, message = _strip_las_to_standard_dims([input_laz], stripped_laz)
-                if success:
-                    success, message = _run_untwine(
-                        [stripped_laz],
-                        output_copc,
-                        srs_assignment_from_file(input_laz),
-                        strip_extra_dims=False,
-                    )
-                if success and _output_has_no_extra_dimensions(output_copc):
-                    append_source_geotiff_projection_evlrs(input_laz, output_copc)
-                    valid_crs, message = copc_preserves_source_crs(input_laz, output_copc)
-                    if valid_crs:
-                        return True
-                    print(f"  Warning: stripped LAZ + untwine COPC CRS validation failed for {output_copc.name}: {message}; retrying with PDAL")
-                    try:
-                        output_copc.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                elif success:
-                    print(f"  Warning: stripped LAZ + untwine kept extra dimensions for {output_copc.name}; retrying with PDAL")
+                    print(f"  Warning: untwine dimension limiting kept extra dimensions for {output_copc.name}; retrying with PDAL")
                 try:
                     output_copc.unlink(missing_ok=True)
                 except OSError:

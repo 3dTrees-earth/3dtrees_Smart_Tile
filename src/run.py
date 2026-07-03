@@ -19,6 +19,7 @@ Usage:
 
 import sys
 import argparse
+import os
 from pathlib import Path
 
 # Add src directory to path for imports when run from project root
@@ -33,6 +34,28 @@ except ImportError as e:
     print(f"Error: Could not import parameters.py: {e}")
     print("Please install required dependencies: pip install pydantic pydantic-settings")
     sys.exit(1)
+
+
+def _parse_csv(value: str | None) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()] if value else []
+
+
+def _semantic_dimension_for_instance(instance_dimension: str) -> str | None:
+    """Infer the matching semantic prediction dimension for a PredInstance name."""
+    if not instance_dimension.startswith("PredInstance"):
+        return None
+    return f"PredSemantic{instance_dimension[len('PredInstance'):]}"
+
+
+def _effective_threedtrees_dims(params: Parameters) -> list[str] | None:
+    """Return prediction dimensions to transfer for merge/remap original enrichment."""
+    dims = _parse_csv(params.threedtrees_dims)
+    if dims == ["PredInstance", "PredSemantic"] and params.instance_dimension != "PredInstance":
+        dims = [params.instance_dimension]
+        semantic_dimension = _semantic_dimension_for_instance(params.instance_dimension)
+        if semantic_dimension:
+            dims.append(semantic_dimension)
+    return dims or None
 
 
 def _create_prod_merged_outputs(
@@ -74,6 +97,7 @@ def _create_prod_merged_outputs(
         res1=params.resolution_1,
         res2=params.resolution_2,
         num_spatial_chunks=params.num_spatial_chunks or params.workers,
+        chunk_workers=params.workers,
         staged_copc_dir=params.staged_copc_dir,
         standardization_json=params.standardization_json,
     )
@@ -230,11 +254,7 @@ def run_tile_task(params: Parameters):
     tile_buffer = params.tile_buffer
     threads = params.threads
     workers = params.workers
-    # Coerce to bool so CLI/env string "True"/"true"/"1" is respected (Pydantic usually does this; be explicit)
-    skip_dimension_reduction = bool(
-        params.skip_dimension_reduction if isinstance(params.skip_dimension_reduction, bool)
-        else str(params.skip_dimension_reduction).strip().lower() in ("true", "1", "yes")
-    )
+    dimension_reduction = True
     num_spatial_chunks = params.num_spatial_chunks
     subsampling_chunks = num_spatial_chunks or workers
     res1 = params.resolution_1
@@ -254,9 +274,7 @@ def run_tile_task(params: Parameters):
     print(f"Workers: {workers}")
     print(f"Threads per writer: {threads}")
     print(f"Subsampling spatial chunks/window workers: {subsampling_chunks}")
-    print(f"Keep extra dimensions in LAZ intermediates: {skip_dimension_reduction}")
-    dimension_reduction = not skip_dimension_reduction
-    print(f"Subsampling dimensions: {'minimal (standard dims only)' if dimension_reduction else 'keep all (including extra_dims)'}")
+    print("Subsampling dimensions: minimal (standard dims only)")
     print(f"Subsampling method: {subsampling_method}")
     print(f"Resolutions: {res1}m ({int(res1*100)}cm), {res2}m ({int(res2*100)}cm)")
     print(f"Resolution 1 output: {'COPC LAZ' if output_copc_res1 else 'LAZ'}")
@@ -267,7 +285,7 @@ def run_tile_task(params: Parameters):
     print()
 
     try:
-        # Step 1-4: Tiling pipeline (dimension_reduction not used in tiling; only in subsampling below)
+        # Step 1-4: Tiling pipeline
         tiles_dir = run_tiling_pipeline(
             input_dir=input_dir,
             output_dir=output_dir,
@@ -321,7 +339,7 @@ def run_tile_task(params: Parameters):
             num_threads=subsampling_chunks,
             output_prefix=output_prefix,
             output_base_dir=output_dir,  # Output directly to output_dir, not under tiles_dir
-            dimension_reduction=dimension_reduction,  # True = minimal (standard dims only); False = keep extra_dims
+            dimension_reduction=dimension_reduction,
             subsampling_method=subsampling_method,
             output_copc_res1=output_copc_res1,
             output_copc_res2=output_copc_res2,
@@ -356,18 +374,21 @@ def run_tile_task(params: Parameters):
 
 def run_merge_task(params: Parameters):
     """
-    Run the merge task: remap predictions and merge tiles.
+    Run the merge task: filter predictions, remap if needed, and merge tiles.
 
     Pipeline:
-    1. Remap predictions from 10cm to target resolution (via main_remap.py)
-    2. Merge tiles with instance matching (via main_merge.py)
-    3. Remap to original input files (if original_input_dir provided)
+    1. Filter duplicate buffer-zone instances from segmented predictions
+    2. Remap filtered predictions from 10cm to target resolution (via main_remap.py)
+    3. Merge target-resolution tiles with instance matching (via main_merge.py)
+    4. Remap to original input files with the shared remap helper (if configured)
     """
     # Import Python modules
     try:
         from instance_labels import MERGED_OUTPUT_SCALES
+        from filter_buffer_instances import filter_buffer_instances_dir
         from main_remap import remap_all_tiles
         from main_merge import run_merge
+        from prediction_collection_remap import remap_prediction_collections_to_original_files
     except ImportError as e:
         print(f"Error: Could not import required modules: {e}")
         print("Make sure main_remap.py and main_merge.py exist.")
@@ -377,6 +398,12 @@ def run_merge_task(params: Parameters):
     # Note: subsampled_10cm_folder is populated by --subsampled-segmented-folder via alias
     if not params.subsampled_10cm_folder and not params.segmented_remapped_folder:
         print("Error: --subsampled-segmented-folder (or --subsampled-10cm-folder) or --segmented-remapped-folder is required for merge task")
+        sys.exit(1)
+    if params.subsampled_10cm_folder and params.segmented_remapped_folder:
+        print(
+            "Error: --subsampled-segmented-folder/--subsampled-10cm-folder and "
+            "--segmented-remapped-folder are mutually exclusive for merge task"
+        )
         sys.exit(1)
 
     # Get parameters from Pydantic model
@@ -388,17 +415,62 @@ def run_merge_task(params: Parameters):
     border_zone_width = params.border_zone_width
     min_cluster_size = params.min_cluster_size
     retile_buffer = 2.0  # Fixed to 2.0m
+    output_merged = params.output_merged_laz
+    output_tiles_dir = params.output_tiles_folder
+    original_tiles_dir = params.original_tiles_dir
+    original_input_dir = params.original_raw_input_dir or params.original_input_dir
 
     print("=" * 60)
     print("Running Merge Task (Python Pipeline)")
     print("=" * 60)
 
     try:
-        # Step 1: Remap predictions (if subsampled_10cm_folder provided)
-        segmented_remapped_folder = None
+        if params.original_copc_input_dir and original_input_dir:
+            _validate_copc_original_lane(Path(params.original_copc_input_dir))
+            _validate_copc_laz_source_pairs(Path(params.original_copc_input_dir), Path(original_input_dir))
+        elif params.original_copc_input_dir:
+            print(
+                "Error: --original-laz-input-dir is required when --original-copc-input-dir "
+                "is used for merge/remap-to-originals."
+            )
+            sys.exit(1)
+
+        def merge_work_dir(input_folder: Path) -> Path:
+            if params.output_folder:
+                return Path(params.output_folder)
+            if output_tiles_dir:
+                return Path(output_tiles_dir).parent
+            if output_merged:
+                return Path(output_merged).parent
+            return input_folder.parent
+
+        def filter_predictions(input_folder: Path) -> Path:
+            filtered_folder = merge_work_dir(input_folder) / "segmented_filtered"
+            print()
+            print("=" * 60)
+            print("Filtering Segmented Predictions")
+            print("=" * 60)
+            filter_summary = filter_buffer_instances_dir(
+                input_dir=input_folder,
+                output_dir=filtered_folder,
+                buffer=buffer,
+                suffix="_filtered",
+                instance_dimension=params.instance_dimension,
+                output_extension=".laz",
+            )
+            if filter_summary["input_files"] == 0:
+                print(f"Error: No filterable prediction files found in {input_folder}")
+                sys.exit(1)
+            return filtered_folder
+
+        # Step 1: Filter predictions, then remap if a source-resolution folder is provided.
+        segmented_for_merge_folder = None
+        segmented_source_folder = None
+        filtered_segmented_folder = None
 
         if params.subsampled_10cm_folder:
             subsampled_10cm_dir = Path(params.subsampled_10cm_folder)
+            segmented_source_folder = subsampled_10cm_dir
 
             if not subsampled_10cm_dir.exists():
                 print(f"Error: Input directory does not exist: {subsampled_10cm_dir}")
@@ -424,7 +496,7 @@ def run_merge_task(params: Parameters):
 
             output_folder = params.output_folder
             if output_folder is None:
-                output_folder = parent_dir / "segmented_remapped"
+                output_folder = merge_work_dir(subsampled_10cm_dir) / "segmented_remapped"
 
             if target_folder is None or not target_folder.exists():
                 print(f"Error: Target resolution folder does not exist or not specified")
@@ -432,6 +504,8 @@ def run_merge_task(params: Parameters):
                     print(f"Path: {target_folder}")
                 print(f"Please provide --subsampled-target-folder")
                 sys.exit(1)
+
+            filtered_segmented_folder = filter_predictions(subsampled_10cm_dir)
 
             # Optional: tile_bounds_tindex.json for remap matching (use --tile_bounds_json first)
             remap_tile_bounds_json = None
@@ -449,9 +523,9 @@ def run_merge_task(params: Parameters):
                         remap_tile_bounds_json = p
                         break
 
-            # Remap - source is segmented, target is the configured resolution-1 subsample
-            segmented_remapped_folder = remap_all_tiles(
-                source_folder=subsampled_10cm_dir,
+            # Remap - source is filtered segmented predictions, target is the configured resolution-1 subsample
+            segmented_for_merge_folder = remap_all_tiles(
+                source_folder=filtered_segmented_folder,
                 target_folder=target_folder,
                 output_folder=output_folder,
                 tile_bounds_json=remap_tile_bounds_json,
@@ -461,20 +535,23 @@ def run_merge_task(params: Parameters):
                 output_scales=tuple(MERGED_OUTPUT_SCALES),
             )
 
-        # Step 2: Merge tiles
-        if params.segmented_remapped_folder:
-            segmented_remapped_folder = Path(params.segmented_remapped_folder)
+        elif params.segmented_remapped_folder:
+            segmented_source_folder = Path(params.segmented_remapped_folder)
+            if not segmented_source_folder.exists():
+                print(f"Error: Segmented folder does not exist: {segmented_source_folder}")
+                sys.exit(1)
+            filtered_segmented_folder = filter_predictions(segmented_source_folder)
+            segmented_for_merge_folder = filtered_segmented_folder
 
-        if segmented_remapped_folder is None:
-            print("Error: No segmented remapped folder available for merge")
-            sys.exit(1)
-
-        if not segmented_remapped_folder.exists():
-            print(f"Error: Segmented folder does not exist: {segmented_remapped_folder}")
+        if segmented_for_merge_folder is None:
+            print("Error: No segmented folder available for merge")
             sys.exit(1)
 
         print()
-        print(f"Segmented folder: {segmented_remapped_folder}")
+        if segmented_source_folder is not None:
+            print(f"Segmented folder: {segmented_source_folder}")
+        print(f"Filtered segmented folder: {filtered_segmented_folder}")
+        print(f"Merge input folder: {segmented_for_merge_folder}")
         print(f"Buffer: {buffer}m")
         print(f"Overlap threshold: {overlap_threshold}")
         print(f"Workers: {workers}")
@@ -484,36 +561,28 @@ def run_merge_task(params: Parameters):
             print(f"COPC matching original input dir: {params.original_copc_input_dir}")
         print()
 
-        output_merged = params.output_merged_laz
-        output_tiles_dir = params.output_tiles_folder
-        original_tiles_dir = params.original_tiles_dir
-        original_input_dir = params.original_raw_input_dir or params.original_input_dir
-        if params.original_copc_input_dir and original_input_dir:
-            _validate_copc_original_lane(Path(params.original_copc_input_dir))
-            _validate_copc_laz_source_pairs(Path(params.original_copc_input_dir), Path(original_input_dir))
-        elif params.original_copc_input_dir:
-            print(
-                "Error: --original-laz-input-dir is required when --original-copc-input-dir "
-                "is used for merge/remap-to-originals."
-            )
-            sys.exit(1)
-
         # Auto-derive paths if not provided
-        parent_dir = segmented_remapped_folder.parent
+        parent_dir = Path(segmented_for_merge_folder).parent
         if output_tiles_dir is None:
             # Use segmented folder's parent, but ensure it's writable
             # If parent is root or not writable, use segmented folder itself
             if parent_dir == Path('/') or not os.access(parent_dir, os.W_OK):
-                output_tiles_dir = segmented_remapped_folder / "output_tiles"
+                output_tiles_dir = Path(segmented_for_merge_folder) / "output_tiles"
             else:
                 output_tiles_dir = parent_dir / "output_tiles"
         if original_tiles_dir is None:
             # Try to find the tiles directory (parent of subsampled folders)
-            original_tiles_dir = parent_dir
+            original_tiles_dir = Path(segmented_for_merge_folder).parent
+        original_with_predictions_dir = None
         if original_input_dir:
+            original_with_predictions_dir = (
+                Path(params.original_raw_output_dir)
+                if params.original_raw_output_dir
+                else Path(output_tiles_dir).parent / "original_with_predictions"
+            )
             _validate_raw_original_lane(
                 Path(original_input_dir),
-                Path(output_tiles_dir).parent / "original_with_predictions",
+                original_with_predictions_dir,
             )
 
         # tile_bounds_json is required for merge (no fallback)
@@ -528,15 +597,15 @@ def run_merge_task(params: Parameters):
             )
 
         # Parse 3DTrees dimension branding params
-        threedtrees_dims = [d.strip() for d in params.threedtrees_dims.split(",") if d.strip()] if params.threedtrees_dims else None
+        threedtrees_dims = _effective_threedtrees_dims(params)
         threedtrees_suffix = params.threedtrees_suffix
 
         merged_output = run_merge(
-            segmented_dir=segmented_remapped_folder,
+            segmented_dir=segmented_for_merge_folder,
             output_tiles_dir=output_tiles_dir,
             original_tiles_dir=original_tiles_dir,
             tile_bounds_json=tile_bounds_json,
-            original_input_dir=original_input_dir,
+            original_input_dir=None,
             output_merged=output_merged,
             buffer=buffer,
             overlap_threshold=overlap_threshold,
@@ -557,9 +626,26 @@ def run_merge_task(params: Parameters):
             threedtrees_suffix=threedtrees_suffix,
         )
 
-        if original_input_dir and params.transfer_original_dims_to_merged:
-            original_with_predictions_dir = Path(output_tiles_dir).parent / "original_with_predictions"
+        if original_input_dir:
             product_output_dir = Path(merged_output).parent if merged_output else Path(output_tiles_dir).parent
+            print()
+            print("=" * 60)
+            print("Remapping merged 1cm tiles to uploaded originals")
+            print("=" * 60)
+            remap_prediction_collections_to_original_files(
+                [Path(output_tiles_dir)],
+                Path(original_input_dir),
+                original_with_predictions_dir,
+                tolerance=0.1,
+                num_threads=workers,
+                retile_buffer=retile_buffer,
+                target_dims=set(threedtrees_dims) if threedtrees_dims else None,
+                chunk_size=params.chunk_size or 5_000_000,
+                num_spatial_chunks=params.num_spatial_chunks or params.workers,
+                prefer_copc_sources=False,
+            )
+
+        if original_input_dir and params.transfer_original_dims_to_merged:
             _create_prod_merged_outputs(
                 original_with_predictions_dir=original_with_predictions_dir,
                 output_dir=product_output_dir,
@@ -610,6 +696,15 @@ def run_remap_task(params: Parameters):
         sys.exit(1)
     if not params.segmented_folders and not params.merged_laz:
         print("Error: --segmented-folders or --merged-laz is required for remap task")
+        sys.exit(1)
+    if params.segmented_folders and params.merged_laz:
+        print("Error: --segmented-folders and --merged-laz are mutually exclusive for remap task")
+        sys.exit(1)
+    if params.segmented_folders and params.pre_remap_reassign_instances:
+        print("Error: --pre-remap-reassign-instances is only supported with --merged-laz")
+        sys.exit(1)
+    if params.merged_laz and params.remap_dims:
+        print("Error: --remap-dims is only supported with --segmented-folders; use --threedtrees-dims with --merged-laz")
         sys.exit(1)
 
     laz_input_dir = Path(params.original_raw_input_dir or params.original_input_dir)
@@ -697,7 +792,7 @@ def run_remap_task(params: Parameters):
     print()
 
     # Parse 3DTrees dimension branding params
-    threedtrees_dims = [d.strip() for d in params.threedtrees_dims.split(",") if d.strip()] if params.threedtrees_dims else None
+    threedtrees_dims = _effective_threedtrees_dims(params)
     threedtrees_suffix = params.threedtrees_suffix
 
     if not params.pre_remap_reassign_instances:
@@ -716,7 +811,7 @@ def run_remap_task(params: Parameters):
         )
     else:
         merged_points, merged_extra_dims, merged_extra_dim_params = load_merged_file(merged_laz)
-        candidate_dims = [d.strip() for d in params.threedtrees_dims.split(",") if d.strip()]
+        candidate_dims = threedtrees_dims or []
         instance_dimension = params.pre_remap_reassign_instance_dimension
         if instance_dimension is None:
             instance_dimension = next((d for d in candidate_dims if "instance" in d.lower()), None)
@@ -831,6 +926,7 @@ def run_create_merged_file_task(params: Parameters):
             res1=params.resolution_1,
             res2=params.resolution_2,
             num_spatial_chunks=params.num_spatial_chunks or params.workers,
+            chunk_workers=params.workers,
             staged_copc_dir=params.staged_copc_dir,
             standardization_json=params.standardization_json,
         )
@@ -908,13 +1004,13 @@ def preprocess_boolean_flags(args_list):
     """
     boolean_flags = [
         '--show-params', '--show_params',
-        '--skip-dimension-reduction', '--skip_dimension_reduction',
         '--disable-matching', '--disable_matching',
         '--disable-volume-merge', '--disable_volume_merge',
         '--pre-remap-reassign-instances', '--pre_remap_reassign_instances',
         '--output-copc-res1', '--output_copc_res1',
         '--output-copc-res2', '--output_copc_res2',
         '--skip-merged-file', '--skip_merged_file',
+        '--transfer-original-dims-to-merged', '--transfer_original_dims_to_merged',
         '--verbose', '-v'
     ]
 
@@ -939,7 +1035,16 @@ def preprocess_boolean_flags(args_list):
 
 def _accepted_cli_flags() -> set[str]:
     """Return long CLI flags accepted by Parameters or the run.py preprocessor."""
-    accepted = {"show-params", "show_params", "no-transfer-original-dims-to-merged"}
+    accepted = {
+        "show-params",
+        "show_params",
+        "produce-merged-file",
+        "produce_merged_file",
+        "no-produce-merged-file",
+        "no-produce_merged_file",
+        "no-transfer-original-dims-to-merged",
+        "no-transfer_original_dims_to_merged",
+    }
     for field_name, field in Parameters.model_fields.items():
         accepted.add(field_name)
         accepted.add(field_name.replace("_", "-"))
@@ -978,7 +1083,126 @@ def _validate_known_cli_flags(args_list) -> None:
         sys.exit(1)
 
 
+def _field_cli_flags(field_name: str) -> list[str]:
+    """Return concise user-facing CLI flags for a Parameters field."""
+    field = Parameters.model_fields[field_name]
+    flags = [field_name.replace("_", "-")]
+    if field_name == "transfer_original_dims_to_merged":
+        flags = ["produce-merged-file", "no-produce-merged-file", *flags]
+    validation_alias = field.validation_alias
+    choices = getattr(validation_alias, "choices", None)
+    if choices is not None:
+        flags.extend(str(choice) for choice in choices)
+    elif validation_alias is not None:
+        flags.append(str(validation_alias))
+
+    seen = set()
+    public_flags = []
+    for flag in flags:
+        normalized = flag.replace("_", "-")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        public_flags.append(f"--{normalized}")
+    return public_flags
+
+
+def _print_cli_help() -> None:
+    """Print a compact SmartTile CLI help page."""
+    option_groups = [
+        ("Common", ["task", "input_dir", "output_dir", "workers", "num_spatial_chunks", "chunk_size"]),
+        (
+            "Tile",
+            [
+                "tile_length",
+                "tile_buffer",
+                "threads",
+                "resolution_1",
+                "resolution_2",
+                "output_copc_res1",
+                "output_copc_res2",
+                "subsampling_method",
+                "tiling_threshold",
+            ],
+        ),
+        (
+            "Merge",
+            [
+                "subsampled_10cm_folder",
+                "subsampled_target_folder",
+                "segmented_remapped_folder",
+                "original_raw_input_dir",
+                "original_raw_output_dir",
+                "original_copc_input_dir",
+                "output_merged_laz",
+                "output_tiles_folder",
+            ],
+        ),
+        (
+            "Remap / Prod-Merged",
+            [
+                "segmented_folders",
+                "merged_laz",
+                "original_with_predictions_dir",
+                "staged_copc_dir",
+                "standardization_json",
+                "transfer_original_dims_to_merged",
+                "merged_resolutions",
+                "merged_output_formats",
+                "threedtrees_dims",
+            ],
+        ),
+        (
+            "Filtering / Matching",
+            [
+                "instance_dimension",
+                "filter_suffix",
+                "filter_output_extension",
+                "buffer",
+                "overlap_threshold",
+                "max_centroid_distance",
+                "max_volume_for_merge",
+                "min_cluster_size",
+                "disable_matching",
+                "disable_volume_merge",
+                "pre_remap_reassign_instances",
+                "verbose",
+            ],
+        ),
+    ]
+
+    print("SmartTile point-cloud processing pipeline")
+    print()
+    print("Usage:")
+    print("  python src/run.py --task tile --input-dir INPUT --output-dir OUTPUT")
+    print("  python src/run.py --task merge --subsampled-10cm-folder SEGMENTED_10CM --output-dir OUTPUT")
+    print("  python src/run.py --task remap --segmented-folders COLLECTIONS --original-laz-input-dir ORIGINALS --original-laz-output-dir OUTPUT")
+    print("  python src/run.py --task create_merged_file --original-with-predictions-dir INPUT --output-dir OUTPUT")
+    print("  python src/run.py --task filter --input-dir INPUT --output-dir OUTPUT")
+    print()
+    print("Tasks: tile, merge, filter, remap, create_merged_file")
+    print("Use --show-params to print resolved defaults and environment overrides.")
+    print()
+    print("Options:")
+    for title, field_names in option_groups:
+        print(f"  {title}:")
+        for field_name in field_names:
+            field = Parameters.model_fields.get(field_name)
+            if field is None:
+                continue
+            flags = ", ".join(_field_cli_flags(field_name))
+            description = field.description or ""
+            print(f"    {flags}")
+            if description:
+                print(f"      {description}")
+        print()
+
+
 def main():
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+        _print_cli_help()
+        sys.exit(0)
+
     # Handle --show-params flag first using argparse (before Pydantic parsing)
     # This avoids Pydantic's boolean flag parsing issues
     pre_parser = argparse.ArgumentParser(add_help=False)
@@ -991,12 +1215,18 @@ def main():
 
     # Manually map aliases that Pydantic might not generate flags for
     # --subsampled-segmented-folder -> --subsampled-10cm-folder
+    # --produce-merged-file -> --transfer-original-dims-to-merged
+    # --no-produce-merged-file -> --transfer-original-dims-to-merged False
     # --no-transfer-original-dims-to-merged -> --transfer-original-dims-to-merged False
     mapped_args = []
     for arg in remaining_args:
         if arg == '--subsampled-segmented-folder':
             mapped_args.append('--subsampled-10cm-folder')
-        elif arg == '--no-transfer-original-dims-to-merged':
+        elif arg in ('--produce-merged-file', '--produce_merged_file'):
+            mapped_args.append('--transfer-original-dims-to-merged')
+        elif arg in ('--no-produce-merged-file', '--no-produce_merged_file'):
+            mapped_args.extend(['--transfer-original-dims-to-merged', 'False'])
+        elif arg in ('--no-transfer-original-dims-to-merged', '--no-transfer_original_dims_to_merged'):
             mapped_args.extend(['--transfer-original-dims-to-merged', 'False'])
         else:
             mapped_args.append(arg)

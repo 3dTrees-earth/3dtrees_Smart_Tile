@@ -32,20 +32,13 @@ def run_tile_task(params: Parameters):
     tile_buffer = params.tile_buffer
     threads = params.threads
     workers = params.workers
-    dimension_reduction = bool(params.dimension_reduction)
-    if params.skip_dimension_reduction is not None:
-        dimension_reduction = not bool(params.skip_dimension_reduction)
-        print(
-            "  Note: deprecated --skip-dimension-reduction was provided; "
-            "using its inverse for dimension_reduction",
-            flush=True,
-        )
+    dimension_reduction = True
     num_spatial_chunks = params.num_spatial_chunks or threads
     res1 = params.resolution_1
     res2 = params.resolution_2
     tiling_threshold = params.tiling_threshold
     chunk_size = params.chunk_size
-    chunkwise_copc_source_creation = params.chunkwise_copc_source_creation
+    subsampling_method = params.subsampling_method
     output_copc_res1 = bool(params.output_copc_res1)
     output_copc_res2 = bool(params.output_copc_res2)
 
@@ -59,10 +52,7 @@ def run_tile_task(params: Parameters):
     print(f"Workers:                  {workers}")
     print(f"Threads per writer:       {threads}")
     print(f"Spatial chunks:           {num_spatial_chunks}")
-    print(
-        "Dimension reduction:      "
-        f"{dimension_reduction} ({'standard dims only' if dimension_reduction else 'keep all dims'})"
-    )
+    print(f"Subsampling method:       {subsampling_method}")
     print(f"Resolution 1:             {res1}m")
     print(f"Resolution 2:             {res2}m")
     print(f"Res1 output COPC:         {output_copc_res1}")
@@ -70,7 +60,6 @@ def run_tile_task(params: Parameters):
     if tiling_threshold is not None:
         print(f"Tiling threshold:         {tiling_threshold} MB")
     print(f"Chunk size:               {chunk_size:,} points")
-    print(f"Chunkwise COPC creation:  {chunkwise_copc_source_creation}")
     print()
 
     try:
@@ -85,7 +74,6 @@ def run_tile_task(params: Parameters):
             dimension_reduction=dimension_reduction,
             tiling_threshold=tiling_threshold,
             chunk_size=chunk_size,
-            chunkwise_copc_source_creation=chunkwise_copc_source_creation,
         )
 
         tiling_skipped = tiles_dir.name.startswith("copc_")
@@ -115,10 +103,9 @@ def run_tile_task(params: Parameters):
             output_prefix=output_prefix,
             output_base_dir=output_dir,
             dimension_reduction=dimension_reduction,
+            subsampling_method=subsampling_method,
             output_copc_res1=output_copc_res1,
             output_copc_res2=output_copc_res2,
-            fallback_laz_dir=input_dir,
-            chunk_size=chunk_size,
         )
 
         bounds_json = output_dir / "tile_bounds_tindex.json"

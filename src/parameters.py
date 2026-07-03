@@ -103,16 +103,6 @@ class Parameters(BaseSettings):
     )
 
 
-    skip_dimension_reduction: bool = Field(
-        False,
-        description=(
-            "Keep extra point dimensions in LAZ intermediates. Intermediate COPC "
-            "conversion still strips extra dimensions by default; prod-merged "
-            "creation preserves enriched dimensions."
-        ),
-        validation_alias=AliasChoices("skip-dimension-reduction", "skip_dimension_reduction"),
-    )
-
     instance_dimension: str = Field(
         "PredInstance",
         description="Name of the instance ID dimension in input files (default: PredInstance, fallback: treeID)",
@@ -133,7 +123,7 @@ class Parameters(BaseSettings):
 
     num_spatial_chunks: Optional[int] = Field(
         default=None,
-        description="Subsampling parallelism per file: COPC COM window workers or stripe chunks (default: equals workers)",
+        description="Per-file spatial/chunk parallelism: subsampling windows, COPC remap windows, or raw-original remap chunk workers (default: equals workers)",
         validation_alias=AliasChoices("num-spatial-chunks", "num_spatial_chunks"),
     )
 
@@ -634,7 +624,6 @@ def print_params(params: Parameters):
     print(f"  output_copc_res1: {params.output_copc_res1}")
     print(f"  output_copc_res2: {params.output_copc_res2}")
     print(f"  subsampling_method: {params.subsampling_method}")
-    print(f"  skip_dimension_reduction: {params.skip_dimension_reduction}")
 
     print("\nMerge Task:")
     print(f"  subsampled_10cm_folder: {params.subsampled_10cm_folder}")
@@ -666,6 +655,9 @@ def print_params(params: Parameters):
     print(f"  original_raw_output_dir: {params.original_raw_output_dir}")
     print(f"  threedtrees_dims: {params.threedtrees_dims}")
     print(f"  threedtrees_suffix: {params.threedtrees_suffix}")
+    print(f"  transfer_original_dims_to_merged: {params.transfer_original_dims_to_merged}")
+    print(f"  merged_resolutions: {params.merged_resolutions}")
+    print(f"  merged_output_formats: {params.merged_output_formats}")
 
     print("=" * 60)
 
@@ -683,7 +675,6 @@ def get_tile_params(params: Parameters) -> dict:
         'output_copc_res1': params.output_copc_res1,
         'output_copc_res2': params.output_copc_res2,
         'subsampling_method': params.subsampling_method,
-        'skip_dimension_reduction': params.skip_dimension_reduction,
         'chunk_size': params.chunk_size,
     }
 
@@ -721,7 +712,6 @@ TILE_PARAMS = {
     'output_copc_res1': True,
     'output_copc_res2': False,
     'subsampling_method': 'center-of-mass',
-    'skip_dimension_reduction': False,
     'chunk_size': 20_000_000,
 }
 

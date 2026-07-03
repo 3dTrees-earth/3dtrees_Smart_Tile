@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 import sys
@@ -190,15 +191,53 @@ def _crop_with_laspy(
         return (False, 0, str(e))
 
 
+def _source_point_count(src_file: Path) -> int:
+    """Read a source header point count without loading point data."""
+    import laspy
+
+    laz_backend = _laspy_laz_backend()
+    open_kwargs = {}
+    if str(src_file).lower().endswith(".laz") and laz_backend is not None:
+        open_kwargs["laz_backend"] = laz_backend
+    with laspy.open(str(src_file), **open_kwargs) as reader:
+        return int(reader.header.point_count)
+
+
+def _single_source_range_tasks(
+    task: Tuple,
+    total_points: int,
+    max_parallel: int,
+    chunk_size: int,
+) -> Tuple[List[Tuple], int]:
+    """Split one large source-file distribute task into bounded point ranges."""
+    if max_parallel <= 1 or total_points <= max(1, chunk_size):
+        return [task], chunk_size
+
+    range_workers = min(max_parallel, math.ceil(total_points / max(1, chunk_size)))
+    if range_workers <= 1:
+        return [task], chunk_size
+
+    range_size = math.ceil(total_points / range_workers)
+    worker_chunk_size = min(chunk_size, max(100_000, math.ceil(chunk_size / range_workers)))
+    ranged_tasks = []
+    for range_idx in range(range_workers):
+        start = range_idx * range_size
+        if start >= total_points:
+            break
+        count = min(range_size, total_points - start)
+        ranged_tasks.append((*task, start, count, worker_chunk_size))
+    return ranged_tasks, worker_chunk_size
+
+
 def _distribute_source_file(args: Tuple) -> List[Tuple[str, int]]:
     """
     Phase 1: Read one source file (chunked) and write cropped parts for all
     overlapping tiles.
 
-    Each source file is read exactly once.  Points are streamed in chunks
-    of CHUNK_SIZE to limit peak memory, and for each chunk the bounding-box
-    mask is applied for every overlapping tile.  Matching points are written
-    immediately to per-tile LAS part files (one per source/chunk).
+    Source points are streamed in chunks to limit peak memory, and for each
+    chunk the bounding-box mask is applied for every overlapping tile. Matching
+    points are written immediately to per-tile LAS part files. A large single
+    source may be split into non-overlapping point ranges for parallel reads.
 
     When the LazrsParallel backend is used, RAYON_NUM_THREADS is set from the
     threads argument so chunk decompression uses multiple threads.
@@ -215,7 +254,13 @@ def _distribute_source_file(args: Tuple) -> List[Tuple[str, int]]:
     import laspy
     import numpy as np
 
-    source_idx, src_file, overlapping_tiles, tiles_dir, decompress_threads, chunk_size = args
+    source_idx, src_file, overlapping_tiles, tiles_dir, decompress_threads, chunk_size = args[:6]
+    point_start = None
+    point_count = None
+    if len(args) >= 9:
+        point_start = int(args[6])
+        point_count = int(args[7])
+        chunk_size = int(args[8])
 
     # So LazrsParallel (Rayon) uses N threads for chunk decompression
     if decompress_threads and decompress_threads > 0:
@@ -249,7 +294,23 @@ def _distribute_source_file(args: Tuple) -> List[Tuple[str, int]]:
             src_offsets = header_snapshot.offsets
             tile_bounds_map = {lbl: bnds for lbl, bnds in overlapping_tiles}
 
-            for chunk_index, chunk in enumerate(reader.chunk_iterator(chunk_size)):
+            if point_start is None:
+                chunk_iter = reader.chunk_iterator(chunk_size)
+                part_prefix = f"part_{source_idx}"
+            else:
+                reader.seek(point_start)
+
+                def _range_chunks():
+                    remaining = point_count
+                    while remaining and remaining > 0:
+                        n_points = min(chunk_size, remaining)
+                        yield reader.read_points(n_points)
+                        remaining -= n_points
+
+                chunk_iter = _range_chunks()
+                part_prefix = f"part_{source_idx}_{point_start:012d}"
+
+            for chunk_index, chunk in enumerate(chunk_iter):
                 cx = np.asarray(chunk.x)
                 cy = np.asarray(chunk.y)
 
@@ -266,7 +327,7 @@ def _distribute_source_file(args: Tuple) -> List[Tuple[str, int]]:
 
                     tile_dir = tiles_dir / label
                     tile_dir.mkdir(exist_ok=True)
-                    part_file = tile_dir / f"part_{source_idx}_{chunk_index:06d}.las"
+                    part_file = tile_dir / f"{part_prefix}_{chunk_index:06d}.las"
 
                     selected = chunk.array[mask].copy()
 
@@ -318,9 +379,10 @@ def create_tiles(
     """
     Create overlapping tiles from source LAZ/LAS files (two-phase).
 
-    Phase 1 – Distribute: each source file is read exactly once (in chunks)
-    and cropped points are written as per-tile LAZ part files.  This avoids
-    the previous O(sources × tiles) read pattern.
+    Phase 1 – Distribute: source files are read in chunks and cropped points
+    are written as per-tile LAZ part files. Multi-source inputs are parallelized
+    by file; one large source can be split into bounded point ranges so
+    `--workers` is still useful before tile finalization.
 
     Phase 2 – Finalise: each tile's part files are merged and converted to
     COPC format (tries untwine, falls back to PDAL).  Fully parallelised
@@ -425,8 +487,28 @@ def create_tiles(
         if overlapping:
             distribute_tasks.append((source_idx, src_file, overlapping, tiles_dir, threads, chunk_size))
 
+    source_files_to_read = len(distribute_tasks)
+    if len(distribute_tasks) == 1 and max_parallel > 1:
+        src_file = Path(distribute_tasks[0][1])
+        try:
+            total_points = _source_point_count(src_file)
+            ranged_tasks, worker_chunk_size = _single_source_range_tasks(
+                distribute_tasks[0],
+                total_points,
+                max_parallel,
+                chunk_size,
+            )
+            if len(ranged_tasks) > 1:
+                distribute_tasks = ranged_tasks
+                print(
+                    f"  Single-source range parallelism: {len(distribute_tasks)} workers, "
+                    f"{total_points:,} points, {worker_chunk_size:,} points/chunk/worker"
+                )
+        except Exception as exc:
+            print(f"  Warning: could not inspect point count for {src_file.name}: {exc}")
+
     print()
-    print(f"  Phase 1: Reading {len(distribute_tasks)} source file(s), "
+    print(f"  Phase 1: Reading {source_files_to_read} source file(s) with {len(distribute_tasks)} worker task(s), "
           f"distributing to {len(pending_tiles)} tile(s)  [chunked reads, {threads} thread(s) per decompress]")
     print()
 

@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from prediction_collection_remap import (  # noqa: E402
     _copc_spatial_windows,
+    _parallel_raw_chunk_plan,
     load_collection_subset_for_bounds,
     prediction_collection_files,
     remap_prediction_collections_to_original_files,
@@ -92,6 +93,11 @@ class MultiCollectionRemapTests(unittest.TestCase):
                 (7.5, 10.0, True),
             ],
         )
+
+    def test_parallel_raw_chunk_plan_keeps_total_budget_bounded(self):
+        self.assertEqual(_parallel_raw_chunk_plan(20_000_000, 20), (5_000_000, 4))
+        self.assertEqual(_parallel_raw_chunk_plan(20_000_000, 1), (20_000_000, 1))
+        self.assertEqual(_parallel_raw_chunk_plan(10, 3), (10, 1))
 
     def test_remaps_distinct_model_named_dims_and_preserves_source_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -183,6 +189,39 @@ class MultiCollectionRemapTests(unittest.TestCase):
                     num_threads=1,
                 )
             self.assertFalse(output_dir.exists())
+
+    def test_existing_original_prediction_dim_is_preserved_and_new_dim_is_suffixed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_dir = root / "originals"
+            sat_dir = root / "sat"
+            output_dir = root / "out"
+            original_dir.mkdir()
+            sat_dir.mkdir()
+
+            _write_las(
+                original_dir / "source.las",
+                {"PredInstance_SAT": np.array([9, 9, 9, 9], dtype=np.uint16)},
+            )
+            _write_las(
+                sat_dir / "source_sat.las",
+                {"PredInstance_SAT": np.array([1, 1, 0, 2], dtype=np.uint16)},
+            )
+
+            remap_prediction_collections_to_original_files(
+                [sat_dir],
+                original_dir,
+                output_dir,
+                tolerance=0.001,
+                num_threads=1,
+            )
+
+            out = laspy.read(output_dir / "source.las")
+            dims = set(out.point_format.dimension_names) | {dim.name for dim in out.point_format.extra_dimensions}
+            self.assertIn("PredInstance_SAT", dims)
+            self.assertIn("PredInstance_SAT_1", dims)
+            np.testing.assert_array_equal(out.PredInstance_SAT, np.array([9, 9, 9, 9], dtype=np.uint16))
+            np.testing.assert_array_equal(out.PredInstance_SAT_1, np.array([1, 1, 0, 2], dtype=np.uint16))
 
     def test_rerun_reprocesses_stale_existing_output_missing_selected_dims(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -281,6 +320,90 @@ class MultiCollectionRemapTests(unittest.TestCase):
                 )
 
             self.assertEqual(captured_buffers, [3.0])
+
+    def test_stream_remap_can_enrich_raw_chunks_in_parallel_preserving_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_file = root / "source.las"
+            pred_dir = root / "pred"
+            output_file = root / "out.las"
+            pred_dir.mkdir()
+            _write_las(input_file)
+            _write_las(
+                pred_dir / "source_pred.las",
+                {"PredInstance_Model": np.array([10, 11, 12, 13], dtype=np.uint16)},
+            )
+
+            collection_meta = [{
+                "path": pred_dir,
+                "files": [{
+                    "path": pred_dir / "source_pred.las",
+                    "bounds": (499.0, 501.0, 599.0, 601.0),
+                    "z_bounds": (49.0, 51.0),
+                    "extra_names": {"PredInstance_Model"},
+                }],
+                "dims": ["PredInstance_Model"],
+                "extra_params": {
+                    "PredInstance_Model": laspy.ExtraBytesParams(
+                        name="PredInstance_Model",
+                        type=np.uint16,
+                    )
+                },
+            }]
+
+            n_points, matched = stream_add_collections_to_file(
+                input_file,
+                output_file,
+                collection_meta,
+                spatial_buffer=1.0,
+                tolerance=0.001,
+                chunk_size=1,
+                kdtree_workers=1,
+                chunk_parallel_workers=2,
+            )
+
+            out = laspy.read(output_file)
+            self.assertEqual(n_points, 4)
+            self.assertEqual(matched, 4)
+            np.testing.assert_array_equal(out.x, np.array([500.0, 500.1, 500.2, 500.3]))
+            np.testing.assert_array_equal(
+                out.PredInstance_Model,
+                np.array([10, 11, 12, 13], dtype=np.uint16),
+            )
+
+    def test_single_raw_original_uses_chunk_workers_from_total_budget(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_dir = root / "originals"
+            pred_dir = root / "pred"
+            output_dir = root / "out"
+            original_dir.mkdir()
+            pred_dir.mkdir()
+
+            _write_las(original_dir / "source.las")
+            _write_las(
+                pred_dir / "source_pred.las",
+                {"PredInstance_Model": np.array([1, 1, 0, 2], dtype=np.uint16)},
+            )
+
+            with mock.patch(
+                "prediction_collection_remap.stream_add_collections_to_file",
+                return_value=(4, 4),
+            ) as raw_path:
+                remap_prediction_collections_to_original_files(
+                    [pred_dir],
+                    original_dir,
+                    output_dir,
+                    tolerance=0.001,
+                    num_threads=6,
+                    num_spatial_chunks=3,
+                    prefer_copc_sources=False,
+                )
+
+            raw_path.assert_called_once()
+            _, kwargs = raw_path.call_args
+            self.assertEqual(kwargs["chunk_parallel_workers"], 1)
+            self.assertEqual(kwargs["kdtree_workers"], 6)
 
     def test_copc_original_routes_through_spatial_query_fast_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
