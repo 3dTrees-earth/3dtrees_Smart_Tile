@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from typing import List, Optional
 
+from subsample_encoding import encoding_summary, safe_las_writer_encoding_options
+
 
 def get_pdal_path() -> str:
     """Return the PDAL executable path."""
@@ -103,6 +105,8 @@ def convert_laz_output_to_copc(
         "filename": str(output_copc),
         "forward": "all",
     }
+    encoding_source = source_metadata_file if source_metadata_file is not None else input_laz
+    writer_opts.update(safe_las_writer_encoding_options(encoding_source))
     if preserve_extra_dims:
         writer_opts["extra_dims"] = "all"
     pipeline = {
@@ -122,7 +126,10 @@ def convert_laz_output_to_copc(
             check=False,
         )
         if result.returncode != 0:
-            print(f"      COPC conversion failed: {result.stderr[:200]}")
+            print(
+                f"      COPC conversion failed with {encoding_summary(writer_opts)}: "
+                f"{result.stderr[:200]}"
+            )
             return False
         converted = output_copc.exists() and output_copc.stat().st_size > 0
         if converted and source_metadata_file is not None:

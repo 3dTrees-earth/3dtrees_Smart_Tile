@@ -64,6 +64,7 @@ from subsample_outputs import (
     subsample_output_files,
     temporary_laz_path,
 )
+from subsample_encoding import encoding_summary, safe_las_writer_encoding_options
 
 
 SUBSAMPLE_MANIFEST_FILENAME = ".smarttile_subsample_manifest.json"
@@ -234,6 +235,29 @@ def get_file_xy_scales(filepath: Path) -> Tuple[float, float]:
         return (0.001, 0.001)
 
 
+def _subsample_las_writer_options(
+    input_file: Path,
+    output_file: Path,
+    dimension_reduction: bool,
+    xy_bounds: Optional[Tuple[float, float, float, float]] = None,
+) -> dict:
+    """Return a LAS writer stage with explicit safe scale/offset encoding."""
+    writer_opts = {
+        "type": "writers.las",
+        "filename": str(output_file),
+        "compression": True,
+        "forward": "all",
+    }
+    writer_opts.update(safe_las_writer_encoding_options(input_file, xy_bounds=xy_bounds))
+    if dimension_reduction:
+        writer_opts["minor_version"] = 2
+        writer_opts["dataformat_id"] = 0
+    else:
+        writer_opts["minor_version"] = 4
+        writer_opts["extra_dims"] = "all"
+    return writer_opts
+
+
 def subsample_single_file(args: Tuple[Path, Path, float, Path, int, bool, str, bool]) -> Tuple[str, bool, str, int]:
     """
     Subsample a single file by splitting it into subtiles along X-axis and processing in parallel.
@@ -388,18 +412,12 @@ def subsample_single_file(args: Tuple[Path, Path, float, Path, int, bool, str, b
             else target_output_file
         )
 
-        merge_writer = {
-            "type": "writers.las",
-            "filename": str(merge_output_file),
-            "compression": True,
-            "forward": "all",
-        }
-        if dimension_reduction:
-            merge_writer["minor_version"] = 2
-            merge_writer["dataformat_id"] = 0
-        else:
-            merge_writer["minor_version"] = 4
-            merge_writer["extra_dims"] = "all"
+        merge_writer = _subsample_las_writer_options(
+            input_file,
+            merge_output_file,
+            dimension_reduction,
+            xy_bounds=(minx, maxx, miny, maxy),
+        )
         merge_pipeline = {
             "pipeline": [
                 *[{"type": reader_type, "filename": str(f)} for f in chunk_files],
@@ -444,7 +462,12 @@ def subsample_single_file(args: Tuple[Path, Path, float, Path, int, bool, str, b
                 pass
 
         if result.returncode != 0:
-            return (input_file.name, False, f"Merge failed: {result.stderr[:100]}", 0)
+            return (
+                input_file.name,
+                False,
+                f"Merge failed with {encoding_summary(merge_writer)}: {result.stderr[:200]}",
+                0,
+            )
 
         if not merge_output_file.exists() or merge_output_file.stat().st_size == 0:
             return (input_file.name, False, "Output file empty", 0)
@@ -511,18 +534,11 @@ def subsample_simple(
             else target_output_file
         )
 
-        writer_opts = {
-            "type": "writers.las",
-            "filename": str(work_output_file),
-            "compression": True,
-            "forward": "all",
-        }
-        if dimension_reduction:
-            writer_opts["minor_version"] = 2
-            writer_opts["dataformat_id"] = 0
-        else:
-            writer_opts["minor_version"] = 4
-            writer_opts["extra_dims"] = "all"
+        writer_opts = _subsample_las_writer_options(
+            input_file,
+            work_output_file,
+            dimension_reduction,
+        )
 
         if subsampling_method == SUBSAMPLING_METHOD_CENTER_OF_MASS:
             if is_copc and dimension_reduction:
@@ -594,9 +610,19 @@ def subsample_simple(
                     if pipeline_file.exists():
                         pipeline_file.unlink()
                 if result.returncode != 0:
-                    return (input_file.name, False, result.stderr[:200], 0)
+                    return (
+                        input_file.name,
+                        False,
+                        f"{result.stderr[:200]} ({encoding_summary(writer_opts)})",
+                        0,
+                    )
             else:
-                return (input_file.name, False, result.stderr[:200], 0)
+                return (
+                    input_file.name,
+                    False,
+                    f"{result.stderr[:200]} ({encoding_summary(writer_opts)})",
+                    0,
+                )
 
         if not work_output_file.exists() or work_output_file.stat().st_size == 0:
             return (input_file.name, False, "Output file empty", 0)

@@ -17,6 +17,10 @@ from subsample_methods import (
     normalize_subsampling_method,
     voxel_subsampling_filter,
 )
+from subsample_encoding import (
+    encoding_summary,
+    safe_las_writer_encoding_options_for_pdal_bounds,
+)
 
 
 def get_pdal_path() -> str:
@@ -40,6 +44,7 @@ def crop_input_to_laz(
         "compression": True,
         "forward": "all",
     }
+    writer_opts.update(safe_las_writer_encoding_options_for_pdal_bounds(input_file, bounds_str))
     if dimension_reduction:
         writer_opts["minor_version"] = 2
         writer_opts["dataformat_id"] = 0
@@ -70,16 +75,28 @@ def crop_input_to_laz(
         if pipeline_file.exists():
             pipeline_file.unlink()
 
-    return result.returncode == 0 and crop_file.exists() and crop_file.stat().st_size > 0
+    success = result.returncode == 0 and crop_file.exists() and crop_file.stat().st_size > 0
+    if not success:
+        print(
+            f"      Crop writer failed with {encoding_summary(writer_opts)}: "
+            f"{result.stderr[:200]}"
+        )
+    return success
 
 
-def _chunk_writer_options(chunk_file: Path, dimension_reduction: bool) -> dict:
+def _chunk_writer_options(
+    input_file: Path,
+    chunk_file: Path,
+    bounds_str: str,
+    dimension_reduction: bool,
+) -> dict:
     writer_opts = {
         "type": "writers.las",
         "filename": str(chunk_file),
         "compression": True,
         "forward": "all",
     }
+    writer_opts.update(safe_las_writer_encoding_options_for_pdal_bounds(input_file, bounds_str))
     if dimension_reduction:
         writer_opts["minor_version"] = 2
         writer_opts["dataformat_id"] = 0
@@ -175,7 +192,7 @@ def subsample_tile_chunk(
                         pass
 
         pdal_cmd = get_pdal_path()
-        writer_opts = _chunk_writer_options(chunk_file, dimension_reduction)
+        writer_opts = _chunk_writer_options(input_file, chunk_file, bounds_str, dimension_reduction)
         input_is_copc = is_copc_file(input_file)
         pipeline = _voxel_chunk_pipeline(
             input_file,
@@ -199,10 +216,16 @@ def subsample_tile_chunk(
             )
             result = _run_pdal_pipeline(pipeline, output_dir / f"_pipeline_chunk{chunk_idx}_fallback.json")
             if result.returncode != 0:
-                print(f"      ⚠ Chunk {chunk_idx}/{total_chunks} fallback error: {result.stderr[:100]}")
+                print(
+                    f"      ⚠ Chunk {chunk_idx}/{total_chunks} fallback error "
+                    f"with {encoding_summary(writer_opts)}: {result.stderr[:100]}"
+                )
                 return (None, 0)
         elif result.returncode != 0:
-            print(f"      ⚠ Chunk {chunk_idx}/{total_chunks} error: {result.stderr[:100]}")
+            print(
+                f"      ⚠ Chunk {chunk_idx}/{total_chunks} error "
+                f"with {encoding_summary(writer_opts)}: {result.stderr[:100]}"
+            )
             return (None, 0)
 
         if not chunk_file.exists() or chunk_file.stat().st_size == 0:

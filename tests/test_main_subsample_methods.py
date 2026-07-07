@@ -52,6 +52,17 @@ def _write_test_las(path: Path) -> None:
     las.write(path)
 
 
+def _write_zone_prefixed_las(path: Path) -> None:
+    header = laspy.LasHeader(point_format=3, version="1.2")
+    header.scales = np.array([0.0001, 0.0001, 0.0001])
+    header.offsets = np.array([33368483.433600053, 5630000.0, 120.0])
+    las = laspy.LasData(header)
+    las.x = np.array([33368483.4336, 33368483.4436, 33368483.5536])
+    las.y = np.array([5630000.0, 5630000.01, 5630000.11])
+    las.z = np.array([120.0, 120.01, 120.11])
+    las.write(path, do_compress=True, laz_backend=laspy.LazBackend.LazrsParallel)
+
+
 class SubsamplingMethodTests(unittest.TestCase):
     def test_normalize_subsampling_method_defaults_to_center_of_mass(self):
         self.assertEqual(normalize_subsampling_method(None), SUBSAMPLING_METHOD_CENTER_OF_MASS)
@@ -95,6 +106,52 @@ class SubsamplingMethodTests(unittest.TestCase):
             result = laspy.read(out)
             self.assertEqual(result.header.point_format.id, 0)
             self.assertNotIn("PredInstance", set(result.point_format.dimension_names))
+
+    def test_center_of_mass_preserves_zone_prefixed_source_encoding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            src = tmp_path / "epsg5650.laz"
+            out = tmp_path / "out.laz"
+            _write_zone_prefixed_las(src)
+
+            center_of_mass_subsample_las(src, out, 0.01, dimension_reduction=True)
+
+            result = laspy.read(out)
+            np.testing.assert_allclose(result.header.scales, [0.0001, 0.0001, 0.0001])
+            np.testing.assert_allclose(
+                result.header.offsets,
+                [33368483.433600053, 5630000.0, 120.0],
+            )
+            self.assertTrue(np.all(result.x > 33368483.0))
+
+    def test_copc_center_of_mass_preserves_zone_prefixed_source_encoding(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            src = tmp_path / "epsg5650.laz"
+            out = tmp_path / "out.laz"
+            _write_zone_prefixed_las(src)
+            with laspy.open(str(src), laz_backend=laspy.LazBackend.LazrsParallel) as reader:
+                source_header = reader.header
+
+            fake_reader = mock.Mock()
+            fake_reader.__enter__ = mock.Mock(return_value=fake_reader)
+            fake_reader.__exit__ = mock.Mock(return_value=False)
+            fake_reader.header = source_header
+            fake_reader.query.return_value = FakePoints(
+                x=np.array([33368483.4336, 33368483.4436]),
+                y=np.array([5630000.0, 5630000.01]),
+                z=np.array([120.0, 120.01]),
+            )
+
+            with mock.patch("laspy.copc.CopcReader.open", return_value=fake_reader):
+                subsample_com.center_of_mass_subsample_copc(src, out, 0.01, num_workers=1)
+
+            result = laspy.read(out)
+            np.testing.assert_allclose(result.header.scales, [0.0001, 0.0001, 0.0001])
+            np.testing.assert_allclose(
+                result.header.offsets,
+                [33368483.433600053, 5630000.0, 120.0],
+            )
 
     def test_center_of_mass_xyz_aggregates_without_non_coordinate_attributes(self):
         points = FakePoints(
