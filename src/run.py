@@ -127,6 +127,70 @@ def _transfer_dims_for_instance(params: Parameters) -> list[str]:
     return dims
 
 
+def _comma_paths(value: str | None) -> list[Path]:
+    """Parse a comma-separated path list from CLI/Galaxy parameters."""
+    if not value:
+        return []
+    return [Path(part.strip()) for part in str(value).split(",") if part.strip()]
+
+
+def _prepare_merge_prediction_collection_source(
+    *,
+    prediction_collections: list[Path],
+    reference_dir: Path | None,
+    output_folder: Path,
+    params: Parameters,
+    retile_buffer: float,
+    workers: int,
+) -> Path:
+    """Create one merge-ready segmented folder from one or more prediction collections."""
+    from prediction_collection_remap import remap_prediction_collections_to_original_files
+
+    if not prediction_collections:
+        raise ValueError("At least one segmented collection is required")
+
+    for collection in prediction_collections:
+        if not collection.exists():
+            raise FileNotFoundError(f"Segmented collection not found: {collection}")
+
+    if reference_dir is None:
+        reference_dir = prediction_collections[0]
+        collections_to_add = prediction_collections[1:]
+    else:
+        collections_to_add = prediction_collections
+
+    if not reference_dir.exists():
+        raise FileNotFoundError(f"Reference segmented folder not found: {reference_dir}")
+
+    if not collections_to_add:
+        return reference_dir
+
+    combined_dir = output_folder / "segmented_collections_combined"
+    target_dims = {d.strip() for d in params.remap_dims.split(",") if d.strip()} if params.remap_dims else None
+    print()
+    print("=" * 60)
+    print("Preparing multi-collection merge source")
+    print("=" * 60)
+    print(f"Reference geometry/source: {reference_dir}")
+    print(f"Additional collections: {[str(path) for path in collections_to_add]}")
+    print(f"Combined merge source: {combined_dir}")
+    print(f"Remap tolerance: {params.remap_tolerance}m")
+    print()
+
+    remap_prediction_collections_to_original_files(
+        collections_to_add,
+        reference_dir,
+        combined_dir,
+        tolerance=params.remap_tolerance,
+        num_threads=workers,
+        retile_buffer=retile_buffer,
+        target_dims=target_dims,
+        chunk_size=params.chunk_size or 5_000_000,
+        num_spatial_chunks=params.num_spatial_chunks or params.workers,
+    )
+    return combined_dir
+
+
 def _validate_raw_original_lane(
     raw_input_dir: Path,
     raw_output_dir: Path,
@@ -339,10 +403,14 @@ def run_merge_task(params: Parameters):
         print("Make sure main_remap.py and main_merge.py exist.")
         sys.exit(1)
 
-    # Required arguments - need either subsampled_10cm_folder or segmented_remapped_folder
+    # Required arguments - need either a 10cm segmented source, multiple finalized
+    # prediction collections, or an already-remapped segmented folder.
     # Note: subsampled_10cm_folder is populated by --subsampled-segmented-folder via alias
-    if not params.subsampled_10cm_folder and not params.segmented_remapped_folder:
-        print("Error: --subsampled-segmented-folder (or --subsampled-10cm-folder) or --segmented-remapped-folder is required for merge task")
+    if not params.subsampled_10cm_folder and not params.segmented_folders and not params.segmented_remapped_folder:
+        print(
+            "Error: --subsampled-segmented-folder, --segmented-folders, "
+            "or --segmented-remapped-folder is required for merge task"
+        )
         sys.exit(1)
     if params.subsampled_10cm_folder and params.segmented_remapped_folder:
         print(
@@ -417,17 +485,24 @@ def run_merge_task(params: Parameters):
             subsampled_10cm_dir = Path(params.subsampled_10cm_folder)
             segmented_source_folder = subsampled_10cm_dir
 
-            if not subsampled_10cm_dir.exists():
+        if params.subsampled_10cm_folder or prediction_collections:
+            subsampled_10cm_dir = Path(params.subsampled_10cm_folder) if params.subsampled_10cm_folder else None
+
+            if subsampled_10cm_dir is not None and not subsampled_10cm_dir.exists():
                 print(f"Error: Input directory does not exist: {subsampled_10cm_dir}")
                 sys.exit(1)
 
-            print(f"Input (10cm): {subsampled_10cm_dir}")
+            print(f"Input (10cm): {subsampled_10cm_dir or prediction_collections}")
             print()
 
             # Derive target folder and output folder
             # The resolution folders are now at: tiles_*/subsampled_res1 and tiles_*/subsampled_res2
             # For backward compatibility, also check old naming: subsampled_{resolution}cm
-            parent_dir = subsampled_10cm_dir.parent
+            parent_dir = (
+                subsampled_10cm_dir.parent
+                if subsampled_10cm_dir is not None
+                else prediction_collections[0].parent
+            )
             target_folder = params.subsampled_target_folder
 
             if target_folder is None:

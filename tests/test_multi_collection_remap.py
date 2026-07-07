@@ -20,6 +20,8 @@ from prediction_collection_remap import (  # noqa: E402
     remap_prediction_collections_to_original_files,
     stream_add_collections_to_file,
 )
+from parameters import Parameters  # noqa: E402
+from run import _prepare_merge_prediction_collection_source  # noqa: E402
 
 
 def _base_header() -> laspy.LasHeader:
@@ -164,6 +166,52 @@ class MultiCollectionRemapTests(unittest.TestCase):
             self.assertEqual(out.header.generating_software, "unit-test")
             self.assertEqual(out.header.creation_date, date(2026, 6, 24))
             self.assertTrue(any(v.user_id == "LASF_Projection" and v.record_id == 34735 for v in out.header.vlrs))
+
+    def test_prepares_merge_source_from_multiple_segmented_collections(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            primary_dir = root / "primary"
+            secondary_dir = root / "secondary"
+            output_dir = root / "merge_work"
+            primary_dir.mkdir()
+            secondary_dir.mkdir()
+
+            _write_las(
+                primary_dir / "source.las",
+                {
+                    "PredInstance_FM": np.array([1, 1, 0, 2], dtype=np.uint16),
+                    "PredSemantic_FM": np.array([1, 1, 0, 1], dtype=np.uint8),
+                },
+            )
+            _write_las(
+                secondary_dir / "source.las",
+                {
+                    "PredInstance_FM2": np.array([5, 5, 0, 6], dtype=np.uint16),
+                    "PredSemantic_FM2": np.array([1, 1, 0, 1], dtype=np.uint8),
+                },
+            )
+
+            combined_dir = _prepare_merge_prediction_collection_source(
+                prediction_collections=[primary_dir, secondary_dir],
+                reference_dir=None,
+                output_folder=output_dir,
+                params=Parameters(remap_tolerance=0.001, workers=1, _cli_parse_args=False),
+                retile_buffer=0.0,
+                workers=1,
+            )
+
+            out = laspy.read(combined_dir / "source.las")
+            self.assertEqual(len(out), 4)
+            dims = set(out.point_format.dimension_names) | {dim.name for dim in out.point_format.extra_dimensions}
+            for name in (
+                "PredInstance_FM",
+                "PredSemantic_FM",
+                "PredInstance_FM2",
+                "PredSemantic_FM2",
+            ):
+                self.assertIn(name, dims)
+            np.testing.assert_array_equal(out.PredInstance_FM, np.array([1, 1, 0, 2], dtype=np.uint16))
+            np.testing.assert_array_equal(out.PredInstance_FM2, np.array([5, 5, 0, 6], dtype=np.uint16))
 
     def test_duplicate_prediction_dim_names_fail_before_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
