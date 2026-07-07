@@ -1009,7 +1009,7 @@ docker run --rm --user "$(id -u):$(id -g)" --cpus=20 --memory=50g \
 
 Merge requires `tile_bounds_tindex.json` from the Tile task output. The Galaxy
 wrapper uses the same `run.py` task surface inside
-`ghcr.io/3dtrees-earth/3dtrees_smart_tile:2.2`.
+`ghcr.io/3dtrees-earth/3dtrees_smart_tile:v2.2`.
 
 ### Additional Documentation
 
