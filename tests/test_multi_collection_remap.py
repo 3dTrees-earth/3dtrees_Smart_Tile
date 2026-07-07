@@ -139,6 +139,7 @@ class MultiCollectionRemapTests(unittest.TestCase):
                 output_dir,
                 tolerance=0.001,
                 num_threads=1,
+                prefer_copc_sources=False,
             )
 
             out = laspy.read(output_dir / "source.las")
@@ -235,6 +236,7 @@ class MultiCollectionRemapTests(unittest.TestCase):
                     output_dir,
                     tolerance=0.001,
                     num_threads=1,
+                    prefer_copc_sources=False,
                 )
             self.assertFalse(output_dir.exists())
 
@@ -320,6 +322,7 @@ class MultiCollectionRemapTests(unittest.TestCase):
                     output_dir,
                     tolerance=0.001,
                     num_threads=1,
+                    prefer_copc_sources=False,
                 )
 
     def test_stream_remap_honors_caller_spatial_buffer(self):
@@ -532,6 +535,7 @@ class MultiCollectionRemapTests(unittest.TestCase):
                     output_dir,
                     tolerance=0.001,
                     num_threads=1,
+                    prefer_copc_sources=False,
                 )
 
             raw_path.assert_called_once()

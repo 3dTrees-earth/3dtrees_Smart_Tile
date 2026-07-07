@@ -604,6 +604,7 @@ def remap_prediction_collections_to_original_files(
     target_dims: Optional[Set[str]] = None,
     chunk_size: int = 5_000_000,
     num_spatial_chunks: Optional[int] = None,
+    prefer_copc_sources: bool = True,
 ) -> None:
     """Remap finalized prediction collections onto original files."""
     print(f"\n{'=' * 60}", flush=True)
@@ -612,10 +613,17 @@ def remap_prediction_collections_to_original_files(
 
     if not collections:
         raise ValueError("At least one prediction collection is required")
-    original_files = raw_point_cloud_files(original_input_dir)
+    original_files = (
+        point_cloud_files(original_input_dir)
+        if prefer_copc_sources
+        else raw_point_cloud_files(original_input_dir)
+    )
     if not original_files:
         raise ValueError(f"No LAZ/LAS files found in original input dir: {original_input_dir}")
-    print("  Raw-original mode: ignoring COPC twins in original input dir", flush=True)
+    if prefer_copc_sources:
+        print("  Original mode: preferring COPC twins when present", flush=True)
+    else:
+        print("  Raw-original mode: ignoring COPC twins in original input dir", flush=True)
 
     collection_meta = scan_prediction_collection_metadata(collections, target_dims=target_dims)
     for coll_meta in collection_meta:
@@ -635,7 +643,7 @@ def remap_prediction_collections_to_original_files(
     skipped = 0
     stale = 0
     for input_file in original_files:
-        output_name = input_file.name.replace(".copc.laz", ".laz")
+        output_name = input_file.name[:-9] + ".laz" if input_file.name.lower().endswith(".copc.laz") else input_file.name
         output_file = output_dir / output_name
         if output_file.exists():
             if _existing_output_is_reusable(input_file, output_file, expected_prediction_dims):

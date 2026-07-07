@@ -221,11 +221,12 @@ class RunMergeDirectLazTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             segmented = root / "segmented_remapped"
+            copc_dir = root / "original_copc"
             laz_dir = root / "raw_laz"
             laz_out = root / "raw_enriched"
             out_tiles = root / "output_tiles"
             tile_bounds = root / "tile_bounds_tindex.json"
-            for directory in (segmented, laz_dir):
+            for directory in (segmented, copc_dir, laz_dir):
                 directory.mkdir()
             tile_bounds.write_text('{"tile_buffer": 24.0, "tiles": []}', encoding="utf-8")
 
@@ -235,6 +236,7 @@ class RunMergeDirectLazTests(unittest.TestCase):
                 tile_bounds_json=tile_bounds,
                 output_tiles_folder=out_tiles,
                 output_merged_laz=root / "merged.laz",
+                original_copc_input_dir=copc_dir,
                 original_laz_input_dir=laz_dir,
                 original_laz_output_dir=laz_out,
                 transfer_original_dims_to_merged=False,
@@ -345,13 +347,19 @@ class RunMergeDirectLazTests(unittest.TestCase):
                 _cli_parse_args=False,
             )
 
-            with mock.patch("filter_buffer_instances.filter_buffer_instances_dir") as filter_dir:
+            with mock.patch(
+                "filter_buffer_instances.filter_buffer_instances_dir",
+                return_value={"input_files": 1, "output_files": [root / "segmented_filtered/tile_filtered.laz"]},
+            ) as filter_dir:
                 with mock.patch("main_merge.run_merge") as run_merge:
-                    with self.assertRaises(SystemExit):
+                    with mock.patch(
+                        "prediction_collection_remap.remap_prediction_collections_to_original_files",
+                    ) as remap_original:
                         run.run_merge_task(params)
 
-            filter_dir.assert_not_called()
-            run_merge.assert_not_called()
+            filter_dir.assert_called_once()
+            run_merge.assert_called_once()
+            remap_original.assert_not_called()
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_merge_original_remap_can_skip_processed_merged_file(self):

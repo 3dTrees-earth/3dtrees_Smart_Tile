@@ -32,6 +32,7 @@ import numpy as np
 # Import parameters and core merge function
 from instance_labels import MERGED_OUTPUT_SCALES, validate_merged_output_contract
 from instance_labels import cast_instances_for_output, instance_extra_bytes_params
+from filter_task_support import derive_tile_buffer_from_json
 from parameters import MERGE_PARAMS
 from merge_tiles import merge_tiles as core_merge_tiles
 from point_cloud_outputs import merged_product_header

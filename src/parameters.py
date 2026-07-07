@@ -235,6 +235,18 @@ class Parameters(BaseSettings):
         ),
     )
 
+    original_copc_input_dir: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Optional directory with COPC twins for validating/routing merge or remap "
+            "jobs that also enrich uploaded LAZ/LAS originals."
+        ),
+        validation_alias=AliasChoices(
+            "original-copc-input-dir",
+            "original_copc_input_dir",
+        ),
+    )
+
     original_raw_output_dir: Optional[Path] = Field(
         default=None,
         description=(

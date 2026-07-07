@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Optional, Tuple
@@ -34,6 +35,56 @@ def classify_tree_sidecar_file(path: Path) -> Optional[str]:
     if "trees_info" in lower_name:
         return "_trees_info.txt"
     return "_trees.txt"
+
+
+def derive_tile_buffer_from_json(tile_bounds_json: Path) -> float:
+    """
+    Derive the tile buffer width from tile_bounds_tindex.json.
+
+    Preference order:
+    1. root-level ``tile_buffer``
+    2. per-tile ``bounds`` vs ``core`` difference
+    """
+    tile_bounds_json = Path(tile_bounds_json)
+    with tile_bounds_json.open() as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        root_buffer = data.get("tile_buffer")
+        if root_buffer is not None:
+            return float(root_buffer)
+
+        tiles = data.get("tiles", [])
+        for tile in tiles:
+            bounds = tile.get("bounds")
+            core = tile.get("core")
+            if not bounds or not core:
+                continue
+            try:
+                x_pad = (
+                    float(bounds[0][1])
+                    - float(core[0][1])
+                    + float(core[0][0])
+                    - float(bounds[0][0])
+                ) / 2.0
+                y_pad = (
+                    float(bounds[1][1])
+                    - float(core[1][1])
+                    + float(core[1][0])
+                    - float(bounds[1][0])
+                ) / 2.0
+                pad = max(x_pad, y_pad)
+            except (TypeError, ValueError, IndexError):
+                continue
+            if pad > 0:
+                return float(pad)
+
+    raise ValueError(f"Could not derive tile buffer width from {tile_bounds_json}")
+
+
+def derive_border_zone_width_from_json(tile_bounds_json: Path) -> float:
+    """Derive the default border-zone width from tile buffer metadata."""
+    return derive_tile_buffer_from_json(tile_bounds_json)
 
 
 def validate_pointcloud_header(path: Path) -> Tuple[bool, Optional[str]]:

@@ -143,6 +143,34 @@ def _validate_raw_original_lane(
         sys.exit(1)
 
 
+def _validate_copc_original_lane(copc_input_dir: Path) -> None:
+    """Fail early when an explicit COPC-original lane is missing COPC files."""
+    if not copc_input_dir.exists():
+        print(f"Error: COPC original input directory not found: {copc_input_dir}")
+        sys.exit(1)
+
+    from point_cloud_metadata import copc_files
+
+    if not copc_files(copc_input_dir):
+        print(f"Error: No COPC LAZ files found in original COPC input dir: {copc_input_dir}")
+        sys.exit(1)
+
+
+def _validate_copc_laz_source_pairs(copc_input_dir: Path, raw_input_dir: Path) -> None:
+    """Validate that raw uploaded originals have matching COPC twins when both lanes are used."""
+    from point_cloud_metadata import copc_files, point_cloud_source_key, raw_point_cloud_files
+
+    raw_keys = {point_cloud_source_key(path) for path in raw_point_cloud_files(raw_input_dir)}
+    copc_keys = {point_cloud_source_key(path) for path in copc_files(copc_input_dir)}
+    missing = sorted(raw_keys - copc_keys)
+    if missing:
+        print(
+            "Error: COPC original input dir is missing COPC twins for raw originals: "
+            + ", ".join(missing)
+        )
+        sys.exit(1)
+
+
 def run_tile_task(params: Parameters):
     """
     Run the tile task: COPC conversion, tiling, and subsampling.
@@ -185,6 +213,8 @@ def run_tile_task(params: Parameters):
     tile_buffer = params.tile_buffer
     threads = params.threads
     workers = params.workers
+    tile_source_workers = params.tile_source_workers or workers
+    tile_writer_workers = params.tile_writer_workers or workers
     dimension_reduction = True
     num_spatial_chunks = params.num_spatial_chunks
     subsampling_chunks = num_spatial_chunks or workers
@@ -331,6 +361,7 @@ def run_merge_task(params: Parameters):
     # Import Python modules
     try:
         from instance_labels import MERGED_OUTPUT_SCALES
+        from filter_task_support import derive_tile_buffer_from_json
         from filter_buffer_instances import filter_buffer_instances_dir
         from main_remap import remap_all_tiles
         from main_merge import run_merge
@@ -373,6 +404,15 @@ def run_merge_task(params: Parameters):
     print("=" * 60)
     print("Running Merge Task (Python Pipeline)")
     print("=" * 60)
+    tile_bounds_json = params.tile_bounds_json
+    prediction_collections = comma_paths(params.segmented_folders)
+    if tile_bounds_json and tile_bounds_json.exists():
+        try:
+            buffer = derive_tile_buffer_from_json(tile_bounds_json)
+        except ValueError:
+            buffer = border_zone_width
+    else:
+        buffer = border_zone_width
 
     try:
         if params.original_copc_input_dir and original_input_dir:
@@ -489,7 +529,7 @@ def run_merge_task(params: Parameters):
                 verbose=bool(params.verbose),
                 num_workers=workers,
                 instance_dimension=params.instance_dimension,
-                output_scales=tuple(MERGED_OUTPUT_SCALES),
+                output_scales=None,
             )
 
         elif params.segmented_remapped_folder:
@@ -585,7 +625,7 @@ def run_merge_task(params: Parameters):
                 retile_buffer=retile_buffer,
                 target_dims=set(threedtrees_dims) if threedtrees_dims else None,
                 chunk_size=params.chunk_size or 5_000_000,
-                num_spatial_chunks=params.num_spatial_chunks or params.workers,
+                num_spatial_chunks=params.num_spatial_chunks,
                 prefer_copc_sources=False,
             )
 
@@ -689,7 +729,7 @@ def run_remap_task(params: Parameters):
                 retile_buffer=retile_buffer,
                 target_dims=target_dims,
                 chunk_size=params.chunk_size or 5_000_000,
-                num_spatial_chunks=params.num_spatial_chunks or params.workers,
+                num_spatial_chunks=params.num_spatial_chunks,
             )
         except Exception as e:
             print(f"Error: {e}")
@@ -736,7 +776,7 @@ def run_remap_task(params: Parameters):
             retile_buffer=retile_buffer,
             threedtrees_dims=threedtrees_dims,
             threedtrees_suffix=threedtrees_suffix,
-            num_spatial_chunks=params.num_spatial_chunks or params.workers,
+            num_spatial_chunks=params.num_spatial_chunks,
             chunk_size=params.chunk_size or 5_000_000,
         )
     else:
@@ -793,7 +833,7 @@ def run_remap_task(params: Parameters):
             retile_buffer=retile_buffer,
             threedtrees_dims=threedtrees_dims,
             threedtrees_suffix=threedtrees_suffix,
-            num_spatial_chunks=params.num_spatial_chunks or params.workers,
+            num_spatial_chunks=params.num_spatial_chunks,
             chunk_size=params.chunk_size or 1_000_000,
         )
 
