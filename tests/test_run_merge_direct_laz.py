@@ -4,6 +4,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import laspy
+import numpy as np
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -20,6 +23,75 @@ except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
 
 
 class RunMergeDirectLazTests(unittest.TestCase):
+    def _write_las(
+        self,
+        path: Path,
+        xyz: np.ndarray,
+        *,
+        scales: tuple[float, float, float],
+        with_instance: bool,
+    ) -> None:
+        header = laspy.LasHeader(point_format=3, version="1.2")
+        header.offsets = xyz.min(axis=0)
+        header.scales = np.asarray(scales)
+        las = laspy.LasData(header)
+        las.x = xyz[:, 0]
+        las.y = xyz[:, 1]
+        las.z = xyz[:, 2]
+        if with_instance:
+            las.add_extra_dim(laspy.ExtraBytesParams(name="PredInstance", type=np.uint16))
+            las.PredInstance = np.arange(1, len(xyz) + 1, dtype=np.uint16)
+        las.write(path)
+
+    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
+    def test_single_file_merge_preserves_target_tile_scales(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segmented = root / "segmented"
+            target = root / "target"
+            output_tiles = root / "output_tiles"
+            tile_bounds = root / "tile_bounds_tindex.json"
+            segmented.mkdir()
+            target.mkdir()
+            tile_bounds.write_text('{"tile_buffer": 20.0, "tiles": []}', encoding="utf-8")
+
+            xyz = np.array(
+                [
+                    [1000.001, 2000.001, 50.001],
+                    [1000.011, 2000.011, 50.011],
+                    [1000.021, 2000.021, 50.021],
+                ],
+                dtype=np.float64,
+            )
+            self._write_las(
+                segmented / "tile.las",
+                xyz,
+                scales=(0.001, 0.001, 0.001),
+                with_instance=True,
+            )
+            self._write_las(
+                target / "target.las",
+                xyz,
+                scales=(0.001, 0.001, 0.001),
+                with_instance=False,
+            )
+
+            main_merge.run_merge(
+                segmented_dir=segmented,
+                output_tiles_dir=output_tiles,
+                original_tiles_dir=target,
+                tile_bounds_json=tile_bounds,
+                output_merged=root / "merged.laz",
+                skip_merged_file=True,
+                transfer_original_dims_to_merged=False,
+                num_threads=1,
+            )
+
+            output = laspy.read(output_tiles / "target_segmented.laz")
+            np.testing.assert_allclose(output.header.scales, np.array([0.001, 0.001, 0.001]))
+            self.assertEqual(len(output.points), len(xyz))
+            self.assertIn("PredInstance", output.point_format.dimension_names)
+
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_merge_rejects_ambiguous_segmented_sources(self):
         with tempfile.TemporaryDirectory() as tmpdir:

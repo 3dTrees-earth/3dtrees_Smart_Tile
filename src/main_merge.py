@@ -275,7 +275,7 @@ def run_merge(
             target_file,
             remapped_1cm_file,
             instance_dimension=instance_dimension,
-            output_scales=tuple(MERGED_OUTPUT_SCALES),
+            output_scales=None,
         )
 
         if not success:
