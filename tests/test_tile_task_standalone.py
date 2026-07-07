@@ -68,6 +68,8 @@ class StandaloneTileTaskTests(unittest.TestCase):
             _, tiling_kwargs = fake_main_tile.run_tiling_pipeline.call_args
             self.assertTrue(tiling_kwargs["dimension_reduction"])
             self.assertEqual(tiling_kwargs["chunk_size"], 20_000_000)
+            self.assertEqual(tiling_kwargs["source_file_workers"], 3)
+            self.assertEqual(tiling_kwargs["max_tile_procs"], 3)
             self.assertNotIn("chunkwise_copc_source_creation", tiling_kwargs)
 
             fake_main_subsample.run_subsample_pipeline.assert_called_once()

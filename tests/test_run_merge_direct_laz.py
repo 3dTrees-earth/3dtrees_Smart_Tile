@@ -326,7 +326,7 @@ class RunMergeDirectLazTests(unittest.TestCase):
             self.assertEqual(kwargs["resolution_selector"], "10cm")
             self.assertEqual(kwargs["output_format_selector"], "laz")
             self.assertEqual(kwargs["num_spatial_chunks"], 10)
-            self.assertEqual(kwargs["chunk_workers"], 5)
+            self.assertEqual(kwargs["chunk_workers"], 10)
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_merge_without_laz_original_lane_runs_without_original_outputs(self):
@@ -399,6 +399,113 @@ class RunMergeDirectLazTests(unittest.TestCase):
             self.assertTrue(merge_kwargs["skip_merged_file"])
             remap_original.assert_called_once()
             self.assertEqual(remap_original.call_args.args[0], [root / "output_tiles"])
+
+    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
+    def test_merge_requires_tile_bounds_json_before_processing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segmented = root / "segmented_remapped"
+            segmented.mkdir()
+
+            params = Parameters(
+                task="merge",
+                segmented_remapped_folder=segmented,
+                output_tiles_folder=root / "output_tiles",
+                transfer_original_dims_to_merged=False,
+                workers=1,
+                _cli_parse_args=False,
+            )
+
+            with mock.patch("filter_buffer_instances.filter_buffer_instances_dir") as filter_dir:
+                with mock.patch("main_merge.run_merge") as run_merge:
+                    with self.assertRaises(SystemExit):
+                        run.run_merge_task(params)
+
+            filter_dir.assert_not_called()
+            run_merge.assert_not_called()
+
+    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
+    def test_merge_segmented_folders_prepare_combined_source_before_filtering(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            primary = root / "primary"
+            secondary = root / "secondary"
+            prepared = root / "work" / "segmented_collections_combined"
+            filtered = root / "work" / "segmented_filtered"
+            tile_bounds = root / "tile_bounds_tindex.json"
+            for directory in (primary, secondary):
+                directory.mkdir(parents=True)
+            tile_bounds.write_text('{"tile_buffer": 20.0, "tiles": []}', encoding="utf-8")
+
+            params = Parameters(
+                task="merge",
+                segmented_folders=f"{primary},{secondary}",
+                tile_bounds_json=tile_bounds,
+                output_folder=root / "work",
+                output_tiles_folder=root / "output_tiles",
+                output_merged_laz=root / "merged.laz",
+                transfer_original_dims_to_merged=False,
+                workers=2,
+                num_spatial_chunks=8,
+                _cli_parse_args=False,
+            )
+
+            with mock.patch(
+                "run.prepare_merge_prediction_collection_source",
+                return_value=prepared,
+            ) as prepare:
+                with mock.patch(
+                    "filter_buffer_instances.filter_buffer_instances_dir",
+                    return_value={"input_files": 1, "output_files": [filtered / "tile.laz"]},
+                ) as filter_dir:
+                    with mock.patch("main_merge.run_merge", return_value=root / "merged.laz") as run_merge:
+                        run.run_merge_task(params)
+
+            prepare.assert_called_once()
+            _, prepare_kwargs = prepare.call_args
+            self.assertEqual(prepare_kwargs["prediction_collections"], [primary, secondary])
+            self.assertEqual(prepare_kwargs["output_folder"], root / "work")
+            self.assertEqual(prepare_kwargs["workers"], 2)
+            filter_dir.assert_called_once()
+            self.assertEqual(filter_dir.call_args.kwargs["input_dir"], prepared)
+            run_merge.assert_called_once()
+            self.assertEqual(run_merge.call_args.kwargs["segmented_dir"], filtered)
+
+    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
+    def test_tree_sidecars_disable_cross_tile_matching_and_small_cluster_reassignment(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segmented = root / "segmented_remapped"
+            filtered = root / "segmented_filtered"
+            tile_bounds = root / "tile_bounds_tindex.json"
+            segmented.mkdir()
+            tile_bounds.write_text('{"tile_buffer": 20.0, "tiles": []}', encoding="utf-8")
+
+            params = Parameters(
+                task="merge",
+                segmented_remapped_folder=segmented,
+                tile_bounds_json=tile_bounds,
+                output_tiles_folder=root / "output_tiles",
+                transfer_original_dims_to_merged=False,
+                workers=2,
+                _cli_parse_args=False,
+            )
+
+            with mock.patch(
+                "filter_buffer_instances.filter_buffer_instances_dir",
+                return_value={
+                    "input_files": 1,
+                    "output_files": [filtered / "tile.laz"],
+                    "tree_files": [segmented / "tile_trees.txt"],
+                    "tree_output_files": [filtered / "tile_filtered_trees.txt"],
+                },
+            ):
+                with mock.patch("main_merge.run_merge", return_value=root / "merged.laz") as run_merge:
+                    run.run_merge_task(params)
+
+            run_merge.assert_called_once()
+            self.assertFalse(run_merge.call_args.kwargs["enable_matching"])
+            self.assertFalse(run_merge.call_args.kwargs["enable_volume_merge"])
 
 
 if __name__ == "__main__":

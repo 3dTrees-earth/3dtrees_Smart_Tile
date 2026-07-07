@@ -43,7 +43,7 @@ class MainMergeSingleFileFastPathTests(unittest.TestCase):
             tile_bounds_json = root / "tile_bounds_tindex.json"
             segmented_dir.mkdir()
             original_tiles_dir.mkdir()
-            tile_bounds_json.write_text("{}", encoding="utf-8")
+            tile_bounds_json.write_text('{"tile_buffer": 20.0, "tiles": []}', encoding="utf-8")
             source = segmented_dir / "c00_r00_segmented_filtered.laz"
             _write_segmented_laz(source)
 

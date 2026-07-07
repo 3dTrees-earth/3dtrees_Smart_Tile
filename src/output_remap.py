@@ -765,91 +765,6 @@ def _process_single_original_input_file(args):
                 _match_quality_message(matched_count, n_input_points, tolerance, min_match_fraction),
             )
 
-        if threedtrees_dims:
-            filtered_extras = {
-                name: arr[indices]
-                for name, arr in local_merged_extras.items()
-                if name in threedtrees_dims
-            }
-        else:
-            filtered_extras = {name: arr[indices] for name, arr in local_merged_extras.items()}
-
-        unique_instances = 0
-        for arr in filtered_extras.values():
-            if np.issubdtype(arr.dtype, np.integer) and len(arr) > 0:
-                unique_instances = max(unique_instances, len(np.unique(arr[arr > 0])))
-                break
-
-        branded_names = {}
-        for dim_name in filtered_extras:
-            branded_names[dim_name] = _branded_prediction_name(dim_name, threedtrees_suffix)
-
-        new_header = copy_single_source_header(
-            input_las.header,
-            preserve_extra_dimensions=False,
-        )
-        output_las = laspy.LasData(new_header)
-        output_standard_dim_names = set(output_las.point_format.dimension_names)
-        output_extra_dim_names = {dim.name for dim in output_las.point_format.extra_dimensions}
-
-        extra_dims_to_add = []
-        added_extra_names = output_standard_dim_names | output_extra_dim_names
-        for dim in input_las.point_format.extra_dimensions:
-            if dim.name not in added_extra_names:
-                extra_dims_to_add.append(extra_bytes_params_from_dimension_info(dim))
-                added_extra_names.add(dim.name)
-
-        for dim_name in input_las.point_format.dimension_names:
-            if dim_name not in added_extra_names:
-                arr = getattr(input_las, dim_name, None)
-                dtype = arr.dtype if arr is not None else np.int32
-                extra_dims_to_add.append(laspy.ExtraBytesParams(name=dim_name, type=dtype))
-                added_extra_names.add(dim_name)
-
-        for dim_name, values in filtered_extras.items():
-            desired_name = branded_names[dim_name]
-            out_name = (
-                next_available_suffix(desired_name, added_extra_names)
-                if desired_name in added_extra_names
-                else desired_name
-            )
-            branded_names[dim_name] = out_name
-            if out_name not in added_extra_names:
-                if merged_extra_dim_params and dim_name in merged_extra_dim_params:
-                    params = merged_extra_dim_params[dim_name]
-                    extra_dims_to_add.append(extra_bytes_params_from_params(params, name=out_name))
-                else:
-                    extra_dims_to_add.append(laspy.ExtraBytesParams(name=out_name, type=values.dtype))
-                added_extra_names.add(out_name)
-
-        if extra_dims_to_add:
-            output_las.add_extra_dims(extra_dims_to_add)
-
-        for dim_name in output_las.point_format.dimension_names:
-            try:
-                if hasattr(input_las, dim_name):
-                    setattr(output_las, dim_name, getattr(input_las, dim_name))
-            except Exception:
-                pass
-        for dim in input_las.point_format.extra_dimensions:
-            if hasattr(input_las, dim.name):
-                try:
-                    setattr(output_las, dim.name, getattr(input_las, dim.name))
-                except Exception:
-                    pass
-
-        for dim_name, values in filtered_extras.items():
-            setattr(output_las, branded_names[dim_name], values)
-
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        output_las.write(
-            str(output_file),
-            do_compress=True,
-            laz_backend=laspy.LazBackend.LazrsParallel,
-        )
-
-        del input_las
-        del output_las
         return (input_file.name, matched_count, n_input_points, unique_instances, True, "Success")
 
     except Exception as e:
@@ -974,7 +889,8 @@ def remap_to_original_input_files(
     print(f"  Processing {len(files_to_process)} files...", flush=True)
 
     parallel_workers = min(num_threads, len(files_to_process)) if num_threads > 1 else 1
-    kdtree_workers = kdtree_query_workers(num_threads, parallel_workers)
+    spatial_workers = max(1, int(num_spatial_chunks or num_threads or 1))
+    kdtree_workers = kdtree_query_workers(spatial_workers, parallel_workers)
     process_args = [
         (
             input_file,
@@ -1091,6 +1007,7 @@ def remap_merged_file_to_original_input_files(
             threedtrees_dims=threedtrees_dims,
             threedtrees_suffix=threedtrees_suffix,
             num_spatial_chunks=num_spatial_chunks,
+            chunk_size=chunk_size,
             min_match_fraction=min_match_fraction,
         )
 
@@ -1152,7 +1069,8 @@ def remap_merged_file_to_original_input_files(
         return
 
     parallel_workers = min(max(1, num_threads), len(files_to_process))
-    kdtree_workers = kdtree_query_workers(num_threads, parallel_workers)
+    spatial_workers = max(1, int(num_spatial_chunks or num_threads or 1))
+    kdtree_workers = kdtree_query_workers(spatial_workers, parallel_workers)
     process_args = [
         (
             input_file,

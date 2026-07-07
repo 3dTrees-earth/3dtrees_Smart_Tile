@@ -45,7 +45,7 @@ class RunCreateMergedFileTaskTests(unittest.TestCase):
             self.assertEqual(kwargs["original_with_predictions_dir"], original_with_predictions)
             self.assertEqual(kwargs["output_dir"], output_dir)
             self.assertEqual(kwargs["num_spatial_chunks"], 12)
-            self.assertEqual(kwargs["chunk_workers"], 6)
+            self.assertEqual(kwargs["chunk_workers"], 12)
 
 
 if __name__ == "__main__":

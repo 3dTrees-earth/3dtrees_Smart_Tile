@@ -265,7 +265,7 @@ class RunRemapDirectLazTests(unittest.TestCase):
             _, kwargs = create_prod.call_args
             self.assertEqual(kwargs["original_with_predictions_dir"], laz_out)
             self.assertEqual(kwargs["output_dir"], laz_out.parent)
-            self.assertEqual(kwargs["chunk_workers"], 1)
+            self.assertEqual(kwargs["chunk_workers"], params.num_spatial_chunks)
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_two_collections_enrich_originals_then_create_prod_merged_outputs(self):
@@ -318,7 +318,7 @@ class RunRemapDirectLazTests(unittest.TestCase):
             self.assertEqual(create_kwargs["original_with_predictions_dir"], laz_out)
             self.assertEqual(create_kwargs["resolution_selector"], "1cm")
             self.assertEqual(create_kwargs["output_format_selector"], "laz,copc.laz")
-            self.assertEqual(create_kwargs["chunk_workers"], 1)
+            self.assertEqual(create_kwargs["chunk_workers"], params.num_spatial_chunks)
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_legacy_original_input_dir_is_treated_as_laz_source(self):

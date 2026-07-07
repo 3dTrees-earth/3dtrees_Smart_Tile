@@ -32,8 +32,10 @@ def run_tile_task(params: Parameters):
     tile_buffer = params.tile_buffer
     threads = params.threads
     workers = params.workers
+    tile_source_workers = params.tile_source_workers or workers
+    tile_writer_workers = params.tile_writer_workers or workers
     dimension_reduction = True
-    num_spatial_chunks = params.num_spatial_chunks or threads
+    num_spatial_chunks = params.num_spatial_chunks
     res1 = params.resolution_1
     res2 = params.resolution_2
     tiling_threshold = params.tiling_threshold
@@ -84,11 +86,16 @@ def run_tile_task(params: Parameters):
             import shutil
 
             normalized_tiles_dir = output_dir / f"tiles_{int(tile_length)}m"
+            original_copc_dir = output_dir / "original_copc"
             normalized_tiles_dir.mkdir(exist_ok=True)
+            original_copc_dir.mkdir(exist_ok=True)
             for copc_file in tiles_dir.glob("*.copc.laz"):
                 dest_file = normalized_tiles_dir / copc_file.name
                 if not dest_file.exists():
                     shutil.copy2(copc_file, dest_file)
+                original_copc_file = original_copc_dir / copc_file.name
+                if not original_copc_file.exists():
+                    shutil.copy2(copc_file, original_copc_file)
             tiles_dir = normalized_tiles_dir
             print(
                 "  Note: tiling threshold skipped tile generation; "

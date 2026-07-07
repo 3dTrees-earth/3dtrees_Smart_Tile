@@ -587,9 +587,9 @@ def run_tiling_pipeline(
     tile_length: float = 100,
     tile_buffer: float = 5,
     grid_offset: float = 1.0,
-    num_workers: int = 4,
+    num_workers: int = TILE_PARAMS.get('workers', 2),
     threads: int = 5,
-    max_tile_procs: int = 5,
+    max_tile_procs: int = TILE_PARAMS.get('workers', 2),
     source_file_workers: Optional[int] = None,
     dimension_reduction: bool = True,  # Ignored (kept for API compatibility)
     tiling_threshold: float = None,
@@ -806,8 +806,8 @@ def main():
     parser.add_argument(
         "--max_tile_procs",
         type=int,
-        default=5,
-        help="Maximum parallel tile processes (default: 5)"
+        default=TILE_PARAMS.get('workers', 2),
+        help=f"Maximum parallel tile processes (default: {TILE_PARAMS.get('workers', 2)})"
     )
     parser.add_argument(
         "--source_file_workers",

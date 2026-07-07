@@ -841,7 +841,7 @@ def run_subsample_pipeline(
         res1: First resolution in meters (default: 0.01 = 1cm)
         res2: Second resolution in meters (default: 0.1 = 10cm)
         num_cores: Not used (kept for compatibility)
-        num_threads: Number of parallel chunks per file (default: from TILE_PARAMS['threads'])
+        num_threads: Number of parallel chunks per file (default: available CPU count)
         output_prefix: Optional prefix for output filenames
         output_base_dir: Base directory for output (default: parent of tiles_dir)
         dimension_reduction: If True, write only standard dimensions (minimal); if False, keep extra_dims (e.g. PredInstance).
@@ -857,9 +857,8 @@ def run_subsample_pipeline(
     if num_cores is None:
         num_cores = get_cpu_count()
 
-    # Get num_threads from TILE_PARAMS
     if num_threads is None:
-        num_threads = TILE_PARAMS.get('threads', 10)
+        num_threads = num_cores
 
     # Convert to cm for display/filenames (but use simple directory names)
     res1_cm = int(res1 * 100)
@@ -1024,7 +1023,7 @@ def main():
         "--num_threads",
         type=int,
         default=None,
-        help=f"Number of spatial chunks per file for parallel processing (default: {TILE_PARAMS.get('threads', 5)})"
+        help="Number of spatial chunks per file for parallel processing (default: auto-detected CPU count)"
     )
 
     parser.add_argument(

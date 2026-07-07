@@ -47,6 +47,30 @@ class TileBoundsGraphTests(unittest.TestCase):
         self.assertEqual(tile_to_json, {"c00_r00": 0, "c01_r00": 1})
         self.assertEqual(json_to_tile, {0: "c00_r00", 1: "c01_r00"})
 
+    def test_match_tiles_to_json_bounds_assigns_slightly_offset_tiles_by_best_match(self):
+        json_bounds = [
+            (0.0, 10.0, 0.0, 10.0),
+            (10.0, 20.0, 0.0, 10.0),
+            (20.0, 30.0, 0.0, 10.0),
+        ]
+        centers = [(5.0, 5.0), (15.0, 5.0), (25.0, 5.0)]
+        tile_boundaries = {
+            "left_shifted": (0.42, 10.42, 0.03, 10.03),
+            "middle_shifted": (9.61, 19.61, -0.04, 9.96),
+            "right_shifted": (20.35, 30.35, 0.02, 10.02),
+        }
+
+        tile_to_json, json_to_tile = match_tiles_to_json_bounds(tile_boundaries, json_bounds, centers)
+
+        self.assertEqual(
+            tile_to_json,
+            {"left_shifted": 0, "middle_shifted": 1, "right_shifted": 2},
+        )
+        self.assertEqual(
+            json_to_tile,
+            {0: "left_shifted", 1: "middle_shifted", 2: "right_shifted"},
+        )
+
     def test_match_tiles_to_json_bounds_fails_for_unmatched_tile(self):
         with self.assertRaisesRegex(ValueError, "Unmatched tiles: far_away"):
             match_tiles_to_json_bounds(

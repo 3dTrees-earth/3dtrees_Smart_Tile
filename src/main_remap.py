@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import laspy
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from scipy.spatial import cKDTree
 from laspy.vlrs.vlrlist import VLRList
 
@@ -35,7 +35,7 @@ from tile_bounds_graph import (
     build_neighbor_graph_from_bounds_json,
     match_tiles_to_json_bounds,
 )
-from worker_budget import kdtree_query_workers
+from worker_budget import DEFAULT_FILE_WORKERS, available_cpu_count, file_worker_count, kdtree_query_workers
 
 REMAP_LAZ_BACKEND = getattr(laspy.LazBackend, "Lazrs", laspy.LazBackend.LazrsParallel)
 
@@ -674,7 +674,8 @@ def remap_all_tiles(
     overlap_threshold: float = 99.0,
     verbose: bool = False,
     tile_bounds_json: Optional[Path] = None,
-    num_workers: int = 4,
+    num_workers: int = DEFAULT_FILE_WORKERS,
+    spatial_workers: Optional[int] = None,
     instance_dimension: str = "PredInstance",
     output_scales: Optional[Tuple[float, float, float]] = None,
 ) -> Path:
@@ -691,7 +692,8 @@ def remap_all_tiles(
         overlap_threshold: Minimum spatial overlap percentage required (default: 99.0%)
         verbose: If True, print detailed matching diagnostics
         tile_bounds_json: Optional path to tile_bounds_tindex.json for grid-based matching
-        num_workers: Number of parallel processes (default: 4); use parameters.workers in run.py
+        num_workers: Number of file-level worker processes.
+        spatial_workers: Per-file KDTree query worker budget.
 
     Returns:
         Path to output folder
@@ -757,8 +759,8 @@ def remap_all_tiles(
     if len(work_items) == 0:
         print(f"  All tiles already processed!")
     else:
-        n_procs = min(max(1, num_workers), len(work_items))
-        query_workers = kdtree_query_workers(num_workers, n_procs)
+        n_procs = file_worker_count(num_workers, len(work_items))
+        query_workers = kdtree_query_workers(spatial_workers or num_workers, n_procs)
         work_items = [(*item, query_workers) for item in work_items]
         executor_label = "main process" if n_procs == 1 else f"{n_procs} workers"
         print(
@@ -852,8 +854,16 @@ Examples:
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help="Number of parallel processes (default: 4)"
+        default=DEFAULT_FILE_WORKERS,
+        help=f"File-level parallelism (default: {DEFAULT_FILE_WORKERS})"
+    )
+    parser.add_argument(
+        "--num_spatial_chunks",
+        "--num-spatial-chunks",
+        "--spatial-workers",
+        type=int,
+        default=available_cpu_count(),
+        help="Per-file KDTree worker budget (default: available CPU count)"
     )
     parser.add_argument(
         "--instance_dimension",
@@ -875,6 +885,7 @@ Examples:
             verbose=args.verbose,
             tile_bounds_json=args.tile_bounds_json,
             num_workers=args.workers,
+            spatial_workers=args.num_spatial_chunks,
             instance_dimension=args.instance_dimension,
         )
         print(f"\nRemapped files ready: {output_folder}")

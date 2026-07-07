@@ -13,12 +13,14 @@ Usage:
 """
 
 import argparse
+import shutil
 import numpy as np
 import laspy
 from laspy.vlrs.vlrlist import VLRList
 from pathlib import Path
 from typing import Dict, List, Tuple, Set, Optional
 
+from filter_task_support import classify_tree_sidecar_file, is_tree_sidecar_file
 from instance_labels import validate_prediction_instance_labels
 
 
@@ -74,6 +76,27 @@ def _input_point_clouds(input_dir: Path) -> List[Path]:
             seen.add(key)
             files.append(path)
     return sorted(files, key=lambda p: p.name.lower())
+
+
+def _input_tree_sidecars(input_dir: Path) -> List[Path]:
+    """Return recognized tree sidecar text files in stable order."""
+    return sorted(
+        [
+            path
+            for path in input_dir.glob("*.txt")
+            if is_tree_sidecar_file(path)
+        ],
+        key=lambda p: p.name.lower(),
+    )
+
+
+def _filtered_tree_sidecar_name(path: Path, suffix: str) -> str:
+    """Return the filtered sidecar filename matching the point-cloud suffix policy."""
+    sidecar_suffix = classify_tree_sidecar_file(path) or "_trees.txt"
+    stem = path.name[:-len(sidecar_suffix)] if path.name.lower().endswith(sidecar_suffix) else path.stem
+    if suffix and not stem.endswith(suffix):
+        stem = f"{stem}{suffix}"
+    return f"{stem}{sidecar_suffix}"
 
 
 def _copy_filtered_output_header(source_header: laspy.LasHeader) -> laspy.LasHeader:
@@ -268,16 +291,27 @@ def filter_buffer_instances_dir(
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
     point_clouds = _input_point_clouds(input_dir)
+    tree_sidecars = _input_tree_sidecars(input_dir)
     if output_extension:
         output_extension = output_extension if output_extension.startswith(".") else f".{output_extension}"
         if output_extension.lower() == ".copc.laz":
             raise ValueError("filter outputs are rewritten LAS/LAZ files; use .laz instead of .copc.laz")
 
     if len(point_clouds) == 0:
+        tree_output_files = []
+        if tree_sidecars:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for tree_file in tree_sidecars:
+                tree_output_file = output_dir / _filtered_tree_sidecar_name(tree_file, suffix)
+                shutil.copy2(tree_file, tree_output_file)
+                tree_output_files.append(tree_output_file)
+                print(f"Copied tree sidecar: {tree_file.name} -> {tree_output_file.name}")
         print(f"No LAZ/LAS files found in {input_dir}")
         return {
             "input_files": 0,
             "output_files": [],
+            "tree_files": tree_sidecars,
+            "tree_output_files": tree_output_files,
             "total_original": 0,
             "total_removed": 0,
             "total_instances_removed": 0,
@@ -291,6 +325,8 @@ def filter_buffer_instances_dir(
     print(f"Buffer: {buffer}m")
     print(f"Instance dimension: {instance_dimension}")
     print(f"Found {len(point_clouds)} tiles to process")
+    if tree_sidecars:
+        print(f"Found {len(tree_sidecars)} tree sidecar file(s) to copy")
     print("=" * 60)
 
     all_tile_names = [_tile_base_name(path) for path in point_clouds]
@@ -298,6 +334,7 @@ def filter_buffer_instances_dir(
     total_removed = 0
     total_instances_removed = 0
     output_files = []
+    tree_output_files = []
 
     for input_file in point_clouds:
         extension = output_extension or input_file.suffix
@@ -316,6 +353,14 @@ def filter_buffer_instances_dir(
         total_removed += removed
         total_instances_removed += inst_removed
 
+    if tree_sidecars:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for tree_file in tree_sidecars:
+            tree_output_file = output_dir / _filtered_tree_sidecar_name(tree_file, suffix)
+            shutil.copy2(tree_file, tree_output_file)
+            tree_output_files.append(tree_output_file)
+            print(f"Copied tree sidecar: {tree_file.name} -> {tree_output_file.name}")
+
     print("\n" + "=" * 60)
     print("Summary")
     print("=" * 60)
@@ -327,6 +372,8 @@ def filter_buffer_instances_dir(
     return {
         "input_files": len(point_clouds),
         "output_files": output_files,
+        "tree_files": tree_sidecars,
+        "tree_output_files": tree_output_files,
         "total_original": total_original,
         "total_removed": total_removed,
         "total_instances_removed": total_instances_removed,

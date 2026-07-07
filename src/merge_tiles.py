@@ -40,7 +40,7 @@ from point_cloud_outputs import (
 )
 from merge_deduplication import deduplicate_points
 from merge_instance_ids import global_id
-from merge_instance_matching import assign_and_match_instances
+from merge_instance_matching import InstanceMergeResult, assign_and_match_instances
 from merge_loaded_cloud import (
     load_merged_file,
     reassign_small_instances_in_dims,
@@ -64,7 +64,7 @@ from tile_bounds_graph import (
     build_neighbor_graph_from_bounds_json,
     match_tiles_to_json_bounds,
 )
-from filter_task_support import derive_tile_buffer_from_json
+from filter_task_support import derive_tile_buffer_from_json, is_tree_sidecar_file
 
 # Force unbuffered output for real-time progress feedback
 # (especially important when running in Docker/containers)
@@ -74,6 +74,44 @@ sys.stdout.reconfigure(line_buffering=True)
 def _merge_input_files(input_dir: Path) -> List[Path]:
     """Return merge input files, including mixed LAS/LAZ and preferring COPC twins."""
     return point_cloud_files(input_dir)
+
+
+def input_has_tree_sidecars(input_dir: Path) -> bool:
+    """Return whether a merge/filter input directory contains tree sidecar files."""
+    return any(is_tree_sidecar_file(path) for path in Path(input_dir).glob("*.txt"))
+
+
+def _assign_local_only_instances(
+    tiles,
+    kept_instances_per_tile,
+) -> InstanceMergeResult:
+    """Assign merged IDs without cross-tile matching or orphan recovery."""
+    global_to_merged = {}
+    merged_instance_sources = {}
+    tile_idx_to_name = {}
+    next_merged_id = 1
+
+    print(f"\n{'=' * 60}")
+    print("Stage 2: Assigning local-only instance IDs")
+    print(f"{'=' * 60}")
+    for tile_idx, tile in enumerate(tiles):
+        tile_idx_to_name[tile_idx] = tile.name
+        kept_instances = sorted(inst for inst in kept_instances_per_tile[tile.name] if inst > 0)
+        print(
+            f"  Processing tile {tile_idx + 1}/{len(tiles)}: "
+            f"{tile.name} ({len(kept_instances)} instances)"
+        )
+        for local_inst in kept_instances:
+            gid = global_id(tile_idx, local_inst)
+            global_to_merged[gid] = next_merged_id
+            merged_instance_sources[next_merged_id] = [gid]
+            next_merged_id += 1
+    print(f"  Total local-only merged instances: {next_merged_id - 1}")
+    return InstanceMergeResult(
+        global_to_merged=global_to_merged,
+        merged_instance_sources=merged_instance_sources,
+        tile_idx_to_name=tile_idx_to_name,
+    )
 
 
 def _instance_order_north_to_south(points: np.ndarray, instances: np.ndarray) -> List[int]:
@@ -149,6 +187,14 @@ def merge_tiles(
             "Merge requires this file and will not run without it."
         )
     buffer = derive_tile_buffer_from_json(tile_bounds_json)
+    tree_sidecars_present = input_has_tree_sidecars(input_dir)
+    if tree_sidecars_present:
+        if enable_matching:
+            print("Tree sidecar files detected; disabling cross-tile instance matching.")
+        if enable_volume_merge:
+            print("Tree sidecar files detected; disabling small cluster reassignment.")
+        enable_matching = False
+        enable_volume_merge = False
 
     print("=" * 60)
     print("Tile Merger")
@@ -165,8 +211,10 @@ def merge_tiles(
     if enable_matching:
         print(f"  Overlap threshold: {overlap_threshold}")
         print(f"  Match all instances: {'YES' if match_all_instances else 'NO (border region only)'}")
-    print(f"Small cluster reassignment: ENABLED")
-    print(f"  Min cluster size: {min_cluster_size} points")
+    print(f"Tree sidecar files: {'PRESENT' if tree_sidecars_present else 'none'}")
+    print(f"Small cluster reassignment: {'ENABLED' if enable_volume_merge else 'DISABLED'}")
+    if enable_volume_merge:
+        print(f"  Min cluster size: {min_cluster_size} points")
     print(f"Volume merge: {'ENABLED' if enable_volume_merge else 'DISABLED'}")
     if enable_volume_merge:
         print(f"  Max volume for merge: {max_volume_for_merge} m³")
@@ -390,22 +438,32 @@ def merge_tiles(
     print(f"  ✓ Saved {len(tiles)} filtered tiles as .laz files (filtered instances removed)")
 
     # =========================================================================
-    match_result = assign_and_match_instances(
-        tiles=tiles,
-        tile_boundaries=tile_boundaries,
-        neighbors_by_tile=neighbors_by_tile,
-        kept_instances_per_tile=kept_instances_per_tile,
-        filtered_instances_per_tile=filtered_instances_per_tile,
-        buffer_direction_per_tile=buffer_direction_per_tile,
-        buffer=buffer,
-        border_zone_width=border_zone_width,
-        overlap_threshold=overlap_threshold,
-        correspondence_tolerance=correspondence_tolerance,
-        num_threads=num_threads,
-        debug_instance_ids=debug_instance_ids,
-        match_all_instances=match_all_instances,
-        verbose=verbose,
-    )
+    if enable_matching:
+        match_result = assign_and_match_instances(
+            tiles=tiles,
+            tile_boundaries=tile_boundaries,
+            neighbors_by_tile=neighbors_by_tile,
+            kept_instances_per_tile=kept_instances_per_tile,
+            filtered_instances_per_tile=filtered_instances_per_tile,
+            buffer_direction_per_tile=buffer_direction_per_tile,
+            buffer=buffer,
+            border_zone_width=border_zone_width,
+            overlap_threshold=overlap_threshold,
+            correspondence_tolerance=correspondence_tolerance,
+            num_threads=num_threads,
+            debug_instance_ids=debug_instance_ids,
+            match_all_instances=match_all_instances,
+            verbose=verbose,
+        )
+    else:
+        print(f"\n{'=' * 60}")
+        print("Stage 3: Cross-tile instance matching (SKIPPED)")
+        print(f"{'=' * 60}")
+        if tree_sidecars_present:
+            print("  Tree sidecar input keeps tile instances local; no cross-tile IDs are merged.")
+        else:
+            print("  Instance matching disabled by caller.")
+        match_result = _assign_local_only_instances(tiles, kept_instances_per_tile)
     global_to_merged = match_result.global_to_merged
     merged_instance_sources = match_result.merged_instance_sources
     tile_idx_to_name = match_result.tile_idx_to_name

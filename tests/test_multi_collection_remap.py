@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 
@@ -166,7 +167,61 @@ class MultiCollectionRemapTests(unittest.TestCase):
             self.assertEqual(out.header.system_identifier, "synthetic-source")
             self.assertEqual(out.header.generating_software, "unit-test")
             self.assertEqual(out.header.creation_date, date(2026, 6, 24))
-            self.assertTrue(any(v.user_id == "LASF_Projection" and v.record_id == 34735 for v in out.header.vlrs))
+            projection_vlrs = [
+                v
+                for v in out.header.vlrs
+                if v.user_id == "LASF_Projection" and v.record_id == 34735
+            ]
+            self.assertEqual(len(projection_vlrs), 1)
+
+    def test_remaps_two_segmented_10cm_and_1cm_collections_to_originals(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_dir = root / "originals"
+            segmented_10cm = root / "segmented_10cm"
+            segmented_1cm = root / "segmented_1cm"
+            output_dir = root / "original_with_predictions"
+            original_dir.mkdir()
+            segmented_10cm.mkdir()
+            segmented_1cm.mkdir()
+
+            _write_las(original_dir / "source.las")
+            _write_las(
+                segmented_10cm / "source_10cm.las",
+                {
+                    "PredInstance_10cm": np.array([10, 10, 0, 11], dtype=np.uint16),
+                    "PredSemantic_10cm": np.array([1, 1, 0, 1], dtype=np.uint8),
+                },
+            )
+            _write_las(
+                segmented_1cm / "source_1cm.las",
+                {
+                    "PredInstance_1cm": np.array([20, 20, 0, 21], dtype=np.uint16),
+                    "PredSemantic_1cm": np.array([1, 1, 0, 1], dtype=np.uint8),
+                },
+            )
+
+            remap_prediction_collections_to_original_files(
+                [segmented_10cm, segmented_1cm],
+                original_dir,
+                output_dir,
+                tolerance=0.001,
+                num_threads=2,
+                num_spatial_chunks=4,
+                prefer_copc_sources=False,
+            )
+
+            out = laspy.read(output_dir / "source.las")
+            dims = set(out.point_format.dimension_names) | {dim.name for dim in out.point_format.extra_dimensions}
+            for name in (
+                "PredInstance_10cm",
+                "PredSemantic_10cm",
+                "PredInstance_1cm",
+                "PredSemantic_1cm",
+            ):
+                self.assertIn(name, dims)
+            np.testing.assert_array_equal(out.PredInstance_10cm, np.array([10, 10, 0, 11], dtype=np.uint16))
+            np.testing.assert_array_equal(out.PredInstance_1cm, np.array([20, 20, 0, 21], dtype=np.uint16))
 
     def test_prepares_merge_source_from_multiple_segmented_collections(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -454,7 +509,55 @@ class MultiCollectionRemapTests(unittest.TestCase):
             raw_path.assert_called_once()
             _, kwargs = raw_path.call_args
             self.assertEqual(kwargs["chunk_parallel_workers"], 1)
-            self.assertEqual(kwargs["kdtree_workers"], 6)
+            self.assertEqual(kwargs["kdtree_workers"], 3)
+
+    def test_two_raw_originals_use_two_file_workers_and_spatial_kdtree_budget(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_dir = root / "originals"
+            pred_dir = root / "pred"
+            output_dir = root / "out"
+            original_dir.mkdir()
+            pred_dir.mkdir()
+
+            _write_las(original_dir / "source_a.las")
+            _write_las(original_dir / "source_b.las")
+            _write_las(
+                pred_dir / "source_pred.las",
+                {"PredInstance_Model": np.array([1, 1, 0, 2], dtype=np.uint16)},
+            )
+
+            executor_workers = []
+            real_executor = ThreadPoolExecutor
+
+            def executor_factory(*args, **kwargs):
+                executor_workers.append(kwargs.get("max_workers", args[0] if args else None))
+                return real_executor(*args, **kwargs)
+
+            with mock.patch(
+                "prediction_collection_remap.ThreadPoolExecutor",
+                side_effect=executor_factory,
+            ):
+                with mock.patch(
+                    "prediction_collection_remap.stream_add_collections_to_file",
+                    return_value=(4, 4),
+                ) as raw_path:
+                    remap_prediction_collections_to_original_files(
+                        [pred_dir],
+                        original_dir,
+                        output_dir,
+                        tolerance=0.001,
+                        num_threads=8,
+                        num_spatial_chunks=8,
+                        chunk_size=20_000_000,
+                        prefer_copc_sources=False,
+                    )
+
+            self.assertEqual(executor_workers, [2])
+            self.assertEqual(raw_path.call_count, 2)
+            for call in raw_path.call_args_list:
+                self.assertEqual(call.kwargs["chunk_parallel_workers"], 4)
+                self.assertEqual(call.kwargs["kdtree_workers"], 4)
 
     def test_copc_original_routes_through_spatial_query_fast_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:

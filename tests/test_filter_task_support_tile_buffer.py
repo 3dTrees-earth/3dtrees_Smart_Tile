@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from filter_task_support import derive_tile_buffer_from_json  # noqa: E402
+from filter_task_support import classify_tree_sidecar_file, derive_tile_buffer_from_json, is_tree_sidecar_file  # noqa: E402
 
 
 class TileBufferMetadataTests(unittest.TestCase):
@@ -36,6 +36,13 @@ class TileBufferMetadataTests(unittest.TestCase):
             )
 
             self.assertEqual(derive_tile_buffer_from_json(path), 20.0)
+
+    def test_tree_sidecar_classification_is_preserved(self):
+        self.assertTrue(is_tree_sidecar_file(Path("input_trees.txt")))
+        self.assertTrue(is_tree_sidecar_file(Path("tile_01_trees_info.txt")))
+        self.assertEqual(classify_tree_sidecar_file(Path("tile_01_trees.txt")), "_trees.txt")
+        self.assertEqual(classify_tree_sidecar_file(Path("tile_01_trees_info.txt")), "_trees_info.txt")
+        self.assertIsNone(classify_tree_sidecar_file(Path("tile_01.laz")))
 
 
 if __name__ == "__main__":

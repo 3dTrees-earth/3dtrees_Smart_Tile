@@ -34,7 +34,7 @@ from instance_labels import MERGED_OUTPUT_SCALES, validate_merged_output_contrac
 from instance_labels import cast_instances_for_output, instance_extra_bytes_params
 from filter_task_support import derive_tile_buffer_from_json
 from parameters import MERGE_PARAMS
-from merge_tiles import merge_tiles as core_merge_tiles
+from merge_tiles import input_has_tree_sidecars, merge_tiles as core_merge_tiles
 from point_cloud_outputs import merged_product_header
 from point_cloud_metadata import point_cloud_files as _point_cloud_files
 
@@ -175,6 +175,14 @@ def run_merge(
             "Merge requires this file and will not run without it."
         )
     buffer = derive_tile_buffer_from_json(tile_bounds_json)
+    tree_sidecars_present = input_has_tree_sidecars(segmented_dir)
+    if tree_sidecars_present:
+        if enable_matching:
+            print("Tree sidecar files detected; disabling cross-tile instance matching.")
+        if enable_volume_merge:
+            print("Tree sidecar files detected; disabling small cluster reassignment.")
+        enable_matching = False
+        enable_volume_merge = False
 
     # Auto-derive output path if not provided (inside segmented dir so it is writable e.g. in Docker /out)
     if output_merged is None:
@@ -335,8 +343,10 @@ def run_merge(
     if enable_matching:
         print(f"  Overlap threshold: {overlap_threshold}")
         print(f"  Max centroid distance: {max_centroid_distance}m")
-    print(f"Small cluster reassignment: ENABLED")
-    print(f"  Min cluster size: {min_cluster_size} points")
+    print(f"Tree sidecar files: {'PRESENT' if tree_sidecars_present else 'none'}")
+    print(f"Small cluster reassignment: {'ENABLED' if enable_volume_merge else 'DISABLED'}")
+    if enable_volume_merge:
+        print(f"  Min cluster size: {min_cluster_size} points")
     print(f"Volume merge: {'ENABLED' if enable_volume_merge else 'DISABLED'}")
     if enable_volume_merge:
         print(f"  Max volume: {max_volume_for_merge} m³")

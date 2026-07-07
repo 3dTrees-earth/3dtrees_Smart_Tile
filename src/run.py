@@ -97,8 +97,8 @@ def _create_prod_merged_outputs(
         output_format_selector=params.merged_output_formats,
         res1=params.resolution_1,
         res2=params.resolution_2,
-        num_spatial_chunks=params.num_spatial_chunks or params.workers,
-        chunk_workers=params.workers,
+        num_spatial_chunks=params.num_spatial_chunks,
+        chunk_workers=params.num_spatial_chunks,
         staged_copc_dir=params.staged_copc_dir,
         standardization_json=params.standardization_json,
     )
@@ -114,18 +114,6 @@ def _raw_original_output_dir(params: Parameters, raw_input_dir: Path) -> Path:
     if params.output_dir:
         return Path(params.output_dir)
     return raw_input_dir.parent / "original_with_predictions"
-
-
-def _transfer_dims_for_instance(params: Parameters) -> list[str]:
-    """Return prediction dimensions to transfer, including configured model names."""
-    dims = [d.strip() for d in params.threedtrees_dims.split(",") if d.strip()] if params.threedtrees_dims else []
-    if params.instance_dimension and params.instance_dimension not in dims:
-        dims.append(params.instance_dimension)
-    if params.instance_dimension and "Instance" in params.instance_dimension:
-        semantic_dim = params.instance_dimension.replace("Instance", "Semantic", 1)
-        if semantic_dim not in dims:
-            dims.append(semantic_dim)
-    return dims
 
 
 def _validate_raw_original_lane(
@@ -158,17 +146,70 @@ def _validate_copc_original_lane(copc_input_dir: Path) -> None:
 
 def _validate_copc_laz_source_pairs(copc_input_dir: Path, raw_input_dir: Path) -> None:
     """Validate that raw uploaded originals have matching COPC twins when both lanes are used."""
+    import laspy
     from point_cloud_metadata import copc_files, point_cloud_source_key, raw_point_cloud_files
 
-    raw_keys = {point_cloud_source_key(path) for path in raw_point_cloud_files(raw_input_dir)}
-    copc_keys = {point_cloud_source_key(path) for path in copc_files(copc_input_dir)}
-    missing = sorted(raw_keys - copc_keys)
+    raw_by_key = {point_cloud_source_key(path): path for path in raw_point_cloud_files(raw_input_dir)}
+    copc_by_key = {point_cloud_source_key(path): path for path in copc_files(copc_input_dir)}
+    if not raw_by_key:
+        print(f"Error: No raw LAZ/LAS files found in original input dir: {raw_input_dir}")
+        sys.exit(1)
+    missing = sorted(set(raw_by_key) - set(copc_by_key))
     if missing:
         print(
             "Error: COPC original input dir is missing COPC twins for raw originals: "
             + ", ".join(missing)
         )
         sys.exit(1)
+
+    for key, raw_path in raw_by_key.items():
+        copc_path = copc_by_key[key]
+        with laspy.open(str(raw_path), laz_backend=laspy.LazBackend.LazrsParallel) as raw_reader:
+            raw_header = raw_reader.header
+            raw_count = int(raw_header.point_count)
+            raw_bounds = (
+                float(raw_header.x_min),
+                float(raw_header.x_max),
+                float(raw_header.y_min),
+                float(raw_header.y_max),
+                float(raw_header.z_min),
+                float(raw_header.z_max),
+            )
+        with laspy.open(str(copc_path), laz_backend=laspy.LazBackend.LazrsParallel) as copc_reader:
+            copc_header = copc_reader.header
+            copc_count = int(copc_header.point_count)
+            copc_bounds = (
+                float(copc_header.x_min),
+                float(copc_header.x_max),
+                float(copc_header.y_min),
+                float(copc_header.y_max),
+                float(copc_header.z_min),
+                float(copc_header.z_max),
+            )
+        if raw_count != copc_count:
+            print(
+                f"Error: COPC/raw source pair point-count mismatch for {key}: "
+                f"{copc_path.name} has {copc_count:,}, {raw_path.name} has {raw_count:,}"
+            )
+            sys.exit(1)
+        if any(abs(a - b) > 0.02 for a, b in zip(raw_bounds, copc_bounds)):
+            print(
+                f"Error: COPC/raw source pair bounds mismatch for {key}: "
+                f"{copc_path.name} {copc_bounds} vs {raw_path.name} {raw_bounds}"
+            )
+            sys.exit(1)
+
+
+def _require_tile_bounds_json(tile_bounds_json: Path | None) -> Path:
+    """Return a valid tile bounds JSON path or exit with a production-safe error."""
+    if tile_bounds_json is None:
+        print("Error: merge task requires --tile-bounds-json /path/to/tile_bounds_tindex.json")
+        sys.exit(1)
+    tile_bounds_json = Path(tile_bounds_json)
+    if not tile_bounds_json.exists():
+        print(f"Error: tile_bounds_tindex.json not found: {tile_bounds_json}")
+        sys.exit(1)
+    return tile_bounds_json
 
 
 def run_tile_task(params: Parameters):
@@ -360,7 +401,6 @@ def run_merge_task(params: Parameters):
     """
     # Import Python modules
     try:
-        from instance_labels import MERGED_OUTPUT_SCALES
         from filter_task_support import derive_tile_buffer_from_json
         from filter_buffer_instances import filter_buffer_instances_dir
         from main_remap import remap_all_tiles
@@ -380,10 +420,15 @@ def run_merge_task(params: Parameters):
             "or --segmented-remapped-folder is required for merge task"
         )
         sys.exit(1)
-    if params.subsampled_10cm_folder and params.segmented_remapped_folder:
+    source_modes = [
+        bool(params.subsampled_10cm_folder),
+        bool(params.segmented_folders),
+        bool(params.segmented_remapped_folder),
+    ]
+    if sum(source_modes) > 1:
         print(
-            "Error: --subsampled-segmented-folder/--subsampled-10cm-folder and "
-            "--segmented-remapped-folder are mutually exclusive for merge task"
+            "Error: --subsampled-segmented-folder/--subsampled-10cm-folder, "
+            "--segmented-folders, and --segmented-remapped-folder are mutually exclusive"
         )
         sys.exit(1)
 
@@ -404,14 +449,11 @@ def run_merge_task(params: Parameters):
     print("=" * 60)
     print("Running Merge Task (Python Pipeline)")
     print("=" * 60)
-    tile_bounds_json = params.tile_bounds_json
+    tile_bounds_json = _require_tile_bounds_json(params.tile_bounds_json)
     prediction_collections = comma_paths(params.segmented_folders)
-    if tile_bounds_json and tile_bounds_json.exists():
-        try:
-            buffer = derive_tile_buffer_from_json(tile_bounds_json)
-        except ValueError:
-            buffer = border_zone_width
-    else:
+    try:
+        buffer = derive_tile_buffer_from_json(tile_bounds_json)
+    except ValueError:
         buffer = border_zone_width
 
     try:
@@ -434,7 +476,10 @@ def run_merge_task(params: Parameters):
                 return Path(output_merged).parent
             return input_folder.parent
 
+        tree_sidecars_passed_to_filter = False
+
         def filter_predictions(input_folder: Path) -> Path:
+            nonlocal tree_sidecars_passed_to_filter
             filtered_folder = merge_work_dir(input_folder) / "segmented_filtered"
             print()
             print("=" * 60)
@@ -451,6 +496,12 @@ def run_merge_task(params: Parameters):
             if filter_summary["input_files"] == 0:
                 print(f"Error: No filterable prediction files found in {input_folder}")
                 sys.exit(1)
+            if filter_summary.get("tree_files") or filter_summary.get("tree_output_files"):
+                tree_sidecars_passed_to_filter = True
+                print(
+                    "Tree sidecar files passed through filter; "
+                    "merge will disable cross-tile matching and small cluster reassignment."
+                )
             return filtered_folder
 
         # Step 1: Filter predictions, then remap if a source-resolution folder is provided.
@@ -462,24 +513,19 @@ def run_merge_task(params: Parameters):
             subsampled_10cm_dir = Path(params.subsampled_10cm_folder)
             segmented_source_folder = subsampled_10cm_dir
 
-        if params.subsampled_10cm_folder or prediction_collections:
-            subsampled_10cm_dir = Path(params.subsampled_10cm_folder) if params.subsampled_10cm_folder else None
-
-            if subsampled_10cm_dir is not None and not subsampled_10cm_dir.exists():
+        if params.subsampled_10cm_folder:
+            subsampled_10cm_dir = Path(params.subsampled_10cm_folder)
+            if not subsampled_10cm_dir.exists():
                 print(f"Error: Input directory does not exist: {subsampled_10cm_dir}")
                 sys.exit(1)
 
-            print(f"Input (10cm): {subsampled_10cm_dir or prediction_collections}")
+            print(f"Input (10cm): {subsampled_10cm_dir}")
             print()
 
             # Derive target folder and output folder
             # The resolution folders are now at: tiles_*/subsampled_res1 and tiles_*/subsampled_res2
             # For backward compatibility, also check old naming: subsampled_{resolution}cm
-            parent_dir = (
-                subsampled_10cm_dir.parent
-                if subsampled_10cm_dir is not None
-                else prediction_collections[0].parent
-            )
+            parent_dir = subsampled_10cm_dir.parent
             target_folder = params.subsampled_target_folder
 
             if target_folder is None:
@@ -505,20 +551,7 @@ def run_merge_task(params: Parameters):
             filtered_segmented_folder = filter_predictions(subsampled_10cm_dir)
 
             # Optional: tile_bounds_tindex.json for remap matching (use --tile_bounds_json first)
-            remap_tile_bounds_json = None
-            if tile_bounds_json.exists():
-                remap_tile_bounds_json = tile_bounds_json
-            if remap_tile_bounds_json is None:
-                remap_json_candidates = [
-                    parent_dir / "tile_bounds_tindex.json",
-                    subsampled_10cm_dir / "tile_bounds_tindex.json",
-                ]
-                if params.original_tiles_dir:
-                    remap_json_candidates.insert(0, Path(params.original_tiles_dir) / "tile_bounds_tindex.json")
-                for p in remap_json_candidates:
-                    if p.exists():
-                        remap_tile_bounds_json = p
-                        break
+            remap_tile_bounds_json = tile_bounds_json
 
             # Remap - source is filtered segmented predictions, target is the configured resolution-1 subsample
             segmented_for_merge_folder = remap_all_tiles(
@@ -528,9 +561,30 @@ def run_merge_task(params: Parameters):
                 tile_bounds_json=remap_tile_bounds_json,
                 verbose=bool(params.verbose),
                 num_workers=workers,
+                spatial_workers=params.num_spatial_chunks,
                 instance_dimension=params.instance_dimension,
                 output_scales=None,
             )
+
+        elif prediction_collections:
+            print(f"Input prediction collections: {prediction_collections}")
+            print()
+
+            collection_work_dir = (
+                Path(params.output_folder)
+                if params.output_folder
+                else merge_work_dir(prediction_collections[0])
+            )
+            segmented_source_folder = prepare_merge_prediction_collection_source(
+                prediction_collections=prediction_collections,
+                reference_dir=None,
+                output_folder=collection_work_dir,
+                params=params,
+                retile_buffer=retile_buffer,
+                workers=workers,
+            )
+            filtered_segmented_folder = filter_predictions(segmented_source_folder)
+            segmented_for_merge_folder = filtered_segmented_folder
 
         elif params.segmented_remapped_folder:
             segmented_source_folder = Path(params.segmented_remapped_folder)
@@ -597,9 +651,9 @@ def run_merge_task(params: Parameters):
             border_zone_width=border_zone_width,
             min_cluster_size=min_cluster_size,
             num_threads=workers,
-            enable_matching=not params.disable_matching,
+            enable_matching=not params.disable_matching and not tree_sidecars_passed_to_filter,
             require_overlap=True,
-            enable_volume_merge=not params.disable_volume_merge,
+            enable_volume_merge=not params.disable_volume_merge and not tree_sidecars_passed_to_filter,
             skip_merged_file=params.skip_merged_file,
             verbose=params.verbose,
             retile_buffer=retile_buffer,
@@ -895,8 +949,8 @@ def run_create_merged_file_task(params: Parameters):
             output_format_selector=params.merged_output_formats,
             res1=params.resolution_1,
             res2=params.resolution_2,
-            num_spatial_chunks=params.num_spatial_chunks or params.workers,
-            chunk_workers=params.workers,
+            num_spatial_chunks=params.num_spatial_chunks,
+            chunk_workers=params.num_spatial_chunks,
             staged_copc_dir=params.staged_copc_dir,
             standardization_json=params.standardization_json,
         )

@@ -26,7 +26,7 @@ from point_cloud_metadata import (
     raw_point_cloud_files,
 )
 from dimension_transfer import next_available_suffix
-from worker_budget import kdtree_query_workers
+from worker_budget import file_worker_count, kdtree_query_workers
 
 
 def prediction_collection_files(path: Path) -> List[Path]:
@@ -710,15 +710,11 @@ def remap_prediction_collections_to_original_files(
 
     total_points = 0
     total_matches = 0
-    parallel_workers = min(max(1, num_threads), len(files_to_process))
-    if parallel_workers == 1:
-        raw_chunk_workers = max(1, min(num_threads, num_spatial_chunks or num_threads))
-        _, active_raw_chunk_workers = _parallel_raw_chunk_plan(chunk_size, raw_chunk_workers)
-        query_workers = kdtree_query_workers(num_threads, active_raw_chunk_workers)
-    else:
-        raw_chunk_workers = 1
-        active_raw_chunk_workers = 1
-        query_workers = kdtree_query_workers(num_threads, parallel_workers)
+    parallel_workers = file_worker_count(num_threads, len(files_to_process))
+    spatial_workers = max(1, int(num_spatial_chunks or num_threads or 1))
+    raw_chunk_workers = spatial_workers
+    _, active_raw_chunk_workers = _parallel_raw_chunk_plan(chunk_size, raw_chunk_workers)
+    query_workers = kdtree_query_workers(spatial_workers, parallel_workers)
     print(
         f"  Processing {len(files_to_process)} original files with {parallel_workers} worker(s); "
         f"{active_raw_chunk_workers} raw chunk worker(s)"

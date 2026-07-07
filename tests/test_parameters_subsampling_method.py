@@ -25,6 +25,13 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
         self.assertEqual(get_tile_params(params)["subsampling_method"], "center-of-mass")
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
+    def test_default_worker_policy_is_two_files_and_cpu_spatial_chunks(self):
+        params = Parameters(_cli_parse_args=False)
+
+        self.assertEqual(params.workers, 2)
+        self.assertGreaterEqual(params.num_spatial_chunks, 1)
+
+    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_subsampling_method_alias_normalizes_to_nearest_to_centroid(self):
         params = Parameters(subsampling_method="centroid", _cli_parse_args=False)
 
@@ -44,6 +51,13 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
         self.assertEqual(params.merged_output_formats, "copc.laz")
         self.assertIsNone(params.staged_copc_dir)
         self.assertEqual(params.remap_tolerance, 0.125)
+
+    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
+    def test_legacy_produce_merged_file_selects_prod_merged_creation(self):
+        params = Parameters(produce_merged_file=True, _cli_parse_args=False)
+
+        self.assertTrue(params.produce_merged_file)
+        self.assertTrue(params.transfer_original_dims_to_merged)
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_staged_copc_dir_alias_is_available(self):

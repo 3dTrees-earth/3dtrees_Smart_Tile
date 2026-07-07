@@ -10,10 +10,12 @@ Usage:
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, AliasChoices, field_validator
+from pydantic import Field, AliasChoices, field_validator, model_validator
 from pathlib import Path
 from collections.abc import Iterable
 from typing import Optional
+
+from worker_budget import DEFAULT_FILE_WORKERS, available_cpu_count
 
 
 class Parameters(BaseSettings):
@@ -52,8 +54,8 @@ class Parameters(BaseSettings):
     )
 
     workers: int = Field(
-        4,
-        description="Number of parallel workers for processing",
+        DEFAULT_FILE_WORKERS,
+        description="File-level parallelism. Defaults to two files processed concurrently.",
         validation_alias=AliasChoices("workers", "number-of-threads", "number_of_threads"),
     )
 
@@ -151,8 +153,8 @@ class Parameters(BaseSettings):
     )
 
     num_spatial_chunks: Optional[int] = Field(
-        default=None,
-        description="Per-file spatial/chunk parallelism: subsampling windows, COPC remap windows, or raw-original remap chunk workers (default: equals workers)",
+        default_factory=available_cpu_count,
+        description="Per-file spatial/chunk parallelism. Defaults to available CPU count.",
         validation_alias=AliasChoices("num-spatial-chunks", "num_spatial_chunks"),
     )
 
@@ -616,6 +618,14 @@ class Parameters(BaseSettings):
             raise ValueError("filter_anchor must be 'centroid', 'highest_point', or 'lowest_point'")
         return normalized
 
+    @model_validator(mode="after")
+    def sync_prod_merged_flags(self):
+        """Keep legacy Galaxy prod-merged selection and implementation flag aligned."""
+        if self.produce_merged_file or self.transfer_original_dims_to_merged:
+            self.produce_merged_file = True
+            self.transfer_original_dims_to_merged = True
+        return self
+
     @field_validator("merged_output_formats", mode="before")
     @classmethod
     def validate_merged_output_formats(cls, v):
@@ -785,7 +795,7 @@ TILE_PARAMS = {
     'tile_length': 100,
     'tile_buffer': 20,
     'threads': 10,
-    'workers': 4,
+    'workers': DEFAULT_FILE_WORKERS,
     'resolution_1': 0.01,
     'resolution_2': 0.1,
     'output_copc_res1': True,
@@ -796,7 +806,7 @@ TILE_PARAMS = {
 
 REMAP_PARAMS = {
     'target_resolution_cm': 2,
-    'workers': 4,
+    'workers': DEFAULT_FILE_WORKERS,
 }
 
 MERGE_PARAMS = {
@@ -804,7 +814,7 @@ MERGE_PARAMS = {
     'max_centroid_distance': 3.0,
     'max_volume_for_merge': 4.0,
     'min_cluster_size': 300,
-    'workers': 4,
+    'workers': DEFAULT_FILE_WORKERS,
     'verbose': True,
     'retile_buffer': 2.0,  # Fixed to 2.0m
 }

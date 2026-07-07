@@ -515,6 +515,29 @@ class CreateMergedFileTests(unittest.TestCase):
 
             self.assertTrue((tmp_path / "_prod_merged_10cm_chunks").exists())
 
+    def test_create_prod_merged_chunks_skips_empty_spatial_chunks_and_preserves_order(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            first = tmp_path / "chunk0.laz"
+            third = tmp_path / "chunk2.laz"
+
+            with mock.patch(
+                "main_create_merged_file._create_prod_merged_chunk",
+                side_effect=[first, None, third],
+            ) as create_chunk:
+                chunks = _create_prod_merged_chunks(
+                    [tmp_path / "input.copc.laz"],
+                    tmp_path,
+                    "prod_merged_10cm",
+                    ["bounds-0", "bounds-1", "bounds-2"],
+                    0.1,
+                    {},
+                    chunk_workers=1,
+                )
+
+        self.assertEqual(chunks, [first, third])
+        self.assertEqual(create_chunk.call_count, 3)
+
     def test_direct_untwine_uses_configured_temp_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

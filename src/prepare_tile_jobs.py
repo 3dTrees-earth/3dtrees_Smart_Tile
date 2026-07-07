@@ -15,16 +15,22 @@ import sys
 import argparse
 from typing import List, Tuple
 
-try:
-    from pyproj import Transformer
-except ImportError as exc:  # pragma: no cover
-    sys.stderr.write(
-        "pyproj is required. Install it in your environment (e.g. pip install pyproj).\n"
-    )
-    raise
-
 
 DEFAULT_BOUNDS_JSON = Path("tile_bounds_tindex.json")
+
+
+def _transformer_from_crs(srs: str):
+    """Create a geographic transformer when pyproj is available."""
+    try:
+        from pyproj import Transformer
+    except ImportError:
+        print(
+            "[prepare_tile_jobs] Warning: pyproj unavailable; "
+            "writing projected bounds as geographic fallback",
+            file=sys.stderr,
+        )
+        return None
+    return Transformer.from_crs(srs, "EPSG:4326", always_xy=True)
 
 
 def run_get_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, bounds_json_path: Path) -> dict:
@@ -72,7 +78,7 @@ def write_job_list(bounds_json: Path, job_file: Path) -> None:
     transformer = None
     if srs != "missing":
         try:
-            transformer = Transformer.from_crs(srs, "EPSG:4326", always_xy=True)
+            transformer = _transformer_from_crs(srs)
         except Exception as e:
             print(f"[prepare_tile_jobs] Warning: Could not create transformer from {srs} to EPSG:4326: {e}", file=sys.stderr)
 

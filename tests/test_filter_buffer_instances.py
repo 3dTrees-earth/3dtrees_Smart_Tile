@@ -84,6 +84,41 @@ class FilterBufferInstancesTests(unittest.TestCase):
             self.assertTrue((output_dir / "c00_r00_segmented_filtered.laz").exists())
             self.assertFalse((output_dir / "c00_r00_segmented_filtered.las").exists())
 
+    def test_filter_directory_copies_tree_sidecars_with_filtered_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            (input_dir / "c00_r00_segmented.laz").touch()
+            (input_dir / "c00_r00_trees.txt").write_text("tree rows\n", encoding="utf-8")
+            (input_dir / "c00_r00_trees_info.txt").write_text("tree info\n", encoding="utf-8")
+
+            def fake_process(input_file, output_file, all_tile_names, buffer, instance_dimension):
+                output_file.parent.mkdir(parents=True, exist_ok=True)
+                output_file.touch()
+                return (1, 0, 0)
+
+            with mock.patch.object(filter_mod, "process_tile", side_effect=fake_process):
+                summary = filter_mod.filter_buffer_instances_dir(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    output_extension=".laz",
+                )
+
+            self.assertEqual([path.name for path in summary["tree_files"]], [
+                "c00_r00_trees.txt",
+                "c00_r00_trees_info.txt",
+            ])
+            self.assertEqual([path.name for path in summary["tree_output_files"]], [
+                "c00_r00_filtered_trees.txt",
+                "c00_r00_filtered_trees_info.txt",
+            ])
+            self.assertEqual(
+                (output_dir / "c00_r00_filtered_trees.txt").read_text(encoding="utf-8"),
+                "tree rows\n",
+            )
+
     def test_filter_directory_rejects_copc_output_extension(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
