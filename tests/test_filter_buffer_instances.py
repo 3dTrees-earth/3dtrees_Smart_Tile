@@ -13,6 +13,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import filter_buffer_instances as filter_mod  # noqa: E402
 
 
+def _write_segmented_laz(path: Path, x, y, z, instances) -> None:
+    header = laspy.LasHeader(point_format=3, version="1.2")
+    las = laspy.LasData(header)
+    las.x = np.asarray(x, dtype=np.float64)
+    las.y = np.asarray(y, dtype=np.float64)
+    las.z = np.asarray(z, dtype=np.float64)
+    las.add_extra_dim(laspy.ExtraBytesParams(name="PredInstance", type=np.uint16))
+    las.PredInstance = np.asarray(instances, dtype=np.uint16)
+    las.write(str(path), do_compress=True, laz_backend=laspy.LazBackend.LazrsParallel)
+
+
 class FilterBufferInstancesTests(unittest.TestCase):
     def test_get_tile_neighbors_treats_non_grid_names_as_edge_tiles(self):
         self.assertEqual(
@@ -117,6 +128,63 @@ class FilterBufferInstancesTests(unittest.TestCase):
             self.assertEqual(
                 (output_dir / "c00_r00_filtered_trees.txt").read_text(encoding="utf-8"),
                 "tree rows\n",
+            )
+
+    def test_filter_directory_prunes_tree_sidecars_to_remaining_instances(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            _write_segmented_laz(
+                input_dir / "c00_r00_segmented.laz",
+                x=[0.0, 1.0, 9.4, 9.7],
+                y=[0.0, 0.2, 0.0, 0.2],
+                z=[0.0, 0.0, 0.0, 0.0],
+                instances=[1, 1, 2, 2],
+            )
+            _write_segmented_laz(
+                input_dir / "c01_r00_segmented.laz",
+                x=[10.0, 11.0],
+                y=[0.0, 0.2],
+                z=[0.0, 0.0],
+                instances=[0, 0],
+            )
+            (input_dir / "c00_r00_trees.txt").write_text(
+                "meta\n"
+                "header\n"
+                "tree-1\n"
+                "tree-2\n"
+                "tree-3\n",
+                encoding="utf-8",
+            )
+            (input_dir / "c00_r00_trees_info.txt").write_text(
+                "info-meta\n"
+                "info-header\n"
+                "info-1\n"
+                "info-2\n",
+                encoding="utf-8",
+            )
+
+            summary = filter_mod.filter_buffer_instances_dir(
+                input_dir=input_dir,
+                output_dir=output_dir,
+                buffer=10.0,
+                output_extension=".laz",
+            )
+
+            self.assertEqual(summary["total_instances_removed"], 1)
+            self.assertEqual(
+                (output_dir / "c00_r00_filtered_trees.txt").read_text(encoding="utf-8"),
+                "meta\n"
+                "header\n"
+                "tree-1\n",
+            )
+            self.assertEqual(
+                (output_dir / "c00_r00_filtered_trees_info.txt").read_text(encoding="utf-8"),
+                "info-meta\n"
+                "info-header\n"
+                "info-1\n",
             )
 
     def test_filter_directory_rejects_copc_output_extension(self):

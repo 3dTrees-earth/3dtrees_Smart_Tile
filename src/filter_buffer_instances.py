@@ -99,6 +99,84 @@ def _filtered_tree_sidecar_name(path: Path, suffix: str) -> str:
     return f"{stem}{sidecar_suffix}"
 
 
+def _tree_sidecar_tile_base(path: Path) -> str:
+    """Return the tile id implied by a tree sidecar filename."""
+    sidecar_suffix = classify_tree_sidecar_file(path) or "_trees.txt"
+    name = path.name
+    if name.lower().endswith(sidecar_suffix):
+        return name[: -len(sidecar_suffix)]
+    return path.stem
+
+
+def _tree_sidecars_for_tile(
+    tree_sidecars: List[Path],
+    tile_name: str,
+    single_tile: bool,
+) -> List[Path]:
+    """Return tree sidecars that correspond to one filtered tile."""
+    matches = [
+        path
+        for path in tree_sidecars
+        if _tree_sidecar_tile_base(path) in {tile_name, f"{tile_name}_segmented"}
+    ]
+    if single_tile and not matches:
+        return list(tree_sidecars)
+    return matches
+
+
+def _remaining_instance_ids(output_file: Path, instance_dimension: str) -> Optional[Set[int]]:
+    """Return positive instance IDs present in a filtered tile, or None if unreadable."""
+    try:
+        las = laspy.read(str(output_file), laz_backend=laspy.LazBackend.LazrsParallel)
+    except Exception as exc:
+        print(f"  Warning: could not inspect filtered instances in {output_file.name}: {exc}")
+        return None
+
+    if hasattr(las, instance_dimension):
+        instances = np.array(getattr(las, instance_dimension))
+    elif hasattr(las, "treeID"):
+        instances = np.array(las.treeID)
+    else:
+        print(f"  Warning: no instance attribute ({instance_dimension}/treeID) in {output_file.name}; tree sidecar copied unchanged")
+        return None
+
+    return {int(value) for value in np.unique(instances) if int(value) > 0}
+
+
+def _write_pruned_tree_sidecar(
+    tree_file: Path,
+    output_file: Path,
+    present_instance_ids: Optional[Set[int]],
+) -> None:
+    """Write a tree sidecar containing only rows whose local tree IDs remain."""
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    if present_instance_ids is None:
+        shutil.copy2(tree_file, output_file)
+        print(f"Copied tree sidecar unchanged: {tree_file.name} -> {output_file.name}")
+        return
+
+    with tree_file.open("r", encoding="utf-8") as handle:
+        lines = handle.readlines()
+
+    out_lines = []
+    data_idx = 0
+    for line_no, line in enumerate(lines):
+        if line_no < 2:
+            out_lines.append(line)
+            continue
+        local_id = data_idx + 1
+        data_idx += 1
+        if local_id in present_instance_ids:
+            out_lines.append(line)
+
+    with output_file.open("w", encoding="utf-8") as handle:
+        handle.writelines(out_lines)
+    print(
+        f"Pruned tree sidecar: {tree_file.name} -> {output_file.name} "
+        f"({len(present_instance_ids)}/{data_idx} instance rows kept)"
+    )
+
+
 def _copy_filtered_output_header(source_header: laspy.LasHeader) -> laspy.LasHeader:
     """Copy source metadata for a filtered LAZ output."""
     header = source_header.copy()
@@ -335,6 +413,8 @@ def filter_buffer_instances_dir(
     total_instances_removed = 0
     output_files = []
     tree_output_files = []
+    written_tree_sources = set()
+    single_tile = len(point_clouds) == 1
 
     for input_file in point_clouds:
         extension = output_extension or input_file.suffix
@@ -353,13 +433,31 @@ def filter_buffer_instances_dir(
         total_removed += removed
         total_instances_removed += inst_removed
 
-    if tree_sidecars:
+        matching_tree_sidecars = _tree_sidecars_for_tile(
+            tree_sidecars,
+            _tile_base_name(input_file),
+            single_tile,
+        )
+        if matching_tree_sidecars:
+            present_instance_ids = _remaining_instance_ids(output_file, instance_dimension)
+            for tree_file in matching_tree_sidecars:
+                tree_output_file = output_dir / _filtered_tree_sidecar_name(tree_file, suffix)
+                _write_pruned_tree_sidecar(tree_file, tree_output_file, present_instance_ids)
+                tree_output_files.append(tree_output_file)
+                written_tree_sources.add(tree_file.resolve())
+
+    unmatched_tree_sidecars = [
+        tree_file
+        for tree_file in tree_sidecars
+        if tree_file.resolve() not in written_tree_sources
+    ]
+    if unmatched_tree_sidecars:
         output_dir.mkdir(parents=True, exist_ok=True)
-        for tree_file in tree_sidecars:
+        for tree_file in unmatched_tree_sidecars:
             tree_output_file = output_dir / _filtered_tree_sidecar_name(tree_file, suffix)
             shutil.copy2(tree_file, tree_output_file)
             tree_output_files.append(tree_output_file)
-            print(f"Copied tree sidecar: {tree_file.name} -> {tree_output_file.name}")
+            print(f"Copied unmatched tree sidecar unchanged: {tree_file.name} -> {tree_output_file.name}")
 
     print("\n" + "=" * 60)
     print("Summary")
