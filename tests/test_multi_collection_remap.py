@@ -21,7 +21,7 @@ from prediction_collection_remap import (  # noqa: E402
     stream_add_collections_to_file,
 )
 from parameters import Parameters  # noqa: E402
-from run import _prepare_merge_prediction_collection_source  # noqa: E402
+from merge_prediction_collections import prepare_merge_prediction_collection_source  # noqa: E402
 
 
 def _base_header() -> laspy.LasHeader:
@@ -191,7 +191,7 @@ class MultiCollectionRemapTests(unittest.TestCase):
                 },
             )
 
-            combined_dir = _prepare_merge_prediction_collection_source(
+            combined_dir = prepare_merge_prediction_collection_source(
                 prediction_collections=[primary_dir, secondary_dir],
                 reference_dir=None,
                 output_folder=output_dir,
