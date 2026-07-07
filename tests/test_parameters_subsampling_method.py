@@ -36,11 +36,14 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
             Parameters(subsampling_method="voxel-center", _cli_parse_args=False)
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
-    def test_default_merged_output_format_is_copc_laz(self):
+    def test_default_prod_merged_generation_is_off_and_copc_when_enabled(self):
         params = Parameters(_cli_parse_args=False)
 
+        self.assertFalse(params.produce_merged_file)
+        self.assertFalse(params.transfer_original_dims_to_merged)
         self.assertEqual(params.merged_output_formats, "copc.laz")
         self.assertIsNone(params.staged_copc_dir)
+        self.assertEqual(params.remap_tolerance, 0.125)
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_staged_copc_dir_alias_is_available(self):
@@ -51,13 +54,11 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_raw_original_lane_aliases_are_available(self):
         params = Parameters(
-            original_copc_input_dir="/tmp/copc",
             original_laz_input_dir="/tmp/raw",
             original_laz_output_dir="/tmp/raw-out",
             _cli_parse_args=False,
         )
 
-        self.assertEqual(params.original_copc_input_dir, Path("/tmp/copc"))
         self.assertEqual(params.original_raw_input_dir, Path("/tmp/raw"))
         self.assertEqual(params.original_raw_output_dir, Path("/tmp/raw-out"))
 

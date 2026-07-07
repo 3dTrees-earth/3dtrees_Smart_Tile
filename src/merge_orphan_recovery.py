@@ -113,6 +113,14 @@ def recover_orphaned_instances(
     print("\n  Checking for orphaned filtered instances...")
 
     tile_idx_to_name = {idx: tile.name for idx, tile in enumerate(tiles)}
+    if not any(
+        inst_id > 0
+        for instances in filtered_instances_per_tile.values()
+        for inst_id in instances
+    ):
+        print("  No filtered instances; skipping orphan recovery")
+        return tile_idx_to_name
+
     instance_bboxes = _build_instance_bboxes(
         tiles,
         kept_instances_per_tile,

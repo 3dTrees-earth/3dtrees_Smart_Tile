@@ -11,6 +11,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from output_remap import (  # noqa: E402
+    _branded_prediction_name,
     remap_merged_file_to_original_input_files,
     remap_to_original_input_files,
     retile_to_original_files,
@@ -83,6 +84,13 @@ class _FakeCopcReader:
     def spatial_query(self, bounds):
         self.query_count += 1
         return _FakeCopcRecord(self.points, self.pred_instance)
+
+
+class PredictionBrandingTests(unittest.TestCase):
+    def test_suffix_is_not_added_twice(self):
+        self.assertEqual(_branded_prediction_name("PredInstance", "SAT"), "PredInstance_SAT")
+        self.assertEqual(_branded_prediction_name("PredInstance_SAT", "SAT"), "PredInstance_SAT")
+        self.assertEqual(_branded_prediction_name("PredInstance_SAT", ""), "PredInstance_SAT")
 
 
 class OutputRemapTests(unittest.TestCase):
@@ -346,47 +354,6 @@ class OutputRemapTests(unittest.TestCase):
             ["tile_a.laz", "tile_b.las"],
         )
 
-    def test_legacy_remap_uses_copc_spatial_fast_path_for_copc_original(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            original_dir = root / "originals"
-            output_dir = root / "out"
-            original_dir.mkdir()
-            copc_original = original_dir / "source.copc.laz"
-            raw_twin = original_dir / "source.laz"
-            copc_original.write_text("placeholder")
-            raw_twin.write_text("placeholder")
-
-            with mock.patch(
-                "output_remap._process_single_original_copc_file",
-                return_value=("source.copc.laz", 3, 3, 2, True, "Success"),
-            ) as fast_path:
-                remap_to_original_input_files(
-                    merged_points=np.array(
-                        [
-                            [100.0, 200.0, 50.0],
-                            [100.1, 200.1, 50.1],
-                            [100.2, 200.2, 50.2],
-                        ],
-                        dtype=np.float64,
-                    ),
-                    merged_extra_dims={
-                        "PredInstance": np.array([1, 0, 2], dtype=np.uint16),
-                    },
-                    merged_extra_dim_params=None,
-                    original_input_dir=original_dir,
-                    output_dir=output_dir,
-                    tolerance=0.001,
-                    num_threads=1,
-                    threedtrees_dims=["PredInstance"],
-                    threedtrees_suffix="SAT",
-                    num_spatial_chunks=6,
-                )
-
-            fast_path.assert_called_once()
-            self.assertEqual(fast_path.call_args.args[0], copc_original)
-            self.assertEqual(fast_path.call_args.kwargs["num_spatial_chunks"], 6)
-
     def test_legacy_raw_original_mode_ignores_matching_copc_twin(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -402,24 +369,21 @@ class OutputRemapTests(unittest.TestCase):
                 "output_remap._process_single_original_input_file",
                 return_value=("source.las", 3, 3, 2, True, "Success"),
             ) as raw_path:
-                with mock.patch("output_remap._process_single_original_copc_file") as copc_path:
-                    remap_to_original_input_files(
-                        merged_points=points,
-                        merged_extra_dims={
-                            "PredInstance": np.array([1, 0, 2], dtype=np.uint16),
-                        },
-                        merged_extra_dim_params=None,
-                        original_input_dir=original_dir,
-                        output_dir=output_dir,
-                        tolerance=0.001,
-                        num_threads=1,
-                        threedtrees_dims=["PredInstance"],
-                        threedtrees_suffix="SAT",
-                        prefer_copc_sources=False,
-                    )
+                remap_to_original_input_files(
+                    merged_points=points,
+                    merged_extra_dims={
+                        "PredInstance": np.array([1, 0, 2], dtype=np.uint16),
+                    },
+                    merged_extra_dim_params=None,
+                    original_input_dir=original_dir,
+                    output_dir=output_dir,
+                    tolerance=0.001,
+                    num_threads=1,
+                    threedtrees_dims=["PredInstance"],
+                    threedtrees_suffix="SAT",
+                )
 
             raw_path.assert_called_once()
-            copc_path.assert_not_called()
             process_args = raw_path.call_args.args[0]
             self.assertEqual(process_args[0], raw_original)
             self.assertEqual(process_args[1], output_dir / "source.las")
@@ -447,7 +411,6 @@ class OutputRemapTests(unittest.TestCase):
                     threedtrees_dims=["PredInstance"],
                     threedtrees_suffix="SAT",
                     chunk_size=2,
-                    prefer_copc_sources=False,
                 )
 
             out = laspy.read(output_dir / "source.las")
@@ -483,7 +446,6 @@ class OutputRemapTests(unittest.TestCase):
                         threedtrees_dims=["PredInstance"],
                         threedtrees_suffix="SAT",
                         chunk_size=2,
-                        prefer_copc_sources=False,
                     )
 
             self.assertFalse((output_dir / "source.las").exists())

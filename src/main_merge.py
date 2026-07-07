@@ -104,7 +104,6 @@ def run_merge(
     tile_bounds_json: Path,
     original_input_dir: Optional[Path] = None,
     output_merged: Optional[Path] = None,
-    buffer: float = 10.0,
     overlap_threshold: float = 0.3,
     max_centroid_distance: float = 3.0,
     correspondence_tolerance: float = 0.05,
@@ -123,6 +122,7 @@ def run_merge(
     transfer_original_dims_to_merged: bool = True,
     threedtrees_dims: Optional[List[str]] = None,
     threedtrees_suffix: str = "SAT",
+    chunk_size: int = 1_000_000,
 ) -> Path:
     """
     Run the tile merge pipeline.
@@ -133,7 +133,7 @@ def run_merge(
         original_tiles_dir: Directory with original tile files for retiling
         original_input_dir: Directory with original input LAZ files for final remap (optional)
         output_merged: Output path for merged LAZ file (auto-derived if None)
-        buffer: Buffer zone distance in meters
+        tile_bounds_json: Tile layout metadata; its tile_buffer is the merge buffer source of truth
         overlap_threshold: Overlap ratio threshold for instance matching
         max_centroid_distance: Max distance between centroids to merge instances
         correspondence_tolerance: Max distance for point correspondence (internal, not exposed via Parameters)
@@ -173,6 +173,7 @@ def run_merge(
             f"tile_bounds_tindex.json not found: {tile_bounds_json}. "
             "Merge requires this file and will not run without it."
         )
+    buffer = derive_tile_buffer_from_json(tile_bounds_json)
 
     # Auto-derive output path if not provided (inside segmented dir so it is writable e.g. in Docker /out)
     if output_merged is None:
@@ -328,7 +329,7 @@ def run_merge(
 
     print(f"Input: {segmented_dir}")
     print(f"Output merged: {output_merged}" + (" (SKIPPED)" if skip_merged_file else ""))
-    print(f"Buffer: {buffer}m")
+    print(f"Buffer: {buffer}m (from tile_bounds_tindex.json)")
     print(f"Instance matching: {'ENABLED' if enable_matching else 'DISABLED'}")
     if enable_matching:
         print(f"  Overlap threshold: {overlap_threshold}")
@@ -352,7 +353,6 @@ def run_merge(
         output_tiles_dir=output_tiles_dir,
         tile_bounds_json=tile_bounds_json,
         original_input_dir=original_input_dir,
-        buffer=buffer,
         overlap_threshold=overlap_threshold,
         correspondence_tolerance=correspondence_tolerance,
         max_volume_for_merge=max_volume_for_merge,
@@ -368,6 +368,7 @@ def run_merge(
         transfer_original_dims_to_merged=transfer_original_dims_to_merged,
         threedtrees_dims=threedtrees_dims,
         threedtrees_suffix=threedtrees_suffix,
+        chunk_size=chunk_size,
     )
 
     return output_merged
@@ -421,13 +422,6 @@ def main() -> None:
         type=Path,
         default=None,
         help="Directory with original input LAZ files for final remap (optional, enables Stage 7)"
-    )
-
-    parser.add_argument(
-        "--buffer",
-        type=float,
-        default=MERGE_PARAMS.get('buffer', 10.0),
-        help=f"Buffer zone distance in meters (default: {MERGE_PARAMS.get('buffer', 10.0)})"
     )
 
     parser.add_argument(
@@ -535,7 +529,6 @@ def main() -> None:
             tile_bounds_json=args.tile_bounds_json,
             original_input_dir=args.original_input_dir,
             output_merged=args.output_merged,
-            buffer=args.buffer,
             overlap_threshold=args.overlap_threshold,
             max_centroid_distance=args.max_centroid_distance,
             correspondence_tolerance=args.correspondence_tolerance,

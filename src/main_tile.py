@@ -374,6 +374,8 @@ def create_tiles(
     log_dir: Path,
     threads: int = 5,
     max_parallel: int = 5,
+    source_parallel: Optional[int] = None,
+    tile_parallel: Optional[int] = None,
     chunk_size: int = 20_000_000,
 ) -> List[Path]:
     """
@@ -394,7 +396,9 @@ def create_tiles(
         tiles_dir: Output directory for tiles
         log_dir: Directory for log files
         threads: Threads used per process for LAZ chunk decompression (LazrsParallel/Rayon)
-        max_parallel: Maximum parallel workers for each phase
+        max_parallel: Fallback maximum parallel workers for each phase
+        source_parallel: Maximum source files processed in parallel in Phase 1
+        tile_parallel: Maximum tiles finalized in parallel in Phase 2
         chunk_size: Points per chunk when reading source files (smaller = less peak RAM)
 
     Returns:
@@ -404,6 +408,9 @@ def create_tiles(
     print("=" * 60)
     print("Step 3: Creating tiles (two-phase)")
     print("=" * 60)
+
+    source_parallel = max(1, int(source_parallel or max_parallel))
+    tile_parallel = max(1, int(tile_parallel or max_parallel))
 
     # Create directories
     tiles_dir.mkdir(parents=True, exist_ok=True)
@@ -469,7 +476,8 @@ def create_tiles(
 
     print(f"  Source files: {len(source_files)}")
     print(f"  Total tiles: {len(all_tiles)} ({already_done} already done, {len(pending_tiles)} pending)")
-    print(f"  Workers: {max_parallel}")
+    print(f"  Source file workers: {source_parallel}")
+    print(f"  Tile finalization workers: {tile_parallel}")
 
     if not pending_tiles:
         print("  ✓ All tiles already exist")
@@ -513,7 +521,7 @@ def create_tiles(
     print()
 
     tile_point_counts: Dict[str, int] = {}
-    with ProcessPoolExecutor(max_workers=max_parallel) as executor:
+    with ProcessPoolExecutor(max_workers=source_parallel) as executor:
         futures = {
             executor.submit(_distribute_source_file, task): Path(task[1]).name
             for task in distribute_tasks
@@ -548,7 +556,7 @@ def create_tiles(
     failed = 0
     skipped = 0
 
-    with ProcessPoolExecutor(max_workers=max_parallel) as executor:
+    with ProcessPoolExecutor(max_workers=tile_parallel) as executor:
         futures = {
             executor.submit(_finalize_tile_to_copc, task): task[0]
             for task in finalize_tasks
@@ -582,6 +590,7 @@ def run_tiling_pipeline(
     num_workers: int = 4,
     threads: int = 5,
     max_tile_procs: int = 5,
+    source_file_workers: Optional[int] = None,
     dimension_reduction: bool = True,  # Ignored (kept for API compatibility)
     tiling_threshold: float = None,
     chunk_size: int = 2_000_000,
@@ -603,9 +612,10 @@ def run_tiling_pipeline(
         tile_length: Tile size in meters
         tile_buffer: Buffer overlap in meters
         grid_offset: Offset from min coordinates
-        num_workers: Unused (kept for API compatibility)
+        num_workers: Fallback tile-stage worker count
         threads: Threads per PDAL writer
         max_tile_procs: Maximum parallel tile processes
+        source_file_workers: Maximum source files processed in parallel in Phase 1
         dimension_reduction: Ignored (kept for API compatibility)
         tiling_threshold: File size threshold in MB. If single file below this, skip tiling
         chunk_size: Points per chunk when reading LAZ/LAS in Phase 1 (smaller = less peak RAM)
@@ -727,6 +737,8 @@ def run_tiling_pipeline(
         tiles_dir,
         log_dir,
         threads,
+        num_workers,
+        source_file_workers or num_workers,
         max_tile_procs,
         chunk_size,
     )
@@ -798,6 +810,13 @@ def main():
         help="Maximum parallel tile processes (default: 5)"
     )
     parser.add_argument(
+        "--source_file_workers",
+        "--tile_source_workers",
+        type=int,
+        default=None,
+        help="Maximum source files processed in parallel during Phase 1 (default: --num_workers)",
+    )
+    parser.add_argument(
         "--chunk_size",
         type=int,
         default=TILE_PARAMS.get("chunk_size", 20_000_000),
@@ -820,6 +839,7 @@ def main():
             num_workers=args.num_workers,
             threads=args.threads,
             max_tile_procs=args.max_tile_procs,
+            source_file_workers=args.source_file_workers,
             chunk_size=args.chunk_size,
         )
         print(f"\nTiles ready for subsampling: {tiles_dir}")

@@ -50,6 +50,10 @@ def merge_small_volume_instances(
         and presorted_inst_counts is not None
     )
 
+    summary_mode = "presorted" if use_presorted else "unsorted"
+    centroid_by_inst = None
+    bbox_volume_by_inst = None
+
     if use_presorted:
         sorted_points = presorted_points
         sorted_instances = presorted_instances
@@ -62,22 +66,52 @@ def merge_small_volume_instances(
         nonzero_mask = instances > 0
         nonzero_count = nonzero_mask.sum()
 
-        instances_to_sort = instances[nonzero_mask]
-        points_to_sort = points[nonzero_mask]
-
         print(
-            f"  Sorting {nonzero_count:,} instance points (of {total_points:,} total)...",
+            f"  Summarizing {nonzero_count:,} instance points (of {total_points:,} total)...",
             flush=True,
         )
-        sort_idx = np.argsort(instances_to_sort)
-        sorted_instances = instances_to_sort[sort_idx]
-        sorted_points = points_to_sort[sort_idx]
 
-        unique_inst, first_idx, inst_counts = np.unique(
-            sorted_instances,
-            return_index=True,
-            return_counts=True,
-        )
+        if nonzero_count == 0:
+            print("  Found 0 unique instances.", flush=True)
+            return (instances, 0)
+
+        positive_instances = instances[nonzero_mask].astype(np.int64, copy=False)
+        max_positive_id = int(positive_instances.max())
+        counts = np.bincount(positive_instances, minlength=max_positive_id + 1)
+        unique_inst = np.flatnonzero(counts)
+        unique_inst = unique_inst[unique_inst > 0]
+        inst_counts = counts[unique_inst].astype(np.int64, copy=False)
+        first_idx = np.zeros(len(unique_inst), dtype=np.int64)
+
+        pos_x = points[nonzero_mask, 0]
+        pos_y = points[nonzero_mask, 1]
+        pos_z = points[nonzero_mask, 2]
+
+        sum_x = np.bincount(positive_instances, weights=pos_x, minlength=max_positive_id + 1)
+        sum_y = np.bincount(positive_instances, weights=pos_y, minlength=max_positive_id + 1)
+        sum_z = np.bincount(positive_instances, weights=pos_z, minlength=max_positive_id + 1)
+
+        centroid_by_inst = np.zeros((max_positive_id + 1, 3), dtype=np.float64)
+        centroid_by_inst[unique_inst, 0] = sum_x[unique_inst] / counts[unique_inst]
+        centroid_by_inst[unique_inst, 1] = sum_y[unique_inst] / counts[unique_inst]
+        centroid_by_inst[unique_inst, 2] = sum_z[unique_inst] / counts[unique_inst]
+
+        min_x = np.full(max_positive_id + 1, np.inf, dtype=np.float64)
+        max_x = np.full(max_positive_id + 1, -np.inf, dtype=np.float64)
+        min_y = np.full(max_positive_id + 1, np.inf, dtype=np.float64)
+        max_y = np.full(max_positive_id + 1, -np.inf, dtype=np.float64)
+        min_z = np.full(max_positive_id + 1, np.inf, dtype=np.float64)
+        max_z = np.full(max_positive_id + 1, -np.inf, dtype=np.float64)
+        np.minimum.at(min_x, positive_instances, pos_x)
+        np.maximum.at(max_x, positive_instances, pos_x)
+        np.minimum.at(min_y, positive_instances, pos_y)
+        np.maximum.at(max_y, positive_instances, pos_y)
+        np.minimum.at(min_z, positive_instances, pos_z)
+        np.maximum.at(max_z, positive_instances, pos_z)
+        bbox_volume_by_inst = (max_x - min_x) * (max_y - min_y) * (max_z - min_z)
+
+        sorted_points = None
+        sorted_instances = None
         print(f"  Found {len(unique_inst):,} unique instances.", flush=True)
 
     hull_candidates = []
@@ -97,16 +131,24 @@ def merge_small_volume_instances(
 
         end = start + count
         if count >= min_points_for_hull_check:
-            centroid = sorted_points[start:end].mean(axis=0)
+            centroid = (
+                sorted_points[start:end].mean(axis=0)
+                if summary_mode == "presorted"
+                else centroid_by_inst[int(inst_id)]
+            )
             large_instances.append((inst_id, count, centroid))
             continue
 
-        bbox_volume = np.prod(
-            sorted_points[start:end].max(axis=0) - sorted_points[start:end].min(axis=0)
-        )
+        if summary_mode == "presorted":
+            bbox_volume = np.prod(
+                sorted_points[start:end].max(axis=0) - sorted_points[start:end].min(axis=0)
+            )
+            centroid = sorted_points[start:end].mean(axis=0)
+        else:
+            bbox_volume = float(bbox_volume_by_inst[int(inst_id)])
+            centroid = centroid_by_inst[int(inst_id)]
 
         if bbox_volume >= max_volume_for_merge * 4.0:
-            centroid = sorted_points[start:end].mean(axis=0)
             if count < min_cluster_size:
                 small_point_count_instances.append((inst_id, count, centroid))
                 bbox_skipped_count += 1
@@ -152,9 +194,15 @@ def merge_small_volume_instances(
         hull_args = []
         hull_centroids = []
         for _inst_id, _count, start, end, bbox_volume in hull_candidates:
-            pts = sorted_points[start:end]
+            if summary_mode == "presorted":
+                pts = sorted_points[start:end]
+            else:
+                pts = points[instances == _inst_id]
             hull_args.append((pts, bbox_volume))
-            hull_centroids.append(pts.mean(axis=0))
+            if summary_mode == "presorted":
+                hull_centroids.append(pts.mean(axis=0))
+            else:
+                hull_centroids.append(centroid_by_inst[int(_inst_id)])
 
         use_parallel = num_threads > 1 and len(hull_candidates) > 10
         if use_parallel:

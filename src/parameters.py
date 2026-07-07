@@ -78,6 +78,29 @@ class Parameters(BaseSettings):
         description="Threads per COPC writer (only for 'tile' task)",
     )
 
+    tile_source_workers: Optional[int] = Field(
+        default=None,
+        description=(
+            "Maximum source files processed in parallel during tile Phase 1. "
+            "Defaults to --workers when unset."
+        ),
+        validation_alias=AliasChoices("tile-source-workers", "tile_source_workers"),
+    )
+
+    tile_writer_workers: Optional[int] = Field(
+        default=None,
+        description=(
+            "Maximum tiles finalized to COPC in parallel during tile Phase 2. "
+            "Defaults to --workers when unset."
+        ),
+        validation_alias=AliasChoices(
+            "tile-writer-workers",
+            "tile_writer_workers",
+            "tile-finalize-workers",
+            "tile_finalize_workers",
+        ),
+    )
+
     resolution_1: Optional[float] = Field(
         0.01,
         description="First subsampling resolution in meters (1cm) (only for 'tile' task)",
@@ -119,6 +142,12 @@ class Parameters(BaseSettings):
         default=None,
         description="Optional output extension override for the filter task, e.g. .laz",
         validation_alias=AliasChoices("filter-output-extension", "filter_output_extension", "output-extension", "output_extension"),
+    )
+
+    filter_anchor: str = Field(
+        "centroid",
+        description="Representative point used by filter task border ownership: centroid, highest_point, or lowest_point",
+        validation_alias=AliasChoices("filter-anchor", "filter_anchor"),
     )
 
     num_spatial_chunks: Optional[int] = Field(
@@ -187,16 +216,6 @@ class Parameters(BaseSettings):
             "COPC-only original enrichment is no longer supported."
         ),
         validation_alias=AliasChoices("original-input-dir", "original_input_dir"),
-    )
-
-    original_copc_input_dir: Optional[Path] = Field(
-        default=None,
-        description=(
-            "Optional directory with original COPC LAZ files matching the uploaded "
-            "LAZ/LAS originals. Used for source-pair validation and source-matching "
-            "workflows, but remap enriches the uploaded LAZ/LAS files directly."
-        ),
-        validation_alias=AliasChoices("original-copc-input-dir", "original_copc_input_dir"),
     )
 
     original_raw_input_dir: Optional[Path] = Field(
@@ -321,14 +340,30 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("remap-dims", "remap_dims"),
     )
 
+    remap_tolerance: float = Field(
+        0.125,
+        gt=0,
+        description=(
+            "Maximum nearest-neighbor distance in meters when remapping "
+            "prediction collections to original points."
+        ),
+        validation_alias=AliasChoices("remap-tolerance", "remap_tolerance"),
+    )
+
     output_merged_with_originals: Optional[Path] = Field(
         default=None,
         description="Legacy path for the old merged-with-originals remap output. Prod-merged outputs now use --merged-resolutions.",
         validation_alias=AliasChoices("output-merged-with-originals", "output_merged_with_originals"),
     )
 
+    produce_merged_file: bool = Field(
+        False,
+        description="For filter/remap tails, also create a merged output product when supported.",
+        validation_alias=AliasChoices("produce-merged-file", "produce_merged_file"),
+    )
+
     transfer_original_dims_to_merged: bool = Field(
-        True,
+        False,
         description="Create prod-merged files from Original-with-predictions after merge/remap. Uses the create_merged_file implementation.",
         validation_alias=AliasChoices("transfer-original-dims-to-merged", "transfer_original_dims_to_merged"),
     )
@@ -400,7 +435,7 @@ class Parameters(BaseSettings):
     # Merge algorithm parameters
     buffer: Optional[float] = Field(
         10.0,
-        description="Buffer distance for filtering in meters (for 'merge' task)",
+        description="Legacy standalone filter-task buffer. Merge derives its buffer from tile_bounds_tindex.json.",
     )
 
     overlap_threshold: Optional[float] = Field(
@@ -431,6 +466,18 @@ class Parameters(BaseSettings):
         300,
         description="Minimum cluster size in points for reassignment",
         validation_alias=AliasChoices("min-cluster-size", "min_cluster_size"),
+    )
+
+    enable_volume_merge: bool = Field(
+        True,
+        description="Enable small-instance volume reassignment in filter task.",
+        validation_alias=AliasChoices("enable-volume-merge", "enable_volume_merge"),
+    )
+
+    remap_merge: bool = Field(
+        False,
+        description="After filter task, remap filtered dimensions to originals and/or subsampled targets.",
+        validation_alias=AliasChoices("remap-merge", "remap_merge"),
     )
 
     disable_matching: bool = Field(
@@ -515,7 +562,15 @@ class Parameters(BaseSettings):
             raise ValueError("overlap_threshold must be between 0 and 1")
         return v
 
-    @field_validator("workers", "num_spatial_chunks", "min_cluster_size", "pre_remap_reassign_min_cluster_size", "pre_remap_reassign_hull_point_threshold")
+    @field_validator(
+        "workers",
+        "num_spatial_chunks",
+        "tile_source_workers",
+        "tile_writer_workers",
+        "min_cluster_size",
+        "pre_remap_reassign_min_cluster_size",
+        "pre_remap_reassign_hull_point_threshold",
+    )
     @classmethod
     def validate_positive_int(cls, v, info):
         """Validate integer parameters are positive."""
@@ -538,6 +593,15 @@ class Parameters(BaseSettings):
         normalized = aliases.get(normalized, normalized)
         if normalized not in {"center-of-mass", "nearest-to-centroid"}:
             raise ValueError("subsampling_method must be 'center-of-mass' or 'nearest-to-centroid'")
+        return normalized
+
+    @field_validator("filter_anchor")
+    @classmethod
+    def validate_filter_anchor(cls, v):
+        """Validate and normalize filter anchor selection."""
+        normalized = (v or "centroid").strip().lower()
+        if normalized not in {"centroid", "highest_point", "lowest_point"}:
+            raise ValueError("filter_anchor must be 'centroid', 'highest_point', or 'lowest_point'")
         return normalized
 
     @field_validator("merged_output_formats", mode="before")
@@ -613,11 +677,14 @@ def print_params(params: Parameters):
     print(f"  instance_dimension: {params.instance_dimension}")
     print(f"  filter_suffix: {params.filter_suffix}")
     print(f"  filter_output_extension: {params.filter_output_extension}")
+    print(f"  filter_anchor: {params.filter_anchor}")
 
     print("\nTile Task:")
     print(f"  tile_length: {params.tile_length}")
     print(f"  tile_buffer: {params.tile_buffer}")
     print(f"  threads: {params.threads}")
+    print(f"  tile_source_workers: {params.tile_source_workers}")
+    print(f"  tile_writer_workers: {params.tile_writer_workers}")
     print(f"  chunk_size: {params.chunk_size}")
     print(f"  resolution_1: {params.resolution_1}")
     print(f"  resolution_2: {params.resolution_2}")
@@ -628,15 +695,15 @@ def print_params(params: Parameters):
     print("\nMerge Task:")
     print(f"  subsampled_10cm_folder: {params.subsampled_10cm_folder}")
     print(f"  original_input_dir: {params.original_input_dir}")
-    print(f"  original_copc_input_dir: {params.original_copc_input_dir}")
     print(f"  original_raw_input_dir: {params.original_raw_input_dir}")
     print(f"  original_raw_output_dir: {params.original_raw_output_dir}")
-    print(f"  buffer: {params.buffer}")
     print(f"  overlap_threshold: {params.overlap_threshold}")
     print(f"  max_centroid_distance: {params.max_centroid_distance}")
     print(f"  max_volume_for_merge: {params.max_volume_for_merge}")
     print(f"  min_cluster_size: {params.min_cluster_size}")
     print(f"  disable_matching: {params.disable_matching}")
+    print(f"  enable_volume_merge: {params.enable_volume_merge}")
+    print(f"  remap_merge: {params.remap_merge}")
     print(f"  verbose: {params.verbose}")
 
     print("\nCreate Merged File Task:")
@@ -645,12 +712,13 @@ def print_params(params: Parameters):
     print(f"  standardization_json: {params.standardization_json}")
     print(f"  merged_resolutions: {params.merged_resolutions}")
     print(f"  merged_output_formats: {params.merged_output_formats}")
+    print(f"  produce_merged_file: {params.produce_merged_file}")
 
     print("\nRemap Task:")
     print(f"  merged_laz: {params.merged_laz}")
     print(f"  segmented_folders: {params.segmented_folders}")
     print(f"  remap_dims: {params.remap_dims}")
-    print(f"  original_copc_input_dir: {params.original_copc_input_dir}")
+    print(f"  remap_tolerance: {params.remap_tolerance}")
     print(f"  original_raw_input_dir: {params.original_raw_input_dir}")
     print(f"  original_raw_output_dir: {params.original_raw_output_dir}")
     print(f"  threedtrees_dims: {params.threedtrees_dims}")
@@ -682,7 +750,6 @@ def get_tile_params(params: Parameters) -> dict:
 def get_merge_params(params: Parameters) -> dict:
     """Get merge parameters as a dictionary for legacy compatibility."""
     return {
-        'buffer': params.buffer,
         'overlap_threshold': params.overlap_threshold,
         'max_centroid_distance': params.max_centroid_distance,
         'max_volume_for_merge': params.max_volume_for_merge,
@@ -721,7 +788,6 @@ REMAP_PARAMS = {
 }
 
 MERGE_PARAMS = {
-    'buffer': 10.0,
     'overlap_threshold': 0.3,
     'max_centroid_distance': 3.0,
     'max_volume_for_merge': 4.0,

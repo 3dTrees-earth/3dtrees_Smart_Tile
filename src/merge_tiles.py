@@ -64,6 +64,7 @@ from tile_bounds_graph import (
     build_neighbor_graph_from_bounds_json,
     match_tiles_to_json_bounds,
 )
+from filter_task_support import derive_tile_buffer_from_json
 
 # Force unbuffered output for real-time progress feedback
 # (especially important when running in Docker/containers)
@@ -73,6 +74,36 @@ sys.stdout.reconfigure(line_buffering=True)
 def _merge_input_files(input_dir: Path) -> List[Path]:
     """Return merge input files, including mixed LAS/LAZ and preferring COPC twins."""
     return point_cloud_files(input_dir)
+
+
+def _instance_order_north_to_south(points: np.ndarray, instances: np.ndarray) -> List[int]:
+    """Return positive instance IDs sorted north-to-south, then west-to-east."""
+    pos_mask = instances > 0
+    if not np.any(pos_mask):
+        return []
+
+    pos_instances = instances[pos_mask].astype(np.int64, copy=False)
+    max_positive_id = int(pos_instances.max())
+    counts = np.bincount(pos_instances, minlength=max_positive_id + 1)
+    unique_inst = np.flatnonzero(counts)
+    unique_inst = unique_inst[unique_inst > 0]
+
+    min_x = np.full(max_positive_id + 1, np.inf, dtype=np.float64)
+    max_x = np.full(max_positive_id + 1, -np.inf, dtype=np.float64)
+    min_y = np.full(max_positive_id + 1, np.inf, dtype=np.float64)
+    max_y = np.full(max_positive_id + 1, -np.inf, dtype=np.float64)
+
+    pos_x = points[pos_mask, 0]
+    pos_y = points[pos_mask, 1]
+    np.minimum.at(min_x, pos_instances, pos_x)
+    np.maximum.at(max_x, pos_instances, pos_x)
+    np.minimum.at(min_y, pos_instances, pos_y)
+    np.maximum.at(max_y, pos_instances, pos_y)
+
+    center_y = (min_y[unique_inst] + max_y[unique_inst]) / 2.0
+    center_x = (min_x[unique_inst] + max_x[unique_inst]) / 2.0
+    order = np.lexsort((center_x, -center_y))
+    return unique_inst[order].tolist()
 
 
 # =============================================================================
@@ -87,7 +118,6 @@ def merge_tiles(
     output_tiles_dir: Path,
     tile_bounds_json: Path,
     original_input_dir: Optional[Path] = None,
-    buffer: float = 10.0,
     overlap_threshold: float = 0.3,
     correspondence_tolerance: float = 0.1,
     max_volume_for_merge: float = 4.0,
@@ -106,6 +136,7 @@ def merge_tiles(
     transfer_original_dims_to_merged: bool = True,
     threedtrees_dims: Optional[List[str]] = None,
     threedtrees_suffix: str = "SAT",
+    chunk_size: int = 1_000_000,
 ):
     """
     Main merge function implementing the tile merging pipeline.
@@ -117,6 +148,7 @@ def merge_tiles(
             f"tile_bounds_tindex.json not found: {tile_bounds_json}. "
             "Merge requires this file and will not run without it."
         )
+    buffer = derive_tile_buffer_from_json(tile_bounds_json)
 
     print("=" * 60)
     print("Tile Merger")
@@ -127,7 +159,7 @@ def merge_tiles(
     print(f"Output tiles: {output_tiles_dir}")
     print(f"Tile bounds JSON: {tile_bounds_json}")
     print(f"Instance dimension: {instance_dimension}")
-    print(f"Buffer: {buffer}m")
+    print(f"Buffer: {buffer}m (from tile_bounds_tindex.json)")
     print(f"Workers: {num_threads}")
     print(f"Instance matching: {'ENABLED' if enable_matching else 'DISABLED'}")
     if enable_matching:
@@ -201,7 +233,6 @@ def merge_tiles(
                 retile_buffer=retile_buffer,
                 threedtrees_dims=threedtrees_dims,
                 threedtrees_suffix=threedtrees_suffix,
-                prefer_copc_sources=False,
             )
             print(f"  ✓ Stage 7 completed: Remapped to original input files")
         else:
@@ -471,6 +502,7 @@ def merge_tiles(
     all_instances = []
     all_extra_dims_lists: Dict[str, list] = {name: [] for name in all_extra_dim_names}
 
+    n_input_tiles = len(tiles)
     for tile_idx, tile in enumerate(tiles):
         kept_instances = kept_instances_per_tile[tile.name]
 
@@ -534,10 +566,13 @@ def merge_tiles(
 
     total_before = len(merged_points)
     print(f"  Total points: {total_before:,}")
-    print(f"  Deduplicating...", flush=True)
-    merged_points, merged_instances, merged_extra_dims = deduplicate_points(
-        merged_points, merged_instances, merged_extra_dims
-    )
+    if n_input_tiles <= 1:
+        print("  Single input tile; skipping cross-tile deduplication")
+    else:
+        print(f"  Deduplicating...", flush=True)
+        merged_points, merged_instances, merged_extra_dims = deduplicate_points(
+            merged_points, merged_instances, merged_extra_dims
+        )
     gc.collect()
 
     n_removed = total_before - len(merged_points)
@@ -561,16 +596,9 @@ def merge_tiles(
         zero_count = len(merged_instances) - nonzero_count
         print(f"  Instance points: {nonzero_count:,}, ground points: {zero_count:,}")
 
-        pos_points = merged_points[pos_mask]
         pos_instances = merged_instances[pos_mask]
 
-        sort_idx = np.argsort(pos_instances)
-        sorted_points = pos_points[sort_idx]
-        sorted_instances = pos_instances[sort_idx]
-
-        unique_inst, first_idx, inst_counts = np.unique(
-            sorted_instances, return_index=True, return_counts=True
-        )
+        unique_inst = np.unique(pos_instances)
         print(f"  Processing {len(unique_inst):,} unique instances...", flush=True)
 
         merged_instances, _ = merge_small_volume_instances(
@@ -582,11 +610,6 @@ def merge_tiles(
             max_search_radius=5.0,
             num_threads=num_threads,
             verbose=verbose,
-            presorted_points=sorted_points,
-            presorted_instances=sorted_instances,
-            presorted_unique_inst=unique_inst,
-            presorted_first_idx=first_idx,
-            presorted_inst_counts=inst_counts,
         )
         print(f"  ✓ Stage 5 completed")
     else:
@@ -601,32 +624,8 @@ def merge_tiles(
     print("Renumbering instances (north-to-south ordering)")
     print(f"{'=' * 60}")
 
-    # Compute bounding box centers for sorting
     print("  Computing bounding box centers...")
-    pos_mask = merged_instances > 0
-    pos_points = merged_points[pos_mask]
-    pos_instances = merged_instances[pos_mask]
-
-    # Sort and compute unique instances
-    sort_idx = np.argsort(pos_instances)
-    sorted_points = pos_points[sort_idx]
-    sorted_instances = pos_instances[sort_idx]
-    unique_inst, first_idx, inst_counts = np.unique(
-        sorted_instances, return_index=True, return_counts=True
-    )
-
-    # Compute bounding box centers (Y, X) for each instance
-    bbox_centers = {}
-    for inst_id, start, count in zip(unique_inst, first_idx, inst_counts):
-        pts = sorted_points[start:start + count]
-        min_pt, max_pt = pts.min(axis=0), pts.max(axis=0)
-        bbox_centers[inst_id] = ((min_pt[1] + max_pt[1]) / 2.0, (min_pt[0] + max_pt[0]) / 2.0)
-
-    # Sort by Y descending (north to south), then X ascending (west to east)
-    sorted_by_location = sorted(
-        unique_inst,
-        key=lambda inst_id: (-bbox_centers[inst_id][0], bbox_centers[inst_id][1])
-    )
+    sorted_by_location = _instance_order_north_to_south(merged_points, merged_instances)
 
     old_to_new = {0: 0}
 
@@ -811,7 +810,7 @@ def merge_tiles(
             retile_buffer=retile_buffer,
             threedtrees_dims=threedtrees_dims,
             threedtrees_suffix=threedtrees_suffix,
-            prefer_copc_sources=False,
+            chunk_size=chunk_size,
         )
         print(f"  ✓ Stage 7 completed: Remapped to original input files")
     else:

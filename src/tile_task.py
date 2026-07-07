@@ -51,6 +51,8 @@ def run_tile_task(params: Parameters):
     print(f"Tile buffer:              {tile_buffer}m")
     print(f"Workers:                  {workers}")
     print(f"Threads per writer:       {threads}")
+    print(f"Tile source workers:      {tile_source_workers}")
+    print(f"Tile finalization workers:{tile_writer_workers}")
     print(f"Spatial chunks:           {num_spatial_chunks}")
     print(f"Subsampling method:       {subsampling_method}")
     print(f"Resolution 1:             {res1}m")
@@ -70,7 +72,8 @@ def run_tile_task(params: Parameters):
             tile_buffer=tile_buffer,
             num_workers=workers,
             threads=threads,
-            max_tile_procs=workers,
+            max_tile_procs=tile_writer_workers,
+            source_file_workers=tile_source_workers,
             dimension_reduction=dimension_reduction,
             tiling_threshold=tiling_threshold,
             chunk_size=chunk_size,

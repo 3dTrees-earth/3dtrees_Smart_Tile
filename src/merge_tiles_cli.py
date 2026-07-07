@@ -52,13 +52,6 @@ def main(merge_tiles_func):
     )
 
     parser.add_argument(
-        "--buffer",
-        type=float,
-        default=10.0,
-        help="Buffer zone distance in meters (default: 10.0)",
-    )
-
-    parser.add_argument(
         "--overlap-threshold",
         "--ff3d-threshold",
         type=float,
@@ -184,7 +177,6 @@ def main(merge_tiles_func):
         output_tiles_dir=args.output_tiles_dir,
         tile_bounds_json=args.tile_bounds_json,
         original_input_dir=args.original_input_dir,
-        buffer=args.buffer,
         overlap_threshold=args.overlap_threshold,
         correspondence_tolerance=args.correspondence_tolerance,
         max_volume_for_merge=args.max_volume_for_merge,

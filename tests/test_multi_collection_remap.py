@@ -478,20 +478,15 @@ class MultiCollectionRemapTests(unittest.TestCase):
                 "prediction_collection_remap.stream_add_collections_to_file",
                 return_value=(4, 4),
             ) as raw_path:
-                with mock.patch(
-                    "prediction_collection_remap.stream_add_collections_to_copc_file_spatial",
-                ) as copc_path:
-                    remap_prediction_collections_to_original_files(
-                        [pred_dir],
-                        original_dir,
-                        output_dir,
-                        tolerance=0.001,
-                        num_threads=1,
-                        prefer_copc_sources=False,
-                    )
+                remap_prediction_collections_to_original_files(
+                    [pred_dir],
+                    original_dir,
+                    output_dir,
+                    tolerance=0.001,
+                    num_threads=1,
+                )
 
             raw_path.assert_called_once()
-            copc_path.assert_not_called()
             args, _ = raw_path.call_args
             self.assertEqual(args[0], raw_original)
             self.assertEqual(args[1], output_dir / "source.las")

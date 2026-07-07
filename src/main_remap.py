@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import laspy
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from scipy.spatial import cKDTree
 from laspy.vlrs.vlrlist import VLRList
 
@@ -36,6 +36,8 @@ from tile_bounds_graph import (
     match_tiles_to_json_bounds,
 )
 from worker_budget import kdtree_query_workers
+
+REMAP_LAZ_BACKEND = getattr(laspy.LazBackend, "Lazrs", laspy.LazBackend.LazrsParallel)
 
 
 def _strip_copc_records_for_laspy_write(header: laspy.LasHeader) -> None:
@@ -56,6 +58,47 @@ def _strip_copc_records_for_laspy_write(header: laspy.LasHeader) -> None:
         ])
 
 
+def _load_segmented_source(
+    segmented_file: Path,
+    instance_dimension: str,
+    chunk_size: int,
+) -> Tuple[np.ndarray, List[laspy.ExtraBytesParams], Dict[str, np.ndarray]]:
+    """Load segmented source points/dimensions with progress instead of one large read."""
+    point_chunks = []
+    dim_chunks: Dict[str, list] = {}
+
+    with laspy.open(str(segmented_file), laz_backend=REMAP_LAZ_BACKEND) as reader:
+        source_extra_dims = list(reader.header.point_format.extra_dimensions)
+        total_points = int(reader.header.point_count)
+        extra_dim_names = [dim.name for dim in source_extra_dims]
+        processed = 0
+
+        for chunk_idx, chunk in enumerate(reader.chunk_iterator(chunk_size), start=1):
+            points = np.column_stack([chunk.x, chunk.y, chunk.z])
+            point_chunks.append(points)
+            for dim_name in extra_dim_names:
+                dim_chunks.setdefault(dim_name, []).append(np.asarray(chunk[dim_name]))
+            processed += len(chunk)
+            print(
+                f"    Loaded segmented chunk {chunk_idx}: "
+                f"{processed:,}/{total_points:,} points",
+                flush=True,
+            )
+
+    segmented_points = np.vstack(point_chunks) if point_chunks else np.empty((0, 3), dtype=np.float64)
+    source_dim_values = {
+        dim_name: np.concatenate(chunks)
+        for dim_name, chunks in dim_chunks.items()
+    }
+    if instance_dimension in source_dim_values:
+        validate_prediction_instance_labels(
+            source_dim_values[instance_dimension],
+            instance_dimension,
+            segmented_file,
+        )
+    return segmented_points, source_extra_dims, source_dim_values
+
+
 def get_file_bounds(filepath: Path) -> Optional[Tuple[float, float, float, float]]:
     """
     Get spatial bounds of a point cloud file using laspy header only (no point loading).
@@ -68,7 +111,7 @@ def get_file_bounds(filepath: Path) -> Optional[Tuple[float, float, float, float
     """
     try:
         # Use laspy.open() to read only header, not all points
-        with laspy.open(str(filepath), laz_backend=laspy.LazBackend.LazrsParallel) as las:
+        with laspy.open(str(filepath), laz_backend=REMAP_LAZ_BACKEND) as las:
             return (las.header.x_min, las.header.x_max, las.header.y_min, las.header.y_max)
     except Exception:
         return None
@@ -246,32 +289,23 @@ def remap_single_tile(
     tile_id = segmented_file.stem.replace('_segmented', '').replace('_results', '')
 
     try:
+        chunk_size = int(os.environ.get("SMARTTILE_REMAP_CHUNK_SIZE", "5000000"))
+
         # Load segmented point cloud (source of predictions)
         print(f"    Loading segmented file...")
-        segmented_las = laspy.read(
-            str(segmented_file),
-            laz_backend=laspy.LazBackend.LazrsParallel
+        segmented_points, source_extra_dims, source_dim_values = _load_segmented_source(
+            segmented_file,
+            instance_dimension,
+            chunk_size,
         )
-        segmented_points = np.vstack((
-            segmented_las.x,
-            segmented_las.y,
-            segmented_las.z
-        )).T
         print(f"    Segmented file: {len(segmented_points):,} points")
-        if hasattr(segmented_las, instance_dimension):
-            validate_prediction_instance_labels(
-                getattr(segmented_las, instance_dimension),
-                instance_dimension,
-                segmented_file,
-            )
 
         # Create KDTree from segmented points with progress indication
         print(f"    Building KDTree from {len(segmented_points):,} points...", end="", flush=True)
         tree = cKDTree(segmented_points)
         print(" ✓")
 
-        source_extra_dims = list(segmented_las.point_format.extra_dimensions)
-        with laspy.open(str(target_file), laz_backend=laspy.LazBackend.LazrsParallel) as target_reader:
+        with laspy.open(str(target_file), laz_backend=REMAP_LAZ_BACKEND) as target_reader:
             output_header = target_reader.header.copy()
             target_point_count = target_reader.header.point_count
 
@@ -300,7 +334,7 @@ def remap_single_tile(
                         suffix += 1
                     out_name = f"{dim_name}_{suffix}"
             extra_params = (
-                instance_extra_bytes_params(out_name, getattr(segmented_las, dim_name))
+                instance_extra_bytes_params(out_name, source_dim_values[dim_name])
                 if cast_as_instance
                 else extra_bytes_params_from_dimension_info(dim_info, name=out_name)
             )
@@ -312,11 +346,6 @@ def remap_single_tile(
         _strip_copc_records_for_laspy_write(output_header)
         if dims_to_add:
             output_header.add_extra_dims([params for params, _, _ in dims_to_add])
-
-        source_dim_values = {
-            src_name: getattr(segmented_las, src_name)
-            for _, src_name, _ in dims_to_add
-        }
 
         def copy_target_chunk(
             target_chunk: laspy.ScaleAwarePointRecord,
@@ -335,7 +364,6 @@ def remap_single_tile(
         # Create output directory if needed
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        chunk_size = int(os.environ.get("SMARTTILE_REMAP_CHUNK_SIZE", "5000000"))
         processed = 0
         print(
             f"    Streaming nearest-neighbor remap for {target_point_count:,} target points "
@@ -343,12 +371,12 @@ def remap_single_tile(
             flush=True,
         )
 
-        with laspy.open(str(target_file), laz_backend=laspy.LazBackend.LazrsParallel) as target_reader:
+        with laspy.open(str(target_file), laz_backend=REMAP_LAZ_BACKEND) as target_reader:
             with laspy.open(
                 str(output_file),
                 mode="w",
                 header=output_header,
-                laz_backend=laspy.LazBackend.LazrsParallel,
+                laz_backend=REMAP_LAZ_BACKEND,
             ) as writer:
                 for target_chunk in target_reader.chunk_iterator(chunk_size):
                     target_points = np.vstack((

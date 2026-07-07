@@ -21,9 +21,20 @@ from point_cloud_metadata import (
     point_cloud_files,
     raw_point_cloud_files,
 )
+from worker_budget import kdtree_query_workers
 
 
 MIN_ORIGINAL_REMAP_MATCH_FRACTION = 0.99
+
+
+def _branded_prediction_name(dim_name: str, suffix: str) -> str:
+    """Append model suffix unless the prediction dimension already has it."""
+    if not suffix:
+        return dim_name
+    suffix_part = f"_{suffix}"
+    if dim_name.endswith(suffix_part):
+        return dim_name
+    return f"{dim_name}{suffix_part}"
 
 
 def _match_fraction_is_acceptable(matched: int, total: int, min_fraction: float) -> bool:
@@ -649,138 +660,6 @@ def _process_single_original_input_file_from_merged_copc(args):
         return (input_file.name, 0, 0, 0, False, str(e))
 
 
-def _copc_windows_from_header(header, num_windows: int):
-    min_x = float(header.x_min)
-    max_x = float(header.x_max)
-    if max_x <= min_x:
-        return [(min_x, max_x, True)]
-    count = max(1, int(num_windows or 1))
-    step = (max_x - min_x) / count
-    return [
-        (
-            min_x + idx * step,
-            max_x if idx == count - 1 else min_x + (idx + 1) * step,
-            idx == count - 1,
-        )
-        for idx in range(count)
-    ]
-
-
-def _process_single_original_copc_file(
-    input_file: Path,
-    output_file: Path,
-    merged_points: np.ndarray,
-    merged_extra_dims: Dict[str, np.ndarray],
-    merged_extra_dim_params: Optional[Dict[str, laspy.ExtraBytesParams]],
-    tolerance: float,
-    spatial_buffer: float,
-    kdtree_workers: int,
-    threedtrees_dims,
-    threedtrees_suffix,
-    num_spatial_chunks: int = 1,
-    min_match_fraction: float = MIN_ORIGINAL_REMAP_MATCH_FRACTION,
-):
-    """Process one COPC original with native spatial queries."""
-    with laspy.CopcReader.open(str(input_file)) as copc_reader:
-        source_header = copc_reader.header
-        n_input_points = int(source_header.point_count)
-        output_header, branded_names = _original_remap_output_header(
-            source_header,
-            merged_extra_dims,
-            merged_extra_dim_params,
-            threedtrees_dims,
-            threedtrees_suffix,
-        )
-        windows = _copc_windows_from_header(source_header, num_spatial_chunks)
-
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        matched_count = 0
-        total_points = 0
-        unique_instances = 0
-        with laspy.open(
-            str(output_file),
-            mode="w",
-            header=output_header,
-            laz_backend=laspy.LazBackend.LazrsParallel,
-        ) as writer:
-            for window_idx, (min_x, max_x, include_upper) in enumerate(windows, start=1):
-                query_bounds = laspy.copc.Bounds(
-                    mins=np.array([min_x, float(source_header.y_min), float(source_header.z_min)], dtype=np.float64),
-                    maxs=np.array([max_x, float(source_header.y_max), float(source_header.z_max)], dtype=np.float64),
-                )
-                source_points = copc_reader.spatial_query(query_bounds)
-                if len(source_points) == 0:
-                    continue
-                xs = np.asarray(source_points.x)
-                point_mask = (xs >= min_x) & ((xs <= max_x) if include_upper else (xs < max_x))
-                if not np.any(point_mask):
-                    continue
-                if not np.all(point_mask):
-                    source_points = source_points[point_mask]
-
-                input_points = np.column_stack([source_points.x, source_points.y, source_points.z])
-                bounds = (
-                    float(np.min(input_points[:, 0])),
-                    float(np.max(input_points[:, 0])),
-                    float(np.min(input_points[:, 1])),
-                    float(np.max(input_points[:, 1])),
-                )
-                merge_mask = (
-                    (merged_points[:, 0] >= bounds[0] - spatial_buffer)
-                    & (merged_points[:, 0] <= bounds[1] + spatial_buffer)
-                    & (merged_points[:, 1] >= bounds[2] - spatial_buffer)
-                    & (merged_points[:, 1] <= bounds[3] + spatial_buffer)
-                )
-                local_merged_points = merged_points[merge_mask]
-                if len(local_merged_points) == 0:
-                    raise ValueError(f"No merged points in COPC window {window_idx}/{len(windows)}")
-                local_tree = cKDTree(local_merged_points)
-                distances, indices = local_tree.query(input_points, workers=kdtree_workers)
-                matched = distances <= tolerance
-                window_matched = int(np.count_nonzero(matched))
-                out_chunk = laspy.ScaleAwarePointRecord.zeros(len(source_points), header=output_header)
-                _copy_record_dimensions(source_points, out_chunk)
-
-                for dim_name, values in merged_extra_dims.items():
-                    if threedtrees_dims and dim_name not in threedtrees_dims:
-                        continue
-                    remapped = values[merge_mask][indices]
-                    out_chunk[branded_names[dim_name]] = remapped
-                    if np.issubdtype(remapped.dtype, np.integer) and len(remapped) > 0:
-                        unique_instances = max(unique_instances, len(np.unique(remapped[remapped > 0])))
-
-                writer.write_points(out_chunk)
-                matched_count += window_matched
-                total_points += len(source_points)
-                print(
-                    f"    COPC original remap {input_file.name}: "
-                    f"window {window_idx}/{len(windows)}, {matched_count:,} points",
-                    flush=True,
-                )
-
-    if total_points != n_input_points:
-        output_file.unlink(missing_ok=True)
-        return (
-            input_file.name,
-            matched_count,
-            n_input_points,
-            unique_instances,
-            False,
-            f"Wrote {total_points:,}/{n_input_points:,} original points",
-        )
-    if not _match_fraction_is_acceptable(matched_count, n_input_points, min_match_fraction):
-        output_file.unlink(missing_ok=True)
-        return (
-            input_file.name,
-            matched_count,
-            n_input_points,
-            unique_instances,
-            False,
-            _match_quality_message(matched_count, n_input_points, tolerance, min_match_fraction),
-        )
-    return (input_file.name, matched_count, n_input_points, unique_instances, True, "Success")
-
-
 def _process_single_original_input_file(args):
     """Process one original input file for final prediction remapping."""
     (
@@ -795,59 +674,93 @@ def _process_single_original_input_file(args):
         threedtrees_dims,
         threedtrees_suffix,
         num_spatial_chunks,
+        chunk_size,
         min_match_fraction,
     ) = args
 
     try:
-        if input_file.name.lower().endswith(".copc.laz"):
-            return _process_single_original_copc_file(
-                input_file,
-                output_file,
-                merged_points,
+        if threedtrees_dims:
+            selected_dims = [name for name in merged_extra_dims if name in threedtrees_dims]
+        else:
+            selected_dims = list(merged_extra_dims.keys())
+
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        matched_count = 0
+        total_points = 0
+        unique_instances = 0
+
+        with laspy.open(str(input_file), laz_backend=laspy.LazBackend.LazrsParallel) as input_reader:
+            source_header = input_reader.header
+            n_input_points = int(source_header.point_count)
+            output_header, branded_names = _original_remap_output_header(
+                source_header,
                 merged_extra_dims,
                 merged_extra_dim_params,
-                tolerance,
-                spatial_buffer,
-                kdtree_workers,
                 threedtrees_dims,
                 threedtrees_suffix,
-                num_spatial_chunks=num_spatial_chunks,
-                min_match_fraction=min_match_fraction,
             )
+            with laspy.open(
+                str(output_file),
+                mode="w",
+                header=output_header,
+                laz_backend=laspy.LazBackend.LazrsParallel,
+            ) as writer:
+                for chunk_idx, input_chunk in enumerate(input_reader.chunk_iterator(chunk_size), start=1):
+                    input_points = np.column_stack([input_chunk.x, input_chunk.y, input_chunk.z])
+                    bounds = _chunk_xy_bounds(input_points)
+                    mask = (
+                        (merged_points[:, 0] >= bounds[0] - spatial_buffer)
+                        & (merged_points[:, 0] <= bounds[1] + spatial_buffer)
+                        & (merged_points[:, 1] >= bounds[2] - spatial_buffer)
+                        & (merged_points[:, 1] <= bounds[3] + spatial_buffer)
+                    )
+                    local_merged_points = merged_points[mask]
+                    if len(local_merged_points) == 0:
+                        raise ValueError(
+                            f"No merged points near chunk {chunk_idx} bounds {bounds} "
+                            f"from {input_file.name}"
+                        )
 
-        with laspy.open(str(input_file), laz_backend=laspy.LazBackend.LazrsParallel) as f:
-            bounds = (f.header.x_min, f.header.x_max, f.header.y_min, f.header.y_max)
-            n_input_points = f.header.point_count
+                    local_tree = cKDTree(local_merged_points)
+                    distances, indices = local_tree.query(input_points, workers=kdtree_workers)
+                    matched = distances <= tolerance
+                    chunk_matched = int(np.count_nonzero(matched))
 
-        mask = (
-            (merged_points[:, 0] >= bounds[0] - spatial_buffer)
-            & (merged_points[:, 0] <= bounds[1] + spatial_buffer)
-            & (merged_points[:, 1] >= bounds[2] - spatial_buffer)
-            & (merged_points[:, 1] <= bounds[3] + spatial_buffer)
-        )
+                    out_chunk = laspy.ScaleAwarePointRecord.zeros(len(input_chunk), header=output_header)
+                    _copy_record_dimensions(input_chunk, out_chunk)
+                    for dim_name in selected_dims:
+                        remapped = merged_extra_dims[dim_name][mask][indices]
+                        out_chunk[branded_names[dim_name]] = remapped
+                        if "instance" in dim_name.lower() and np.issubdtype(remapped.dtype, np.integer):
+                            unique_instances = max(unique_instances, len(np.unique(remapped[remapped > 0])))
 
-        local_merged_points = merged_points[mask]
-        local_merged_extras = {name: arr[mask] for name, arr in merged_extra_dims.items()}
+                    writer.write_points(out_chunk)
+                    matched_count += chunk_matched
+                    total_points += len(input_chunk)
+                    print(
+                        f"    Original remap {input_file.name}: "
+                        f"chunk {chunk_idx}, {matched_count:,}/{total_points:,} matched",
+                        flush=True,
+                    )
+                    del input_points, local_merged_points, local_tree, distances, indices, out_chunk
 
-        if len(local_merged_points) == 0:
-            return (input_file.name, 0, n_input_points, 0, False, "No merged points in file region")
-
-        local_tree = cKDTree(local_merged_points)
-        input_las = laspy.read(str(input_file), laz_backend=laspy.LazBackend.LazrsParallel)
-        input_points = np.empty((n_input_points, 3), dtype=np.float64)
-        input_points[:, 0] = input_las.x
-        input_points[:, 1] = input_las.y
-        input_points[:, 2] = input_las.z
-
-        distances, indices = local_tree.query(input_points, workers=kdtree_workers)
-        matched = distances <= tolerance
-        matched_count = int(np.count_nonzero(matched))
-        if not _match_fraction_is_acceptable(matched_count, n_input_points, min_match_fraction):
+        if total_points != n_input_points:
+            output_file.unlink(missing_ok=True)
             return (
                 input_file.name,
                 matched_count,
                 n_input_points,
-                0,
+                unique_instances,
+                False,
+                f"Wrote {total_points:,}/{n_input_points:,} original points",
+            )
+        if not _match_fraction_is_acceptable(matched_count, n_input_points, min_match_fraction):
+            output_file.unlink(missing_ok=True)
+            return (
+                input_file.name,
+                matched_count,
+                n_input_points,
+                unique_instances,
                 False,
                 _match_quality_message(matched_count, n_input_points, tolerance, min_match_fraction),
             )
@@ -1000,7 +913,7 @@ def remap_to_original_input_files(
     threedtrees_dims: Optional[List[str]] = None,
     threedtrees_suffix: str = "SAT",
     num_spatial_chunks: int = 1,
-    prefer_copc_sources: bool = True,
+    chunk_size: int = 1_000_000,
     min_match_fraction: float = MIN_ORIGINAL_REMAP_MATCH_FRACTION,
 ):
     """Transfer selected merged prediction dimensions back to original input files."""
@@ -1008,16 +921,11 @@ def remap_to_original_input_files(
     print("Remapping to original input files", flush=True)
     print(f"{'=' * 60}", flush=True)
 
-    original_files = (
-        point_cloud_files(original_input_dir)
-        if prefer_copc_sources
-        else raw_point_cloud_files(original_input_dir)
-    )
+    original_files = raw_point_cloud_files(original_input_dir)
     if len(original_files) == 0:
         print(f"  No LAZ/LAS files found in {original_input_dir}", flush=True)
         return
-    if not prefer_copc_sources:
-        print("  Raw-original mode: ignoring COPC twins in original input dir", flush=True)
+    print("  Raw-original mode: ignoring COPC twins in original input dir", flush=True)
 
     print(f"  Found {len(original_files)} original input files", flush=True)
     print(f"  Output: {output_dir}", flush=True)
@@ -1065,7 +973,8 @@ def remap_to_original_input_files(
 
     print(f"  Processing {len(files_to_process)} files...", flush=True)
 
-    kdtree_workers = -1
+    parallel_workers = min(num_threads, len(files_to_process)) if num_threads > 1 else 1
+    kdtree_workers = kdtree_query_workers(num_threads, parallel_workers)
     process_args = [
         (
             input_file,
@@ -1079,6 +988,7 @@ def remap_to_original_input_files(
             threedtrees_dims_set,
             threedtrees_suffix,
             num_spatial_chunks,
+            chunk_size,
             min_match_fraction,
         )
         for input_file, output_file in files_to_process
@@ -1087,9 +997,12 @@ def remap_to_original_input_files(
     total_matched = 0
     total_points = 0
     failures = []
-    parallel_workers = min(num_threads, len(files_to_process)) if num_threads > 1 else 1
     if parallel_workers > 1:
-        print(f"  Processing with {parallel_workers} parallel workers...", flush=True)
+        print(
+            f"  Processing with {parallel_workers} parallel workers; "
+            f"{kdtree_workers} KDTree query worker(s) each...",
+            flush=True,
+        )
         with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
             results = executor.map(_process_single_original_input_file, process_args)
             for i, result in enumerate(results):
@@ -1152,7 +1065,6 @@ def remap_merged_file_to_original_input_files(
     threedtrees_suffix: str = "SAT",
     num_spatial_chunks: int = 1,
     chunk_size: int = 5_000_000,
-    prefer_copc_sources: bool = True,
     min_match_fraction: float = MIN_ORIGINAL_REMAP_MATCH_FRACTION,
 ):
     """Transfer merged prediction dimensions back to originals.
@@ -1179,23 +1091,17 @@ def remap_merged_file_to_original_input_files(
             threedtrees_dims=threedtrees_dims,
             threedtrees_suffix=threedtrees_suffix,
             num_spatial_chunks=num_spatial_chunks,
-            prefer_copc_sources=prefer_copc_sources,
             min_match_fraction=min_match_fraction,
         )
 
     print(f"\n{'=' * 60}", flush=True)
     print("Remapping merged COPC to original input files", flush=True)
     print(f"{'=' * 60}", flush=True)
-    original_files = (
-        point_cloud_files(original_input_dir)
-        if prefer_copc_sources
-        else raw_point_cloud_files(original_input_dir)
-    )
+    original_files = raw_point_cloud_files(original_input_dir)
     if len(original_files) == 0:
         print(f"  No LAZ/LAS files found in {original_input_dir}", flush=True)
         return
-    if not prefer_copc_sources:
-        print("  Raw-original mode: ignoring COPC twins in original input dir", flush=True)
+    print("  Raw-original mode: ignoring COPC twins in original input dir", flush=True)
 
     with laspy.open(str(merged_file), laz_backend=laspy.LazBackend.LazrsParallel) as merged_reader:
         merged_extra_dim_params = _extra_dim_params_from_header(merged_reader.header)
@@ -1246,7 +1152,7 @@ def remap_merged_file_to_original_input_files(
         return
 
     parallel_workers = min(max(1, num_threads), len(files_to_process))
-    kdtree_workers = -1 if parallel_workers == 1 else max(1, num_threads // parallel_workers)
+    kdtree_workers = kdtree_query_workers(num_threads, parallel_workers)
     process_args = [
         (
             input_file,
@@ -1268,7 +1174,11 @@ def remap_merged_file_to_original_input_files(
     total_points = 0
     failures = []
     if parallel_workers > 1:
-        print(f"  Processing with {parallel_workers} parallel original-file workers...", flush=True)
+        print(
+            f"  Processing with {parallel_workers} parallel original-file workers; "
+            f"{kdtree_workers} KDTree query worker(s) each...",
+            flush=True,
+        )
         with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
             results = list(executor.map(_process_single_original_input_file_from_merged_copc, process_args))
     else:

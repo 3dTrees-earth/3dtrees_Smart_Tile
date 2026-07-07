@@ -9,11 +9,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 try:
     from parameters import Parameters  # noqa: E402
+    import main_merge  # noqa: E402
     import run  # noqa: E402
 except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
     if exc.name not in {"pydantic_settings", "pydantic"}:
         raise
     Parameters = None
+    main_merge = None
     run = None
 
 
@@ -147,14 +149,13 @@ class RunMergeDirectLazTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             segmented = root / "segmented_remapped"
-            copc_dir = root / "copc"
             laz_dir = root / "raw_laz"
             laz_out = root / "raw_enriched"
             out_tiles = root / "output_tiles"
             tile_bounds = root / "tile_bounds_tindex.json"
-            for directory in (segmented, copc_dir, laz_dir):
+            for directory in (segmented, laz_dir):
                 directory.mkdir()
-            tile_bounds.write_text("{}", encoding="utf-8")
+            tile_bounds.write_text('{"tile_buffer": 24.0, "tiles": []}', encoding="utf-8")
 
             params = Parameters(
                 task="merge",
@@ -162,7 +163,6 @@ class RunMergeDirectLazTests(unittest.TestCase):
                 tile_bounds_json=tile_bounds,
                 output_tiles_folder=out_tiles,
                 output_merged_laz=root / "merged.laz",
-                original_copc_input_dir=copc_dir,
                 original_laz_input_dir=laz_dir,
                 original_laz_output_dir=laz_out,
                 transfer_original_dims_to_merged=False,
@@ -255,22 +255,19 @@ class RunMergeDirectLazTests(unittest.TestCase):
             self.assertEqual(kwargs["chunk_workers"], 5)
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
-    def test_merge_copc_only_original_lane_is_rejected(self):
+    def test_merge_without_laz_original_lane_runs_without_original_outputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             segmented = root / "segmented_remapped"
-            copc_dir = root / "copc"
             tile_bounds = root / "tile_bounds_tindex.json"
-            for directory in (segmented, copc_dir):
-                directory.mkdir()
-            tile_bounds.write_text("{}", encoding="utf-8")
+            segmented.mkdir()
+            tile_bounds.write_text('{"tile_buffer": 20.0, "tiles": []}', encoding="utf-8")
 
             params = Parameters(
                 task="merge",
                 segmented_remapped_folder=segmented,
                 tile_bounds_json=tile_bounds,
                 output_tiles_folder=root / "output_tiles",
-                original_copc_input_dir=copc_dir,
                 transfer_original_dims_to_merged=False,
                 workers=1,
                 _cli_parse_args=False,
