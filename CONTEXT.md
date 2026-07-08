@@ -4,6 +4,33 @@ This file is for coding agents working on SmartTile. It is intentionally more
 implementation-facing than `README.md`; use the README for user-facing behavior
 and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 
+## Current Handoff State (2026-07-08)
+
+- Repo/branch: `/home/kg281/projects/3dtrees_smart_tile`, branch `v2.2`,
+  tracking `upstream/v2.2`.
+- Current code head: `bb13f7a Fix SmartTile v2.2 Docker tag docs`.
+- Local checkout is expected to be clean before new work. Verify with
+  `git status -sb`.
+- Local validation command that worked in this checkout:
+  `/home/kg281/anaconda3/bin/python -m pytest` -> `243 passed`.
+- Published container smoke test that worked:
+  `docker run --rm ghcr.io/3dtrees-earth/3dtrees_smart_tile:v2.2 python /src/run.py --show-params`.
+- Published Docker image: `ghcr.io/3dtrees-earth/3dtrees_smart_tile:v2.2`
+  from GitHub Actions run `28884470282`, package version id `1009022178`,
+  updated `2026-07-07T17:07:37Z`.
+- ToolShed has SmartTile `2.2+galaxy15` as revision `7:d839ad802f56`.
+- UseGalaxy.eu still exposes only SmartTile `2.1.0+galaxy0`
+  (`ctx_rev=6`, changeset `b05456e47259`) as of the last check.
+- Production workflow pin PR exists but must stay draft until explicitly
+  approved and until the Galaxy deployment plan is clear:
+  `https://github.com/3dTrees-earth/3dtrees/pull/254`.
+- A simple ToolShed wrapper rollback to `2.1.0+galaxy0` is not viable as a
+  new ToolShed revision: PR `https://github.com/bgruening/galaxytools/pull/1911`
+  was closed unmerged and CI failed with `ShedVersion` because ToolShed requires
+  monotonic installable tool versions after `2.2+galaxy15`.
+- Do not merge SmartTile wrapper, workflow, or production rollout PRs without
+  explicit user approval.
+
 ## Product Contract
 
 - Preserve uploaded point clouds as closely as the selected output format allows.
@@ -166,9 +193,10 @@ Before changing product behavior, check:
 Fast local validation:
 
 ```bash
-python -m py_compile src/*.py
-python -m unittest discover -s tests
+/home/kg281/anaconda3/bin/python -m py_compile src/*.py
+/home/kg281/anaconda3/bin/python -m pytest
 git diff --check
+docker run --rm ghcr.io/3dtrees-earth/3dtrees_smart_tile:v2.2 python /src/run.py --show-params
 ```
 
 Important test areas:
@@ -177,9 +205,17 @@ Important test areas:
 - metadata/header/CRS preservation helpers
 - COM and nearest-to-centroid subsampling selection
 - scientific-notation bounds parsing
+- EPSG:5650/zone-prefixed coordinate scale-offset safety
 - one-pass multi-collection remap behavior
 - prediction label dtype rules
 - scale/offset preservation during remap
+- CPU/file worker budget wiring: file-level workers default to two; spatial
+  chunking uses available CPUs/Galaxy slots
+- tree sidecar pruning and disabling cross-tile matching/small-cluster
+  reassignment when tree sidecars are present
+- COPC conversion dimension policy: prefer Untwine, strip extra dimensions for
+  non-prod subsampled/tiled COPCs, preserve enriched dimensions for prod-merged
+  outputs
 
 For production-like checks, use small real datasets first, then run a multi-file
 dataset through tiling, segmentation, merge's built-in prediction filter/remap
@@ -188,6 +224,13 @@ and dimensions against the original source files.
 
 ## Current Watch Items
 
+- Production deployment is intentionally not complete. UseGalaxy.eu has not
+  installed v2.2, and the production workflow PR is draft. Dataset 2095 has only
+  mathematical/local metadata validation for the EPSG:5650 overflow fix; it has
+  not completed a live production v2.2 rerun.
+- If the team wants to supersede the published ToolShed v2.2 wrapper, create a
+  forward version such as `2.2+galaxy16` or `2.2.1+galaxy0`; do not attempt to
+  publish a lower `2.1.0+galaxy0` wrapper as a new revision.
 - `main_subsample.py` and `main_create_merged_file.py` are still large. Prefer
   extracting focused helpers instead of adding new modes inline.
 - COPC finalization can be scratch-disk heavy even when memory is bounded.
