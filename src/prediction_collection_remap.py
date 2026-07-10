@@ -366,15 +366,12 @@ def _add_prediction_dims_to_header(
 
 
 def _copy_source_record_dimensions(source_points, out_record) -> None:
-    """Copy dimensions present on a source point record into an output record."""
-    output_dim_names = set(out_record.point_format.dimension_names)
-    output_dim_names.update(dim.name for dim in out_record.point_format.extra_dimensions)
-    for dim_name in source_points.point_format.dimension_names:
-        if dim_name in output_dim_names:
-            out_record[dim_name] = source_points[dim_name]
-    for dim in source_points.point_format.extra_dimensions:
-        if dim.name in output_dim_names:
-            out_record[dim.name] = source_points[dim.name]
+    """Copy source point record fields without rescaling or requantizing values."""
+    source_fields = getattr(source_points.array, "dtype", None).names or ()
+    output_fields = set(getattr(out_record.array, "dtype", None).names or ())
+    for field_name in source_fields:
+        if field_name in output_fields:
+            out_record.array[field_name] = source_points.array[field_name]
 
 
 def _enrich_original_chunk(
@@ -396,9 +393,7 @@ def _enrich_original_chunk(
         float(np.max(chunk_points[:, 1])),
     )
     out_chunk = laspy.ScaleAwarePointRecord.zeros(len(chunk), header=header)
-    for dim_name in chunk.point_format.dimension_names:
-        if dim_name in out_chunk.point_format.dimension_names:
-            out_chunk[dim_name] = chunk[dim_name]
+    _copy_source_record_dimensions(chunk, out_chunk)
 
     matched_total = 0
     for coll_meta in collection_meta:

@@ -174,6 +174,48 @@ class MultiCollectionRemapTests(unittest.TestCase):
             ]
             self.assertEqual(len(projection_vlrs), 1)
 
+    def test_remap_preserves_fractional_source_extra_dimensions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_dir = root / "originals"
+            pred_dir = root / "predictions"
+            output_dir = root / "original_with_predictions"
+            original_dir.mkdir()
+            pred_dir.mkdir()
+
+            range_values = np.array([460.1167, 460.1037, 461.1873, 461.1484], dtype=np.float32)
+            theta_values = np.array([66.57236, 66.56739, 65.74368, 65.74030], dtype=np.float32)
+            phi_values = np.array([253.63658, 253.64268, 253.07741, 253.06166], dtype=np.float32)
+            _write_las(
+                original_dir / "source.las",
+                {
+                    "Range": range_values,
+                    "Theta": theta_values,
+                    "Phi": phi_values,
+                },
+            )
+            _write_las(
+                pred_dir / "source_pred.las",
+                {
+                    "PredInstance_SAT": np.array([1, 1, 0, 2], dtype=np.uint16),
+                },
+            )
+
+            remap_prediction_collections_to_original_files(
+                [pred_dir],
+                original_dir,
+                output_dir,
+                tolerance=0.001,
+                num_threads=1,
+                prefer_copc_sources=False,
+            )
+
+            out = laspy.read(output_dir / "source.las")
+            np.testing.assert_array_equal(out.Range, range_values)
+            np.testing.assert_array_equal(out.Theta, theta_values)
+            np.testing.assert_array_equal(out.Phi, phi_values)
+            np.testing.assert_array_equal(out.PredInstance_SAT, np.array([1, 1, 0, 2], dtype=np.uint16))
+
     def test_remaps_two_segmented_10cm_and_1cm_collections_to_originals(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

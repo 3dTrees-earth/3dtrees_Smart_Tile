@@ -308,15 +308,12 @@ def retile_to_original_files(
 
 
 def _copy_record_dimensions(source_points, out_record) -> None:
-    """Copy dimensions from a source point record into an output record."""
-    output_names = set(out_record.point_format.dimension_names)
-    output_names.update(dim.name for dim in out_record.point_format.extra_dimensions)
-    for dim_name in source_points.point_format.dimension_names:
-        if dim_name in output_names:
-            out_record[dim_name] = source_points[dim_name]
-    for dim in source_points.point_format.extra_dimensions:
-        if dim.name in output_names:
-            out_record[dim.name] = source_points[dim.name]
+    """Copy source point record fields without rescaling or requantizing values."""
+    source_fields = getattr(source_points.array, "dtype", None).names or ()
+    output_fields = set(getattr(out_record.array, "dtype", None).names or ())
+    for field_name in source_fields:
+        if field_name in output_fields:
+            out_record.array[field_name] = source_points.array[field_name]
 
 
 def _branded_prediction_name(dim_name: str, threedtrees_suffix: str) -> str:
