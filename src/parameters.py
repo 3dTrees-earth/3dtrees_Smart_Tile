@@ -15,7 +15,7 @@ from pathlib import Path
 from collections.abc import Iterable
 from typing import Optional
 
-from worker_budget import DEFAULT_FILE_WORKERS, available_cpu_count
+from worker_budget import DEFAULT_FILE_WORKERS, DEFAULT_MEMORY_GB, available_cpu_count
 
 
 class Parameters(BaseSettings):
@@ -174,6 +174,16 @@ class Parameters(BaseSettings):
         default=20_000_000,
         description="Points per chunk when reading LAZ/LAS in tiling Phase 1 or multi-collection remap (smaller = less peak RAM, more overhead)",
         validation_alias=AliasChoices("chunk-size", "chunk_size"),
+    )
+
+    memory_gb: float = Field(
+        DEFAULT_MEMORY_GB,
+        gt=0,
+        description=(
+            "Memory in GiB for worker pools that are capped by memory use. Defaults to "
+            "4 GiB so shared/HPC runs do not infer or consume all available node memory."
+        ),
+        validation_alias=AliasChoices("memory-gb"),
     )
 
     # ==========================================================================
@@ -681,6 +691,7 @@ class Parameters(BaseSettings):
         cli_ignore_unknown_args=True,
         env_prefix="",  # No prefix for env vars
         extra="ignore",  # Ignore unknown fields
+        populate_by_name=True,
     )
 
 
@@ -696,6 +707,7 @@ def print_params(params: Parameters):
     print(f"  output_dir: {params.output_dir}")
     print(f"  workers: {params.workers}")
     print(f"  num_spatial_chunks: {params.num_spatial_chunks}")
+    print(f"  memory_gb: {params.memory_gb}")
     print(f"  instance_dimension: {params.instance_dimension}")
     print(f"  filter_suffix: {params.filter_suffix}")
     print(f"  filter_output_extension: {params.filter_output_extension}")

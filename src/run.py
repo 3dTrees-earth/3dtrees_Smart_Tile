@@ -662,6 +662,7 @@ def run_merge_task(params: Parameters):
             threedtrees_dims=threedtrees_dims,
             threedtrees_suffix=threedtrees_suffix,
             chunk_size=params.chunk_size or 1_000_000,
+            memory_gb=params.memory_gb,
         )
 
         if original_input_dir:
@@ -1070,7 +1071,8 @@ def _accepted_cli_flags() -> set[str]:
         "no-transfer_original_dims_to_merged",
     }
     for field_name, field in Parameters.model_fields.items():
-        accepted.add(field_name)
+        if field_name != "memory_gb":
+            accepted.add(field_name)
         accepted.add(field_name.replace("_", "-"))
         validation_alias = field.validation_alias
         if validation_alias is None:
@@ -1134,7 +1136,7 @@ def _field_cli_flags(field_name: str) -> list[str]:
 def _print_cli_help() -> None:
     """Print a compact SmartTile CLI help page."""
     option_groups = [
-        ("Common", ["task", "input_dir", "output_dir", "workers", "num_spatial_chunks", "chunk_size"]),
+        ("Common", ["task", "input_dir", "output_dir", "workers", "num_spatial_chunks", "chunk_size", "memory_gb"]),
         (
             "Tile",
             [

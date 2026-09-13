@@ -396,7 +396,7 @@ python src/run.py --task tile \
     --resolution-2 0.1 \                   # Second resolution (default: 10cm)
     --output-copc-res1 True \              # 1cm output as COPC LAZ (default: True)
     --output-copc-res2 False \             # 10cm output as regular LAZ (default: False)
-    --workers 8 \                          # Parallel workers (default: 4)
+    --workers 8 \                          # Parallel workers (default: 2)
     --threads 10                           # Threads per COPC writer (default: 10)
 ```
 
@@ -453,7 +453,7 @@ python src/run.py --task merge \
     --buffer 10.0 \                                # Buffer zone distance (default: 10m)
     --overlap-threshold 0.3 \                      # Instance matching (default: 0.3)
     --max-centroid-distance 3.0 \                   # Max centroid distance (default: 3m)
-    --workers 8 \                                  # Parallel workers (default: 4)
+    --workers 8 \                                  # Parallel workers (default: 2)
     --disable-matching                             # Disable cross-tile matching
 ```
 
@@ -753,8 +753,8 @@ only per-tile outputs, enriched originals, or prod-merged products are needed.
 | `--tile-length` | 100 | Tile size in meters |
 | `--tile-buffer` | 20 | Buffer overlap in meters |
 | `--threads` | 10 | Threads per COPC writer |
-| `--workers` | 4 | Parallel file/tile processing |
-| `--num-spatial-chunks` | `--workers` | Per-file subsampling parallelism for COM windows or stripe chunks |
+| `--workers` | 2 | Parallel file/tile processing |
+| `--num-spatial-chunks` | available CPUs | Per-file subsampling parallelism for COM windows or stripe chunks |
 | `--resolution-1` | 0.01 | First subsampling resolution (1cm) |
 | `--resolution-2` | 0.1 | Second subsampling resolution (10cm) |
 | `--output-copc-res1` | True | Write first-resolution subsampled outputs as COPC LAZ (`*.copc.laz`) |
@@ -782,7 +782,8 @@ only per-tile outputs, enriched originals, or prod-merged products are needed.
 | `--skip-merged-file` | False | Skip creating the processed merged LAZ; per-tile outputs and optional original/prod-merged outputs can still be written |
 | `--disable-matching` | False | Disable cross-tile instance matching |
 | `--disable-volume-merge` | False | Disable small volume instance merging |
-| `--workers` | 4 | Parallel processing (tile loading, KDTree queries) |
+| `--workers` | 2 | Parallel processing (tile loading, KDTree queries) |
+| `--memory-gb` | 4.0 | Memory in GiB for worker pools that are capped by memory use; useful on shared/HPC nodes |
 | `--tolerance` | 5.0 | Max difference in meters for bounds matching (remap task) |
 
 *Retile buffer is fixed internally at 2.0 m; correspondence tolerance is no longer a user parameter.*
@@ -812,7 +813,7 @@ Controls how many files/tasks run simultaneously using Python's `ProcessPoolExec
 | **Merge Task** | Parallel tile loading, parallel convex hull computation, KDTree queries |
 | **Remap Task** | Parallel files/tiles; for one raw original, parallel original chunks; KDTree query workers are divided across the active workers |
 
-**Memory impact**: Higher values = more files or remap chunks in memory simultaneously. Remap keeps the total KDTree CPU budget bounded by sharing `--workers` across outer remap workers, raw chunk workers, and inner SciPy query workers.
+**Memory impact**: Higher values = more files or remap chunks in memory simultaneously. Remap keeps the total KDTree CPU budget bounded by sharing `--workers` across outer remap workers, raw chunk workers, and inner SciPy query workers. Merge tile loading also caps concurrent loaders by the explicit `--memory-gb` value, defaulting to `4.0` GiB for shared/HPC environments.
 
 For tile distribution of a single large source, SmartTile caps each worker's laspy chunk size to approximately `--chunk-size / --workers` with a 100k-point floor. This prevents `--workers=20 --chunk-size=20_000_000` from trying to hold 20 full 20M-point chunks at once.
 
@@ -841,7 +842,7 @@ Example with --num-spatial-chunks=5:
 
 **Memory and disk impact**: Higher values increase subsampling worker concurrency and reduce per-product read windows. Tune down if memory or storage I/O becomes the bottleneck; tune up when bounded product chunks are still too large.
 
-If not specified, this defaults to `--workers`.
+If not specified, this defaults to the available CPU count.
 
 
 
@@ -1039,6 +1040,7 @@ wrapper uses the same `run.py` task surface inside
 #### "Memory allocation failed"
 - Reduce `--tile-length` for smaller tiles
 - Decrease `--workers` to limit concurrent memory usage
+- Decrease `--memory-gb` on shared/HPC nodes when SmartTile must stay below a scheduler or container memory allocation
 - Decrease `--chunk-size` if single-source tile distribution still uses too much memory
 - Decrease `--num-spatial-chunks` to limit per-file subsampling workers
 - Use `--resolution-1` and `--resolution-2` with larger values
