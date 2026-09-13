@@ -313,8 +313,19 @@ def _distribute_source_file(args: Tuple) -> List[Tuple[str, int]]:
             for chunk_index, chunk in enumerate(chunk_iter):
                 cx = np.asarray(chunk.x)
                 cy = np.asarray(chunk.y)
+                chunk_minx = float(cx.min()) if len(cx) else 0.0
+                chunk_maxx = float(cx.max()) if len(cx) else 0.0
+                chunk_miny = float(cy.min()) if len(cy) else 0.0
+                chunk_maxy = float(cy.max()) if len(cy) else 0.0
+                candidate_tile_indices = np.flatnonzero(
+                    (tile_xmax >= chunk_minx)
+                    & (tile_xmin <= chunk_maxx)
+                    & (tile_ymax >= chunk_miny)
+                    & (tile_ymin <= chunk_maxy)
+                )
 
-                for i, label in enumerate(tile_labels):
+                for i in candidate_tile_indices:
+                    label = tile_labels[i]
                     mask = (
                         (cx >= tile_xmin[i])
                         & (cx <= tile_xmax[i])

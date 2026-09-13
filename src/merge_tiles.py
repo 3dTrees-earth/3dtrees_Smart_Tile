@@ -27,7 +27,7 @@ import numpy as np
 import laspy
 from pathlib import Path
 from typing import Dict, List, Tuple, Set, Optional
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from instance_labels import (
     MERGED_OUTPUT_SCALES,
     cast_instances_for_output,
@@ -65,6 +65,7 @@ from tile_bounds_graph import (
     match_tiles_to_json_bounds,
 )
 from filter_task_support import derive_tile_buffer_from_json, is_tree_sidecar_file
+from worker_budget import DEFAULT_MEMORY_GB, memory_limited_worker_count
 
 # Force unbuffered output for real-time progress feedback
 # (especially important when running in Docker/containers)
@@ -79,6 +80,25 @@ def _merge_input_files(input_dir: Path) -> List[Path]:
 def input_has_tree_sidecars(input_dir: Path) -> bool:
     """Return whether a merge/filter input directory contains tree sidecar files."""
     return any(is_tree_sidecar_file(path) for path in Path(input_dir).glob("*.txt"))
+
+
+def _estimate_tile_load_bytes(filepath: Path, instance_dimension: str) -> int:
+    """Estimate peak bytes needed by load_tile for one tile in a worker process."""
+    try:
+        with laspy.open(str(filepath), laz_backend=laspy.LazBackend.Lazrs) as reader:
+            point_count = int(reader.header.point_count)
+            extra_dims = list(reader.header.point_format.extra_dimensions)
+    except Exception:
+        return 0
+
+    # points float64 XYZ + int32 instances + loaded extra dims + mask/temporary overhead.
+    fixed = point_count * (3 * np.dtype(np.float64).itemsize + np.dtype(np.int32).itemsize)
+    extras = point_count * sum(
+        np.dtype(dim.dtype).itemsize
+        for dim in extra_dims
+        if dim.name not in {instance_dimension, "treeID"}
+    )
+    return int((fixed + extras) * 1.75)
 
 
 def _assign_local_only_instances(
@@ -175,10 +195,14 @@ def merge_tiles(
     threedtrees_dims: Optional[List[str]] = None,
     threedtrees_suffix: str = "SAT",
     chunk_size: int = 1_000_000,
+    memory_gb: float = DEFAULT_MEMORY_GB,
 ):
     """
     Main merge function implementing the tile merging pipeline.
     """
+    if memory_gb <= 0:
+        raise ValueError("memory_gb must be greater than 0")
+
     if tile_bounds_json is None:
         raise ValueError("tile_bounds_json is required but was not provided.")
     if not tile_bounds_json.exists():
@@ -207,6 +231,7 @@ def merge_tiles(
     print(f"Instance dimension: {instance_dimension}")
     print(f"Buffer: {buffer}m (from tile_bounds_tindex.json)")
     print(f"Workers: {num_threads}")
+    print(f"Memory: {memory_gb:.2f} GiB")
     print(f"Instance matching: {'ENABLED' if enable_matching else 'DISABLED'}")
     if enable_matching:
         print(f"  Overlap threshold: {overlap_threshold}")
@@ -355,7 +380,6 @@ def merge_tiles(
     print(f"\n{'=' * 60}")
     print("Stage 1: Loading tiles and filtering buffer zone instances")
     print(f"{'=' * 60}")
-    print(f"  Loading {len(laz_files)} files using {num_threads} workers (--workers={num_threads})...")
 
     tiles = []
     filtered_instances_per_tile = {}
@@ -364,22 +388,51 @@ def merge_tiles(
     # Load tiles in parallel using ProcessPoolExecutor for true CPU parallelism
     # Prepare arguments for multiprocessing (must be pickleable)
     load_args = [(f, tile_boundaries, buffer, neighbors_by_tile, instance_dimension) for f in laz_files]
-
-    with ProcessPoolExecutor(max_workers=num_threads) as executor:
-        results = list(executor.map(_load_tile_wrapper, load_args))
+    tile_order = {merge_tile_name(path): idx for idx, path in enumerate(laz_files)}
+    tile_load_bytes = [
+        _estimate_tile_load_bytes(path, instance_dimension)
+        for path in laz_files
+    ]
+    bytes_per_loader = max(tile_load_bytes, default=0)
+    load_workers = memory_limited_worker_count(
+        num_threads,
+        len(load_args),
+        bytes_per_worker=bytes_per_loader,
+        memory_gb=memory_gb,
+    )
+    print(
+        f"  Loading {len(laz_files)} files using {load_workers} worker(s) "
+        f"(--workers={num_threads})..."
+    )
+    if load_workers < max(1, min(num_threads, len(load_args))):
+        print(
+            "  Memory setting reduced concurrent tile loading "
+            f"(memory_gb={memory_gb:.2f})."
+        )
 
     # Process results
     buffer_direction_per_tile = {}  # tile_name -> {inst_id -> direction}
-    for result in results:
-        if result is not None:
-            tile_data, filtered, kept, buffer_dirs = result
-            tiles.append(tile_data)
-            filtered_instances_per_tile[tile_data.name] = filtered
-            kept_instances_per_tile[tile_data.name] = kept
-            buffer_direction_per_tile[tile_data.name] = buffer_dirs
 
-    # Clean up loading intermediates
-    del results
+    def record_loaded_tile(result) -> None:
+        if result is None:
+            return
+        tile_data, filtered, kept, buffer_dirs = result
+        tiles.append(tile_data)
+        filtered_instances_per_tile[tile_data.name] = filtered
+        kept_instances_per_tile[tile_data.name] = kept
+        buffer_direction_per_tile[tile_data.name] = buffer_dirs
+
+    if load_workers == 1:
+        result_iter = (_load_tile_wrapper(args) for args in load_args)
+        for result in result_iter:
+            record_loaded_tile(result)
+    else:
+        with ProcessPoolExecutor(max_workers=load_workers) as executor:
+            futures = [executor.submit(_load_tile_wrapper, args) for args in load_args]
+            for future in as_completed(futures):
+                record_loaded_tile(future.result())
+
+    tiles.sort(key=lambda tile: tile_order.get(tile.name, len(tile_order)))
     gc.collect()
 
     if len(tiles) == 0:
