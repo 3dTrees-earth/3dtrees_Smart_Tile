@@ -37,6 +37,7 @@ from parameters import MERGE_PARAMS
 from merge_tiles import input_has_tree_sidecars, merge_tiles as core_merge_tiles
 from point_cloud_outputs import merged_product_header
 from point_cloud_metadata import point_cloud_files as _point_cloud_files
+from worker_budget import DEFAULT_MEMORY_GB
 
 
 def _original_with_predictions_name(path: Path) -> str:
@@ -124,6 +125,7 @@ def run_merge(
     threedtrees_dims: Optional[List[str]] = None,
     threedtrees_suffix: str = "SAT",
     chunk_size: int = 1_000_000,
+    memory_gb: float = DEFAULT_MEMORY_GB,
 ) -> Path:
     """
     Run the tile merge pipeline.
@@ -152,6 +154,8 @@ def run_merge(
     Returns:
         Path to merged output file
     """
+    if memory_gb <= 0:
+        raise ValueError("memory_gb must be greater than 0")
     print("=" * 60)
     print("3DTrees Merge Pipeline")
     print("=" * 60)
@@ -380,6 +384,7 @@ def run_merge(
         threedtrees_dims=threedtrees_dims,
         threedtrees_suffix=threedtrees_suffix,
         chunk_size=chunk_size,
+        memory_gb=memory_gb,
     )
 
     return output_merged
@@ -529,6 +534,13 @@ def main() -> None:
         help="Print detailed merge decisions"
     )
 
+    parser.add_argument(
+        "--memory-gb",
+        type=float,
+        default=DEFAULT_MEMORY_GB,
+        help=f"Memory cap for merge worker pools in GiB (default: {DEFAULT_MEMORY_GB})",
+    )
+
     args = parser.parse_args()
 
     # Run pipeline
@@ -554,6 +566,7 @@ def main() -> None:
             border_zone_width=args.border_zone_width,
             retile_buffer=args.retile_buffer,
             retile_max_radius=args.retile_max_radius,
+            memory_gb=args.memory_gb,
         )
         if not args.skip_merged_file:
             print(f"\nMerged output: {output_file}")

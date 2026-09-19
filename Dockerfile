@@ -5,40 +5,19 @@
 # Untwine is the default COPC conversion strategy (fast).
 # =============================================================================
 
-FROM condaforge/miniforge3:latest
+FROM condaforge/miniforge3:24.11.3-2@sha256:1148ac0d3edaa4f25ca77d35e440766883a1be275fd5552f106c4756ac53f532
 
-# System deps: PDAL (subprocess), GDAL (required by fiona for reading tindex GeoPackage/shapefile)
-RUN mamba install -n base -c conda-forge \
-    python=3.10 \
-    "sqlite>=3.45" \
-    pdal \
-    gdal \
-    untwine \
-    -y && \
-    mamba clean --all -y
-
-# Install uv for fast pip installs
-RUN pip install --no-cache-dir uv
-
-# Python deps (all used):
-# laspy, lazrs – LAZ/LAS read/write (filter/remap pipeline, COPC helpers)
-# numpy, scipy – arrays and cKDTree (merge_tiles-based remap/filter logic)
-# matplotlib, fiona, pyproj – plot_tiles_and_copc.py, get_bounds_from_tindex.py, prepare_tile_jobs.py
-# pydantic, pydantic-settings – parameters.py
-RUN uv pip install --system \
-    laspy \
-    lazrs \
-    numpy \
-    scipy \
-    matplotlib \
-    fiona \
-    pyproj \
-    pydantic \
-    pydantic-settings
+# Python 3.12, PDAL/GDAL/Untwine, and every Python dependency are installed
+# from the generated explicit conda lock, including immutable artifact hashes.
+COPY conda-linux-64.lock /tmp/conda-linux-64.lock
+RUN mamba install -n base --file /tmp/conda-linux-64.lock -y && \
+    mamba clean --all -y && \
+    rm /tmp/conda-linux-64.lock
 
 # Verify PDAL and untwine
 RUN pdal --version
 RUN untwine --help > /dev/null 2>&1 && echo "untwine OK" || echo "WARNING: untwine not available"
+RUN python --version | grep '^Python 3\.12\.'
 
 # ===========================================
 # Setup project

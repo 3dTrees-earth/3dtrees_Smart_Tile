@@ -58,15 +58,28 @@ DIMENSION_NAME_ALIASES = {
 def extra_bytes_params_from_dimension_info(
     dim_info,
     name: Optional[str] = None,
+    header: Optional[laspy.LasHeader] = None,
 ) -> laspy.ExtraBytesParams:
     """Build ExtraBytesParams from laspy DimensionInfo while preserving metadata."""
+    no_data = getattr(dim_info, "no_data", None)
+    # laspy currently omits ExtraBytes no-data values when it turns the VLR
+    # structs back into DimensionInfo objects. Recover the value from the VLR
+    # so remap background values and rewritten metadata remain exact.
+    if no_data is None and header is not None:
+        for vlr in header.vlrs:
+            for struct in getattr(vlr, "extra_bytes_structs", ()):
+                if struct.format_name() == dim_info.name:
+                    no_data = struct.no_data
+                    break
+            if no_data is not None:
+                break
     return laspy.ExtraBytesParams(
         name=name or dim_info.name,
         type=dim_info.dtype,
         description=getattr(dim_info, "description", "") or "",
         offsets=getattr(dim_info, "offsets", None),
         scales=getattr(dim_info, "scales", None),
-        no_data=getattr(dim_info, "no_data", None),
+        no_data=no_data,
     )
 
 

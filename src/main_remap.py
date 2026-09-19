@@ -63,33 +63,34 @@ def _load_segmented_source(
     instance_dimension: str,
     chunk_size: int,
 ) -> Tuple[np.ndarray, List[laspy.ExtraBytesParams], Dict[str, np.ndarray]]:
-    """Load segmented source points/dimensions with progress instead of one large read."""
-    point_chunks = []
-    dim_chunks: Dict[str, list] = {}
+    """Load segmented source points/dimensions with one bounded allocation."""
 
     with laspy.open(str(segmented_file), laz_backend=REMAP_LAZ_BACKEND) as reader:
         source_extra_dims = list(reader.header.point_format.extra_dimensions)
         total_points = int(reader.header.point_count)
         extra_dim_names = [dim.name for dim in source_extra_dims]
+        segmented_points = np.empty((total_points, 3), dtype=np.float64)
+        source_dim_values: Dict[str, np.ndarray] = {
+            dim.name: np.empty(total_points, dtype=dim.dtype)
+            for dim in source_extra_dims
+        }
         processed = 0
 
         for chunk_idx, chunk in enumerate(reader.chunk_iterator(chunk_size), start=1):
-            points = np.column_stack([chunk.x, chunk.y, chunk.z])
-            point_chunks.append(points)
+            chunk_len = len(chunk)
+            end = processed + chunk_len
+            segmented_points[processed:end, 0] = chunk.x
+            segmented_points[processed:end, 1] = chunk.y
+            segmented_points[processed:end, 2] = chunk.z
             for dim_name in extra_dim_names:
-                dim_chunks.setdefault(dim_name, []).append(np.asarray(chunk[dim_name]))
-            processed += len(chunk)
+                source_dim_values[dim_name][processed:end] = np.asarray(chunk[dim_name])
+            processed = end
             print(
                 f"    Loaded segmented chunk {chunk_idx}: "
                 f"{processed:,}/{total_points:,} points",
                 flush=True,
             )
 
-    segmented_points = np.vstack(point_chunks) if point_chunks else np.empty((0, 3), dtype=np.float64)
-    source_dim_values = {
-        dim_name: np.concatenate(chunks)
-        for dim_name, chunks in dim_chunks.items()
-    }
     if instance_dimension in source_dim_values:
         validate_prediction_instance_labels(
             source_dim_values[instance_dimension],
@@ -379,11 +380,10 @@ def remap_single_tile(
                 laz_backend=REMAP_LAZ_BACKEND,
             ) as writer:
                 for target_chunk in target_reader.chunk_iterator(chunk_size):
-                    target_points = np.vstack((
-                        target_chunk.x,
-                        target_chunk.y,
-                        target_chunk.z,
-                    )).T
+                    target_points = np.empty((len(target_chunk), 3), dtype=np.float64)
+                    target_points[:, 0] = target_chunk.x
+                    target_points[:, 1] = target_chunk.y
+                    target_points[:, 2] = target_chunk.z
                     _, indices = tree.query(target_points, workers=kdtree_workers)
                     out_chunk = copy_target_chunk(target_chunk)
                     for params, src_name, cast_as_instance in dims_to_add:

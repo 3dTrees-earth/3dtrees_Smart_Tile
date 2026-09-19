@@ -7,6 +7,8 @@ import os
 
 
 DEFAULT_FILE_WORKERS = 2
+DEFAULT_MEMORY_GB = 4.0
+BYTES_PER_GB = 1024**3
 
 
 def available_cpu_count() -> int:
@@ -27,3 +29,19 @@ def file_worker_count(requested_workers: int | None, item_count: int | None = No
     if item_count is not None:
         workers = min(workers, max(1, int(item_count)))
     return workers
+
+
+def memory_limited_worker_count(
+    requested_workers: int | None,
+    item_count: int | None = None,
+    *,
+    bytes_per_worker: int | None = None,
+    memory_gb: float | None = DEFAULT_MEMORY_GB,
+) -> int:
+    """Return a worker count capped by explicit memory in GiB."""
+    workers = file_worker_count(requested_workers, item_count)
+    if not bytes_per_worker or bytes_per_worker <= 0 or memory_gb is None:
+        return workers
+    budget = max(1, int(float(memory_gb) * BYTES_PER_GB))
+    memory_workers = max(1, budget // int(bytes_per_worker))
+    return max(1, min(workers, memory_workers))

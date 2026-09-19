@@ -662,6 +662,7 @@ def run_merge_task(params: Parameters):
             threedtrees_dims=threedtrees_dims,
             threedtrees_suffix=threedtrees_suffix,
             chunk_size=params.chunk_size or 1_000_000,
+            memory_gb=params.memory_gb,
         )
 
         if original_input_dir:
@@ -681,6 +682,7 @@ def run_merge_task(params: Parameters):
                 chunk_size=params.chunk_size or 5_000_000,
                 num_spatial_chunks=params.num_spatial_chunks,
                 prefer_copc_sources=False,
+                min_match_fraction=params.min_remap_match_fraction,
             )
 
         if original_input_dir and params.transfer_original_dims_to_merged:
@@ -784,6 +786,7 @@ def run_remap_task(params: Parameters):
                 target_dims=target_dims,
                 chunk_size=params.chunk_size or 5_000_000,
                 num_spatial_chunks=params.num_spatial_chunks,
+                min_match_fraction=params.min_remap_match_fraction,
             )
         except Exception as e:
             print(f"Error: {e}")
@@ -1134,7 +1137,7 @@ def _field_cli_flags(field_name: str) -> list[str]:
 def _print_cli_help() -> None:
     """Print a compact SmartTile CLI help page."""
     option_groups = [
-        ("Common", ["task", "input_dir", "output_dir", "workers", "num_spatial_chunks", "chunk_size"]),
+        ("Common", ["task", "input_dir", "output_dir", "workers", "num_spatial_chunks", "chunk_size", "memory_gb"]),
         (
             "Tile",
             [

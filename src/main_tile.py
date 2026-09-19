@@ -314,7 +314,19 @@ def _distribute_source_file(args: Tuple) -> List[Tuple[str, int]]:
                 cx = np.asarray(chunk.x)
                 cy = np.asarray(chunk.y)
 
-                for i, label in enumerate(tile_labels):
+                chunk_minx = float(cx.min()) if len(cx) else 0.0
+                chunk_maxx = float(cx.max()) if len(cx) else 0.0
+                chunk_miny = float(cy.min()) if len(cy) else 0.0
+                chunk_maxy = float(cy.max()) if len(cy) else 0.0
+                candidate_tile_indices = np.flatnonzero(
+                    (tile_xmax >= chunk_minx)
+                    & (tile_xmin <= chunk_maxx)
+                    & (tile_ymax >= chunk_miny)
+                    & (tile_ymin <= chunk_maxy)
+                )
+
+                for i in candidate_tile_indices:
+                    label = tile_labels[i]
                     mask = (
                         (cx >= tile_xmin[i])
                         & (cx <= tile_xmax[i])
@@ -673,7 +685,12 @@ def run_tiling_pipeline(
     if not fixed_tindex.exists() and tindex_file.exists():
         if fixed_tindex.is_symlink():
             fixed_tindex.unlink()
-        fixed_tindex.symlink_to(tindex_file.name)
+        try:
+            fixed_tindex.symlink_to(tindex_file.name)
+        except OSError:
+            # Windows developer environments may not grant symlink privileges.
+            # Galaxy only needs a stable path, so a byte-for-byte copy is safe.
+            shutil.copy2(tindex_file, fixed_tindex)
 
     # Plot overview
     plot_tiles_and_copc.plot_extents(

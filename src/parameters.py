@@ -15,7 +15,7 @@ from pathlib import Path
 from collections.abc import Iterable
 from typing import Optional
 
-from worker_budget import DEFAULT_FILE_WORKERS, available_cpu_count
+from worker_budget import DEFAULT_FILE_WORKERS, DEFAULT_MEMORY_GB, available_cpu_count
 
 
 class Parameters(BaseSettings):
@@ -364,6 +364,30 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("remap-tolerance", "remap_tolerance"),
     )
 
+    memory_gb: float = Field(
+        DEFAULT_MEMORY_GB,
+        gt=0,
+        description=(
+            "Memory in GiB for worker pools capped by memory use. The explicit "
+            "default avoids consuming all available memory on shared workers."
+        ),
+        validation_alias=AliasChoices("memory-gb", "memory_gb"),
+    )
+
+    min_remap_match_fraction: float = Field(
+        0.99,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum per-file, per-prediction-collection match fraction. "
+            "Unmatched points remain explicit background/no-data values."
+        ),
+        validation_alias=AliasChoices(
+            "min-remap-match-fraction",
+            "min_remap_match_fraction",
+        ),
+    )
+
     output_merged_with_originals: Optional[Path] = Field(
         default=None,
         description="Legacy path for the old merged-with-originals remap output. Prod-merged outputs now use --merged-resolutions.",
@@ -681,6 +705,7 @@ class Parameters(BaseSettings):
         cli_ignore_unknown_args=True,
         env_prefix="",  # No prefix for env vars
         extra="ignore",  # Ignore unknown fields
+        populate_by_name=True,
     )
 
 
@@ -696,6 +721,7 @@ def print_params(params: Parameters):
     print(f"  output_dir: {params.output_dir}")
     print(f"  workers: {params.workers}")
     print(f"  num_spatial_chunks: {params.num_spatial_chunks}")
+    print(f"  memory_gb: {params.memory_gb}")
     print(f"  instance_dimension: {params.instance_dimension}")
     print(f"  filter_suffix: {params.filter_suffix}")
     print(f"  filter_output_extension: {params.filter_output_extension}")
@@ -741,6 +767,7 @@ def print_params(params: Parameters):
     print(f"  segmented_folders: {params.segmented_folders}")
     print(f"  remap_dims: {params.remap_dims}")
     print(f"  remap_tolerance: {params.remap_tolerance}")
+    print(f"  min_remap_match_fraction: {params.min_remap_match_fraction}")
     print(f"  original_raw_input_dir: {params.original_raw_input_dir}")
     print(f"  original_raw_output_dir: {params.original_raw_output_dir}")
     print(f"  threedtrees_dims: {params.threedtrees_dims}")

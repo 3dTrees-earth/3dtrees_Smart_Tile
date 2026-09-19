@@ -6,7 +6,13 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from worker_budget import DEFAULT_FILE_WORKERS, available_cpu_count, file_worker_count, kdtree_query_workers  # noqa: E402
+from worker_budget import (  # noqa: E402
+    DEFAULT_FILE_WORKERS,
+    available_cpu_count,
+    file_worker_count,
+    kdtree_query_workers,
+    memory_limited_worker_count,
+)
 
 
 class WorkerBudgetTests(unittest.TestCase):
@@ -32,6 +38,27 @@ class WorkerBudgetTests(unittest.TestCase):
             self.assertEqual(available_cpu_count(), 12)
         with mock.patch("worker_budget.os.cpu_count", return_value=None):
             self.assertEqual(available_cpu_count(), 1)
+
+    def test_memory_limited_workers_respect_explicit_budget(self):
+        one_gib = 1024**3
+        self.assertEqual(
+            memory_limited_worker_count(
+                8,
+                item_count=8,
+                bytes_per_worker=one_gib,
+                memory_gb=4,
+            ),
+            4,
+        )
+        self.assertEqual(
+            memory_limited_worker_count(
+                8,
+                item_count=8,
+                bytes_per_worker=8 * one_gib,
+                memory_gb=1,
+            ),
+            1,
+        )
 
 
 if __name__ == "__main__":

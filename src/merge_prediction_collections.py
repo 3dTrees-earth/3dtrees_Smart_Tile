@@ -64,5 +64,6 @@ def prepare_merge_prediction_collection_source(
         target_dims=target_dims,
         chunk_size=params.chunk_size or 5_000_000,
         num_spatial_chunks=params.num_spatial_chunks or params.workers,
+        min_match_fraction=params.min_remap_match_fraction,
     )
     return combined_dir

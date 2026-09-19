@@ -642,6 +642,16 @@ def _preserve_and_validate_las_metadata(source_metadata_file: Path, output_file:
     valid_crs, message = copc_preserves_source_crs(source_metadata_file, output_file)
     if not valid_crs:
         return (False, f"CRS validation failed: {message}")
+
+    if source_metadata_file.exists():
+        from vector_extra_bytes import preserve_vector_schema
+
+        preserved_vectors, message = preserve_vector_schema(
+            source_metadata_file,
+            output_file,
+        )
+        if not preserved_vectors:
+            return (False, f"Vector ExtraBytes metadata preservation failed: {message}")
     return (True, "LAS metadata preserved")
 
 

@@ -286,6 +286,42 @@ def convert_laz_to_copc(
     output_copc: Path,
     preserve_extra_dims: bool = False,
 ) -> bool:
+    """Convert to COPC, automatically scalarizing vector ExtraBytes when kept."""
+    if not preserve_extra_dims:
+        return _convert_laz_to_copc_impl(input_laz, output_copc, preserve_extra_dims=False)
+
+    from vector_extra_bytes import (
+        preserve_vector_schema,
+        scalarize_vector_extra_bytes,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="smarttile-vector-extra-") as tmpdir:
+        scalar_input = Path(tmpdir) / "scalarized.laz"
+        working_input, schema = scalarize_vector_extra_bytes(input_laz, scalar_input)
+        success = _convert_laz_to_copc_impl(
+            working_input,
+            output_copc,
+            preserve_extra_dims=True,
+        )
+        if not success:
+            return False
+        if schema is not None:
+            preserved, message = preserve_vector_schema(working_input, output_copc)
+            if not preserved:
+                print(f"  Warning: {message}")
+                try:
+                    output_copc.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return False
+        return True
+
+
+def _convert_laz_to_copc_impl(
+    input_laz: Path,
+    output_copc: Path,
+    preserve_extra_dims: bool = False,
+) -> bool:
     """Convert a single LAZ/LAS file to COPC with CRS/GeoTIFF validation.
 
     The default SmartTile COPC conversion first tries Untwine's
