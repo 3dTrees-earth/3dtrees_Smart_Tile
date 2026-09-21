@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
@@ -108,6 +109,37 @@ def is_extra_bytes_vlr(vlr) -> bool:
     return getattr(vlr, "user_id", "") == "LASF_Spec" and getattr(vlr, "record_id", None) == 4
 
 
+def update_extra_dimensions(header, params, *, replace=False):
+    """Augment a header without regenerating untouched ExtraBytes descriptors.
+
+    laspy rebuilds the entire ExtraBytes VLR when dimensions change, but its
+    reader does not retain every descriptor field in DimensionInfo. Preserve
+    the original descriptors (including no-data and option bits) verbatim.
+    Replaced fields deliberately take their new schema from ``params``.
+    """
+    params = list(params)
+    changed = {param.name for param in params}
+    retained = {struct.format_name(): deepcopy(struct)
+                for vlr in header.vlrs
+                for struct in getattr(vlr, "extra_bytes_structs", ())
+                if struct.format_name() not in changed}
+    if replace:
+        existing = set(header.point_format.extra_dimension_names)
+        for name in sorted(changed.intersection(existing)):
+            header.remove_extra_dim(name)
+    header.add_extra_dims(params)
+    for vlr in header.vlrs:
+        if hasattr(vlr, "extra_bytes_structs"):
+            vlr.extra_bytes_structs = [retained.get(struct.format_name(), struct)
+                                      for struct in vlr.extra_bytes_structs]
+
+
+def write_retained_evlrs(writer, header):
+    """Finish a streaming writer with retained extended metadata after points."""
+    if header.evlrs:
+        writer.write_evlrs(header.evlrs)
+
+
 def copy_single_source_header(
     source_header: laspy.LasHeader,
     offsets=None,
@@ -137,11 +169,13 @@ def copy_single_source_header(
     header.scales = scales if scales is not None else source_header.scales
 
     source_vlrs = header.vlrs if preserve_extra_dimensions else source_header.vlrs
-    header.vlrs = VLRList([
-        vlr for vlr in source_vlrs
+    # Assigning header.vlrs invokes laspy's setter and regenerates ExtraBytes,
+    # losing descriptor fields that its reader omitted from DimensionInfo.
+    header.vlrs[:] = [
+        deepcopy(vlr) for vlr in source_vlrs
         if not is_stale_copc_vlr(vlr)
         and (preserve_extra_dimensions or not is_extra_bytes_vlr(vlr))
-    ])
+    ]
     source_evlrs = (
         getattr(header, "evlrs", None)
         if preserve_extra_dimensions

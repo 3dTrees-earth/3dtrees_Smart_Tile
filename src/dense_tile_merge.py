@@ -9,7 +9,10 @@ import laspy
 import numpy as np
 
 from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates
-from point_cloud_metadata import copy_single_source_header, extra_bytes_params_from_dimension_info
+from point_cloud_metadata import (
+    copy_single_source_header, extra_bytes_params_from_dimension_info,
+    update_extra_dimensions, write_retained_evlrs,
+)
 from prediction_collection_remap import prediction_collection_files
 from instance_labels import instance_extra_bytes_params
 
@@ -104,8 +107,7 @@ def target_header(target, model, *, ready):
         if name in existing:
             if not ready:
                 raise ValueError(f"Target already contains prediction dimension {name}")
-            header.remove_extra_dim(name)
-    header.add_extra_dims(list(model.dimensions.values()))
+    update_extra_dimensions(header, model.dimensions.values(), replace=ready)
     return header
 
 
@@ -162,6 +164,7 @@ def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, repo
                         writer.write_points(out)
                         ids, sizes = np.unique(values[model.instance], return_counts=True)
                         counts.update({(tile, int(i)): int(n) for i, n in zip(ids, sizes) if i > 0})
+                    write_retained_evlrs(writer, header)
             if metric["matched"] != metric["total"]:
                 raise ValueError(f"{model.name}: incomplete prediction assignment on {target.name}: "
                                  f"{metric['matched']}/{metric['total']} within {transfer_radius} m")
@@ -301,6 +304,7 @@ def deduplicate(model, files, dense_index, survivor_index, origin, mapping, outp
                 metric["surviving"] += int(np.count_nonzero(keep))
                 metric["removed"] += int(np.count_nonzero(~keep))
                 offset += len(record)
+            write_retained_evlrs(writer, header)
         survivor_index.flush()
         outputs.append(output)
     return outputs

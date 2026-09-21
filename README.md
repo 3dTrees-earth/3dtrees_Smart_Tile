@@ -431,6 +431,20 @@ python -m unittest discover -s tests -p 'test_*.py'
 
 The suite covers output format validation, metadata/header preservation helpers, COM subsampling method selection, scientific-notation bounds parsing, one-pass multi-collection remap behavior, and instance-label dtype rules.
 
+For a larger synthetic remap-first check, install the optional `psutil` package
+and run the following with a new output directory:
+
+```bash
+python benchmarks/remap_first_smoke.py --output-root out/remap-first-smoke
+```
+
+This generates three overlapping 1 cm tiles (300,000 points) and 200,000
+original points, then checks dense transfer, reconciliation, survivor-only
+deduplication, strict baseline/final coverage, and unchanged source fields.
+Inputs, coverage/checksum reports, timing, and sampled peak RSS remain in the
+output directory. This synthetic check does not replace the exact dataset
+3110/3111 replays required by 3DT-2101 or validate the Linux container/toolchain.
+
 ### Merge Task Options
 
 **Required:** `--subsampled-segmented-folder`, `--subsampled-target-folder`, `--tile_bounds_json` (from Tile task).

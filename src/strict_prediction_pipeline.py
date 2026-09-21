@@ -18,7 +18,10 @@ from dense_tile_merge import (
     ORIGINAL_RADIUS, copy_record, deduplicate, describe_model, index_file,
     prepare_dense, reconcile_instances,
 )
-from point_cloud_metadata import copy_single_source_header, raw_point_cloud_files
+from point_cloud_metadata import (
+    copy_single_source_header, raw_point_cloud_files,
+    update_extra_dimensions, write_retained_evlrs,
+)
 from prediction_collection_remap import prediction_collection_files
 from instance_labels import instance_extra_bytes_params
 
@@ -120,8 +123,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
             existing = set(header.point_format.dimension_names)
             if existing.intersection(used):
                 raise ValueError(f"{file.name}: original already contains prediction dimensions {sorted(existing.intersection(used))}")
-            for dims in selected:
-                header.add_extra_dims(list(dims.values()))
+            update_extra_dimensions(header, [param for dims in selected for param in dims.values()])
             final_metrics = [_coverage_metric(file, model, "final_survivors") for model in models]
             baseline_metrics = [_coverage_metric(file, model, "unfiltered_1cm") for model in models]
             metrics.extend(baseline_metrics + final_metrics)
@@ -137,6 +139,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                         for name in selected[i]:
                             out.array[name] = values[name]
                     writer.write_points(out)
+                write_retained_evlrs(writer, header)
     failures = [m for m in metrics if m["matched"] != m["total"]]
     if failures:
         report["coverage_failures"] = [
@@ -180,6 +183,7 @@ def merge_file(files, output):
                 for record in reader.chunk_iterator(MAX_BATCH_POINTS):
                     record.change_scaling(scales=header.scales, offsets=header.offsets)
                     writer.write_points(record)
+        write_retained_evlrs(writer, header)
 
 
 def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json,

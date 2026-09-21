@@ -6,6 +6,7 @@ from pathlib import Path
 
 import laspy
 import numpy as np
+from laspy.vlrs.vlrlist import VLRList
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from strict_prediction_pipeline import merge_collections, strict_remap
@@ -21,7 +22,54 @@ def layout(root, number):
     return path
 
 
+def add_extended_metadata(path):
+    cloud = laspy.convert(laspy.read(path), file_version="1.4")
+    cloud.add_extra_dim(laspy.ExtraBytesParams(name="quality", type=np.int16, no_data=[-99]))
+    cloud.quality = [-99] * len(cloud.points)
+    cloud.header.evlrs = VLRList([
+        laspy.VLR(user_id="test", record_id=99, record_data=b"important schema")])
+    cloud.write(path)
+
+
+def assert_extended_metadata(test, path):
+    cloud = laspy.read(path)
+    test.assertIn(b"important schema", [v.record_data_bytes() for v in cloud.header.evlrs])
+    descriptor = next(s for v in cloud.header.vlrs for s in getattr(v, "extra_bytes_structs", ())
+                      if s.format_name() == "quality")
+    np.testing.assert_array_equal(descriptor.no_data, [-99])
+    np.testing.assert_array_equal(cloud.quality, [-99] * len(cloud.points))
+
+
 class StrictPipelineTests(unittest.TestCase):
+    def test_streaming_stages_preserve_evlrs_and_source_no_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, targets, originals = [root / n for n in ("source", "targets", "originals")]
+            for folder in (source, targets, originals):
+                folder.mkdir()
+            write_cloud(source / "a.las", [0, .1], [1, 1])
+            for folder in (targets, originals):
+                add_extended_metadata(write_cloud(folder / "a.las", [0, .1]))
+            merge_collections(collections=[source], target_dir=targets, output_tiles=root / "out",
+                              tile_bounds_json=layout(root, 1), originals=originals,
+                              merged_output=root / "merged.laz")
+            for file in (root / "out_unfiltered_1cm/tile_00000.laz", root / "out/tile_00000.laz",
+                         root / "merged.laz", root / "original_with_predictions/a.las"):
+                with self.subTest(file=file):
+                    assert_extended_metadata(self, file)
+
+    def test_standalone_enrichment_preserves_evlrs_and_source_no_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, originals = root / "source", root / "originals"
+            source.mkdir()
+            originals.mkdir()
+            write_cloud(source / "a.las", [0], [1])
+            add_extended_metadata(write_cloud(originals / "a.las", [0]))
+            strict_remap(collections=[source], baseline_collections=[source], originals=originals,
+                         output=root / "enriched")
+            assert_extended_metadata(self, root / "enriched/a.las")
+
     def test_complete_transfer_precedes_dedup_and_original_metadata_is_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
