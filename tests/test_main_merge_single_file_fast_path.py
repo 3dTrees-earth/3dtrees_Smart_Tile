@@ -47,7 +47,7 @@ class MainMergeSingleFileFastPathTests(unittest.TestCase):
             source = segmented_dir / "c00_r00_segmented_filtered.laz"
             _write_segmented_laz(source)
 
-            with mock.patch("main_merge.core_merge_tiles") as core_merge:
+            with mock.patch("merge_tiles.merge_tiles") as core_merge:
                 result = run_merge(
                     segmented_dir=segmented_dir,
                     output_tiles_dir=output_tiles_dir,
@@ -61,7 +61,7 @@ class MainMergeSingleFileFastPathTests(unittest.TestCase):
             core_merge.assert_not_called()
             self.assertEqual(result, output_merged)
             self.assertTrue(output_merged.exists())
-            self.assertTrue((output_tiles_dir / source.name).exists())
+            self.assertTrue((output_tiles_dir / "tile_00000.laz").exists())
             metadata_csv = root / "merged_sat_instance_metadata.csv"
             self.assertTrue(metadata_csv.exists())
             self.assertIn("PredInstance_SAT,has_added_clusters", metadata_csv.read_text(encoding="utf-8"))

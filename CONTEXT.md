@@ -4,7 +4,27 @@ This file is for coding agents working on SmartTile. It is intentionally more
 implementation-facing than `README.md`; use the README for user-facing behavior
 and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 
-## Current Handoff State (2026-07-08)
+## Current merge contract (2026-09-21 / 3DT-2101)
+
+- `run.py` merge/filter/remap and `main_merge.run_merge` use
+  `strict_prediction_pipeline.py`, `dense_tile_merge.py` and
+  `bounded_point_index.py`. Older centroid/orphan merge modules are legacy
+  helpers and must not be reintroduced into the supported task path.
+- Transfer each model's unfiltered predictions to its own 1 cm target tiles
+  first: 100% assignment within the separately configured 0.125 m XYZ radius.
+- Reconcile IDs independently per model, then deduplicate only cross-tile
+  buffered overlaps with agreeing instance/semantic labels and an actual final
+  survivor within 0.01 m XYZ. Same-tile points are never thinned.
+- Validate both baseline and final original coverage at 100% within 0.01 m.
+  Sampling gaps, label conflicts and missing predictions fail before publication.
+  The earlier 99% fallback is not available in these task entry points.
+- Preserve unfiltered dense geometry and its manifest for the separate final
+  remap task; Galaxy wrappers must carry the baseline collection explicitly if
+  they do not preserve the manifest. See the README for flags and diagnostics.
+- Dense searches use fixed-size disk-backed spatial batches. Exact production
+  replays of 3110/3111 and resource benchmarking remain release obligations.
+
+## Historical Handoff State (2026-07-08)
 
 - Repo/branch: `/home/kg281/projects/3dtrees_smart_tile`, branch `v2.2`,
   tracking `upstream/v2.2`.
@@ -57,12 +77,9 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 - `tile`: converts uploaded LAZ/LAS/COPC inputs into spatial COPC tiles, then
   creates subsampled products. The default first resolution is 1cm COPC LAZ; the
   default second resolution is 10cm regular LAZ.
-- `merge`: filters duplicate buffer-zone instances from segmented predictions,
-  remaps the filtered predictions to the target resolution, merges the remapped
-  predictions into per-tile 1cm products, and can enrich uploaded originals from
-  those per-tile products before optional prod-merged creation.
-- `filter`: removes duplicate buffer-zone instances from segmented/remapped
-  tile files before downstream merge/remap workflows.
+- `merge`: transfers predictions to dense 1 cm tiles before reconciling IDs and
+  deduplicating label-consistent cross-tile points; can strictly enrich originals.
+- `filter`: runs the same reconciliation/deduplication on already-dense tiles.
 - `remap`: transfers prediction dimensions back to original source points. It
   supports multiple segmented prediction collections when their dimension names
   are already unique. The explicit production interface is

@@ -355,13 +355,26 @@ class Parameters(BaseSettings):
     )
 
     remap_tolerance: float = Field(
-        0.125,
-        gt=0,
+        0.01,
+        ge=0.01,
+        le=0.01,
         description=(
-            "Maximum nearest-neighbor distance in meters when remapping "
-            "prediction collections to original points."
+            "Final original coverage radius: fixed at 0.01 m Euclidean XYZ for v2.4. "
+            "Use --prediction-transfer-tolerance for the earlier model-to-1cm transfer."
         ),
         validation_alias=AliasChoices("remap-tolerance", "remap_tolerance"),
+    )
+
+    prediction_transfer_tolerance: float = Field(
+        0.125, gt=0,
+        description="Maximum Euclidean XYZ distance for each tile's coarse predictions to its 1 cm geometry; 100% assignment required.",
+        validation_alias=AliasChoices("prediction-transfer-tolerance", "prediction_transfer_tolerance"),
+    )
+
+    baseline_1cm_folders: Optional[str] = Field(
+        None,
+        description="Unfiltered 1 cm geometry for baseline coverage: one shared folder or comma-separated folders in model order. Merge manifests supply it automatically when available.",
+        validation_alias=AliasChoices("baseline-1cm-folders", "baseline_1cm_folders"),
     )
 
     memory_gb: float = Field(
@@ -375,12 +388,11 @@ class Parameters(BaseSettings):
     )
 
     min_remap_match_fraction: float = Field(
-        0.99,
-        ge=0.0,
+        1.0,
+        ge=1.0,
         le=1.0,
         description=(
-            "Minimum per-file, per-prediction-collection match fraction. "
-            "Unmatched points remain explicit background/no-data values."
+            "Required per-file/per-model coverage, fixed at 1.0. Missing coverage is a hard failure."
         ),
         validation_alias=AliasChoices(
             "min-remap-match-fraction",

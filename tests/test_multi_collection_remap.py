@@ -316,7 +316,7 @@ class MultiCollectionRemapTests(unittest.TestCase):
                 prediction_collections=[primary_dir, secondary_dir],
                 reference_dir=None,
                 output_folder=output_dir,
-                params=Parameters(remap_tolerance=0.001, workers=1, _cli_parse_args=False),
+                params=Parameters(workers=1, _cli_parse_args=False),
                 retile_buffer=0.0,
                 workers=1,
             )
