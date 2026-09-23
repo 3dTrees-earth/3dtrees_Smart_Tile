@@ -273,6 +273,14 @@ receives `PredInstance_RCT=0` (and zero for any other RCT prediction fields).
 The report records its unmatched count and coordinates. Unfiltered 1 cm
 baseline coverage remains mandatory.
 
+Overlapping tiles can assign the same point to different trees, each rejected
+by its own tile's core-ownership check. The neighboring tiles may still retain
+the main counterparts of both trees; only their disputed points lose both
+claims. Final remap uses a surviving prediction within the configured radius,
+or writes background 0 if none exists. See the
+[illustrated RCT ownership example](docs/raycloud-filter-only.md) for the
+observed 488/94 case, matching radii, sidecar behavior, and reporting details.
+
 ### Basic Filter Task
 
 Deduplicate already-remapped 1 cm tiles using the same point-level contract.

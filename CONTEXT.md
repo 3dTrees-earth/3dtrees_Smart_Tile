@@ -17,6 +17,10 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
   and renumbering. Filter both tree tables to exactly the retained IDs, keeping
   the original 1-based ID as a leading `predinstance` column. Require
   `--skip-merged-file` because IDs may repeat across tiles.
+  Shared points can belong to rejected instances in both tiles even when the
+  main neighboring counterparts survive. Preserve this filter-only decision;
+  final RCT remap fills only unmatched predictions with 0. See
+  `docs/raycloud-filter-only.md` for the illustrated 488/94 case and regression.
 - Transfer each model's unfiltered predictions to its own 1 cm target tiles
   first: 100% assignment within the separately configured 0.1732 m XYZ radius.
 - Remove whole instances whose selected dense anchor is outside their core;

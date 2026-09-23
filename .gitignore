@@ -8,5 +8,6 @@ out/*
 .serena/*
 *md
 !CONTEXT.md
+!docs/**/*.md
 run_*
 scripts/*

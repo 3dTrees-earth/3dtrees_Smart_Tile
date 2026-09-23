@@ -111,6 +111,48 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             self.assertEqual(laspy.read(root / "original_with_predictions" / "raw.las").PredInstance_RCT.tolist(), [0])
             self.assertTrue((root / "segmented_filtered" / "c00_r00_filtered_trees.txt").exists())
 
+    def test_shared_point_rejected_by_both_tiles_becomes_background(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, layout = self._fixture(root)
+            # Both tiles contain every coordinate. The shared point at 10.1
+            # belongs to ID 2 in both, with opposite-side buffer centroids.
+            write_cloud(source / "c00_r00_segmented.las", [9.6, 10.1, 10.4],
+                        [1, 2, 2], [5, 6, 6], instance="PredInstance_RCT")
+            write_cloud(source / "c01_r00_segmented.las", [9.6, 10.1, 10.4],
+                        [2, 2, 1], [8, 8, 9], instance="PredInstance_RCT")
+            originals = root / "originals"
+            originals.mkdir()
+            write_cloud(originals / "raw.las", [9.6, 10.1, 10.405])
+            report = merge_collections(
+                collections=[source], target_dir=None, output_tiles=root / "output_tiles",
+                tile_bounds_json=layout, ready=True, originals=originals,
+                instance_dimension="PredInstance_RCT")
+            model = report["models"][0]
+            self.assertEqual(model["reconciliation"]["accepted_pairs"], [])
+            for tile in model["instance_ownership"]["tiles"]:
+                self.assertEqual({i["instance"]: i["kept"] for i in tile["instances"]},
+                                 {1: True, 2: False})
+            for tile in range(2):
+                cloud = laspy.read(root / "output_tiles" / f"tile_{tile:05d}.laz")
+                self.assertEqual(cloud.PredInstance_RCT.tolist(), [1])
+                for suffix in ("trees", "trees_info"):
+                    sidecar = root / "segmented_filtered" / f"c{tile:02d}_r00_filtered_{suffix}.txt"
+                    self.assertEqual(sidecar.read_text(),
+                                     "# RCT tree table\npredinstance,header\n1,tree-1\n")
+            output = laspy.read(root / "original_with_predictions" / "raw.las")
+            original = laspy.read(originals / "raw.las")
+            self.assertEqual(output.X.tolist(), original.X.tolist())
+            self.assertEqual(output.intensity.tolist(), original.intensity.tolist())
+            self.assertEqual(output.PredInstance_RCT.tolist(), [1, 0, 1])
+            self.assertEqual(output.PredSemantic_RCT.tolist(), [5, 0, 9])
+            self.assertEqual(report["state"], "validated")
+            self.assertEqual(report["background_assigned_points"], 1)
+            baseline = next(m for m in report["original_coverage"] if m["stage"] == "unfiltered_1cm")
+            self.assertEqual((baseline["matched"], baseline["total"]), (3, 3))
+            final = next(m for m in report["original_coverage"] if m["stage"] == "final_survivors")
+            self.assertEqual((final["matched"], final["total"], final["background_assigned"]), (2, 3, 1))
+
     def test_final_remap_writes_zero_for_unmatched_rct_point(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
