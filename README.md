@@ -160,7 +160,7 @@ This pipeline provides an end-to-end solution with five user-facing task modes:
 | 2 | Core ownership | Remove whole instances whose dense centroid (or selected anchor) lies outside the core on a side with a declared neighbor. Keep points of owned instances, resolving shared claims by nearest claimant core below. |
 | 3 | Instance reconciliation | Match retained local IDs across declared tile overlaps, independently for each model. |
 | 4 | Point deduplication | Assign shared points of distinct trees to the retained claimant nearest its core; otherwise remove only label-consistent duplicates within 0.01 m XYZ. |
-| 5 | Coverage validation | Require complete original-to-unfiltered and original-to-final coverage within the first-stage voxel diagonal for every file and model. |
+| 5 | Coverage validation | Require complete original-to-unfiltered coverage. Require complete original-to-final coverage for other models; unmatched RCT final labels become background 0 and are counted in the report. |
 | 6 | Publication | Publish validated staged outputs. On failure retain diagnostics, never partial final products. |
 
 
@@ -221,8 +221,10 @@ python src/run.py --task tile \
 ### Basic Merge Task
 
 Transfer predictions to the 1 cm target geometry first, remove non-owned instances,
-reconcile retained instance IDs, then deduplicate cross-tile buffer points. Both transfer and final original
-coverage require 100% assignment.
+reconcile retained instance IDs, then deduplicate cross-tile buffer points.
+Transfer and unfiltered original coverage require 100% assignment. Final original
+coverage also requires 100% for non-RCT models; unmatched RCT points become
+background 0.
 The task always writes merged per-tile outputs for downstream processing and can
 also write the current processed merged LAZ (requires **tile_bounds_tindex.json**
 from the Tile task):
@@ -265,9 +267,11 @@ trees do not change the ID-to-row relationship. `instance_metadata.csv`
 records each retained `(tile, PredInstance_RCT)` pair. Missing or inconsistent
 tree files fail before outputs are published. RCT IDs may repeat between tiles,
 so keep the LAZ tiles and their named text tables together; a single merged LAZ
-cannot identify the tree table for a repeated ID. A later remap to one original
-cloud still requires complete coverage and can fail if strict ownership removes
-both claims at a tile boundary.
+cannot identify the tree table for a repeated ID. During final original
+remap, an RCT point with no surviving prediction inside the matching radius
+receives `PredInstance_RCT=0` (and zero for any other RCT prediction fields).
+The report records its unmatched count and coordinates. Unfiltered 1 cm
+baseline coverage remains mandatory.
 
 ### Basic Filter Task
 
@@ -378,13 +382,15 @@ wrappers must pass `--baseline-1cm-folders` explicitly when packaging only the L
 collection and dropping its manifest. The merge manifest records the first-stage resolution. Standalone remap reads it
 when available; older manifests default to 1 cm. `--resolution-1` can specify a
 finer or coarser first-stage resolution, and `--remap-tolerance` can explicitly
-override the derived final radius. The 100% coverage requirement remains; a
+override the derived final radius. Baseline coverage still requires 100%, and a
 `--min-remap-match-fraction 0.99` request is rejected.
 
 Every original file and model has separate baseline and final coverage metrics.
-The final threshold requires **100% within the 3D first-stage voxel diagonal**
-(17.32 mm at 1 cm resolution) in Euclidean XYZ. Missing
+For non-RCT models, final coverage requires **100% within the 3D first-stage
+voxel diagonal** (17.32 mm at 1 cm resolution) in Euclidean XYZ. Missing
 coverage fails the entire remap before any enriched original is published.
+For RCT, final misses within that same search radius become prediction value 0;
+`background_assigned_points` and per-file final metrics record their count.
 
 Prod-merged output creation is controlled by `--produce-merged-file` /
 `--no-produce-merged-file` (aliases for the existing
@@ -651,10 +657,12 @@ Use model-specific prediction dimension names before the final original remap.
    within 0.01 m. Same-tile points never delete one another.
 5. **Measure original coverage directly.** Check every uploaded original against
    both the unfiltered 1 cm geometry and final survivors, independently for every
-   model. Both gates require 100% within the first-stage voxel diagonal in
-   XYZ (17.32 mm for 1 cm voxels). A point and its voxel center of mass can be
-   separated by up to that distance. Missing coverage still fails explicitly;
-   orphan recovery never invents points or fills missing predictions.
+   model. Unfiltered 1 cm coverage requires 100% within the first-stage
+   voxel diagonal in XYZ (17.32 mm for 1 cm voxels); so does final coverage
+   for non-RCT models. A point and its voxel center of mass can be separated
+   by up to that distance. RCT final points without a surviving prediction
+   inside the radius receive background 0, with counts in the coverage report.
+   Orphan recovery never invents points or fills missing predictions.
 6. **Publish after validation.** Stage all model and enriched-original outputs
    privately. A failed model/file discards the staged products and preserves a
    JSON diagnostic report. Existing nonempty outputs are refused rather than
@@ -684,7 +692,8 @@ filter still uses normal core ownership). Full-instance anchor positions,
 retained/removed IDs, source and point counts are recorded in
 `instance_ownership`; admissions and post-dedup support are recorded in
 `orphan_recovery`. The final original coverage gate remains 100% within the
-first-stage voxel diagonal. Small-cluster reassignment remains disabled;
+first-stage voxel diagonal for non-RCT models; unmatched RCT final points
+become background 0 and are counted in the report. Small-cluster reassignment remains disabled;
 `--pre-remap-reassign-instances` is rejected because it would change the
 reconciled-label contract. Tree-instance ID changes are recorded in
 the reconciliation map; auxiliary tree text tables are not rewritten.

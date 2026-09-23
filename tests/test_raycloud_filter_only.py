@@ -7,7 +7,7 @@ from pathlib import Path
 import laspy
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from strict_prediction_pipeline import merge_collections
+from strict_prediction_pipeline import merge_collections, strict_remap
 from test_dense_tile_merge import write_cloud
 
 
@@ -94,6 +94,49 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                                   output_tiles=root / "output_tiles", tile_bounds_json=layout,
                                   ready=True, instance_dimension="PredInstance_RCT")
             self.assertFalse((root / "output_tiles").exists())
+
+    def test_merge_with_originals_publishes_rct_background_and_tree_tables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, layout = self._fixture(root)
+            originals = root / "originals"
+            originals.mkdir()
+            write_cloud(originals / "raw.las", [10.5])
+            report = merge_collections(
+                collections=[source], target_dir=None, output_tiles=root / "output_tiles",
+                tile_bounds_json=layout, ready=True, originals=originals,
+                instance_dimension="PredInstance_RCT")
+            self.assertEqual(report["state"], "validated")
+            self.assertEqual(report["background_assigned_points"], 1)
+            self.assertEqual(laspy.read(root / "original_with_predictions" / "raw.las").PredInstance_RCT.tolist(), [0])
+            self.assertTrue((root / "segmented_filtered" / "c00_r00_filtered_trees.txt").exists())
+
+    def test_final_remap_writes_zero_for_unmatched_rct_point(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline, filtered, originals = (root / name for name in ("baseline", "filtered", "originals"))
+            for folder in (baseline, filtered, originals):
+                folder.mkdir()
+            write_cloud(baseline / "tile.las", [0, .02, .04], [1, 2, 3], [5, 6, 7],
+                        instance="PredInstance_RCT")
+            write_cloud(filtered / "tile.las", [0, .04], [1, 3], [5, 7],
+                        instance="PredInstance_RCT")
+            write_cloud(originals / "raw.las", [0, .02, .04])
+            report = strict_remap(collections=[filtered], baseline_collections=[baseline],
+                                  originals=originals, output=root / "enriched",
+                                  instance_dimension="PredInstance_RCT")
+            output = laspy.read(root / "enriched" / "raw.las")
+            self.assertEqual(output.PredInstance_RCT.tolist(), [1, 0, 3])
+            self.assertEqual(output.PredSemantic_RCT.tolist(), [5, 0, 7])
+            self.assertEqual(report["state"], "validated")
+            final = next(m for m in report["original_coverage"] if m["stage"] == "final_survivors")
+            self.assertEqual((final["matched"], final["total"], final["background_assigned"]), (2, 3, 1))
+            self.assertEqual(report["background_assigned_points"], 1)
+            with self.assertRaisesRegex(ValueError, "unfiltered_1cm"):
+                strict_remap(collections=[filtered], baseline_collections=[filtered],
+                             originals=originals, output=root / "invalid",
+                             instance_dimension="PredInstance_RCT")
+            self.assertFalse((root / "invalid").exists())
 
     def test_rejects_merged_product_with_tile_local_ids(self):
         with tempfile.TemporaryDirectory() as tmp:

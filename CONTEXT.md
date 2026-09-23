@@ -41,10 +41,12 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
   within 0.01 m XYZ. Adjacent points in separate cores may retain different tree
   labels or background semantics. Other label conflicts still fail.
   Same-tile points are never thinned.
-- Validate both baseline and final original coverage at 100% within the
-  first-stage voxel diagonal (17.32 mm for 1 cm resolution). Sampling gaps,
-  unresolved conflicts and missing predictions fail before
-  publication. The earlier 99% fallback is not available in these task entry points.
+- Validate baseline original coverage at 100% within the first-stage voxel
+  diagonal (17.32 mm for 1 cm resolution). Require 100% final coverage for
+  non-RCT models. For RCT only, assign zero to every prediction field when no
+  surviving point matches within that radius, and record the count and examples
+  in the coverage report. Other sampling gaps, conflicts and missing predictions
+  still fail before publication; the earlier 99% fallback is not used.
 - Preserve unfiltered dense geometry and its manifest for the separate final
   remap task; Galaxy wrappers must carry the baseline collection explicitly if
   they do not preserve the manifest. See the README for flags and diagnostics.

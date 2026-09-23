@@ -139,6 +139,10 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
         selected.append(dims)
     output_dir.mkdir(parents=True)
     metrics = report["original_coverage"] = []
+    report["original_coverage_policy"] = {
+        "unfiltered_1cm": "100% required for every model",
+        "final_survivors": "100% required except RCT; unmatched RCT predictions become background 0",
+    }
     radius = report["original_radius_m"]
     enrichment_start = time.monotonic()
     with RemapBatchQueries(indices, baseline_indices, workers=process_workers,
@@ -152,6 +156,10 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                 update_extra_dimensions(header, [param for dims in selected for param in dims.values()])
                 final_metrics = [_coverage_metric(file, model, "final_survivors", radius) for model in models]
                 baseline_metrics = [_coverage_metric(file, model, "unfiltered_1cm", radius) for model in models]
+                for model, metric in zip(models, final_metrics):
+                    if model.instance == "PredInstance_RCT":
+                        metric["unmatched_policy"] = "background_zero"
+                        metric["background_assigned"] = 0
                 metrics.extend(baseline_metrics + final_metrics)
                 with laspy.open(output_dir / file.name, mode="w", header=header) as writer:
                     batches = ((record, coordinates(record, reader.header, origin))
@@ -161,12 +169,21 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                         for i, (base_distances, distances, values) in enumerate(results):
                             _record_coverage(baseline_metrics[i], xyz, base_distances, origin)
                             _record_coverage(final_metrics[i], xyz, distances, origin)
+                            if models[i].instance == "PredInstance_RCT":
+                                missing = ~np.isfinite(distances)
+                                final_metrics[i]["background_assigned"] += int(np.count_nonzero(missing))
+                                if np.any(missing):
+                                    values = {name: data.copy() for name, data in values.items()}
+                                    for data in values.values():
+                                        data[missing] = 0
                             for name in selected[i]:
                                 _assign_prediction_values(out, name, values[name], raw=True)
                         writer.write_points(out)
                     write_retained_evlrs(writer, header)
     report.setdefault("timings", {})["enrichment_seconds"] = time.monotonic() - enrichment_start
-    failures = [m for m in metrics if m["matched"] != m["total"]]
+    report["background_assigned_points"] = sum(m.get("background_assigned", 0) for m in metrics)
+    failures = [m for m in metrics if m["matched"] != m["total"]
+                and m.get("unmatched_policy") != "background_zero"]
     if failures:
         report["coverage_failures"] = [
             {"file": m["file"], "model": m["model"], "stage": m["stage"],
