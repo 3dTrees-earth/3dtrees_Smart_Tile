@@ -1,101 +1,15 @@
 #!/usr/bin/env python3
-"""
-Main merge script: Merge segmented tiles with instance matching.
-
-This script wraps the merge_tiles.py functionality to provide a clean interface
-for the pipeline orchestrator.
-
-Pipeline:
-1. Load and filter (centroid-based buffer zone filtering)
-2. Assign global IDs
-3. Cross-tile instance matching
-4. Merge and deduplicate
-5. Small volume merging
-6. Retile to original files (required)
-
-Usage:
-    python main_merge.py --segmented_folder /path/to/segmented_remapped
-"""
-
+"""Compatibility CLI for SmartTile's strict remap-first merge pipeline."""
 from __future__ import annotations
 
 import argparse
-import csv
-import shutil
 import sys
 from pathlib import Path
 from typing import List, Optional
 
-import laspy
-import numpy as np
-
-# Import parameters and core merge function
-from instance_labels import MERGED_OUTPUT_SCALES, validate_merged_output_contract
-from instance_labels import cast_instances_for_output, instance_extra_bytes_params
-from filter_task_support import derive_tile_buffer_from_json
 from parameters import MERGE_PARAMS
-from merge_tiles import input_has_tree_sidecars, merge_tiles as core_merge_tiles
-from point_cloud_outputs import merged_product_header
 from point_cloud_metadata import point_cloud_files as _point_cloud_files
-
-
-def _original_with_predictions_name(path: Path) -> str:
-    name = path.name
-    if name.lower().endswith(".copc.laz"):
-        return name[:-9] + ".laz"
-    return name
-
-
-def _write_direct_merged_file(
-    source_file: Path,
-    output_file: Path,
-    source_dir: Path,
-    instance_dimension: str,
-) -> tuple[int, list[int]]:
-    """Write a one-tile target-resolution merge while enforcing output schema."""
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    with laspy.open(str(source_file), laz_backend=laspy.LazBackend.LazrsParallel) as reader:
-        las = reader.read()
-
-    points = np.column_stack((las.x, las.y, las.z))
-    header = merged_product_header(points, None, source_dir)
-    output_las = laspy.LasData(header)
-    output_las.x = points[:, 0]
-    output_las.y = points[:, 1]
-    output_las.z = points[:, 2]
-
-    if instance_dimension in las.point_format.dimension_names:
-        instances = np.asarray(getattr(las, instance_dimension))
-    else:
-        instances = np.zeros(len(points), dtype=np.uint16)
-
-    extra_params = [instance_extra_bytes_params(instance_dimension, instances)]
-    passenger_dims: dict[str, np.ndarray] = {}
-    for dim_name in las.point_format.extra_dimension_names:
-        if dim_name == instance_dimension:
-            continue
-        passenger_dims[dim_name] = np.asarray(getattr(las, dim_name))
-        extra_params.append(
-            laspy.ExtraBytesParams(name=dim_name, type=passenger_dims[dim_name].dtype)
-        )
-
-    output_las.add_extra_dims(extra_params)
-    setattr(
-        output_las,
-        instance_dimension,
-        cast_instances_for_output(instances, instance_dimension),
-    )
-    for dim_name, values in passenger_dims.items():
-        setattr(output_las, dim_name, values)
-
-    output_las.write(
-        str(output_file),
-        do_compress=output_file.name.lower().endswith(".laz"),
-        laz_backend=laspy.LazBackend.LazrsParallel,
-    )
-
-    final_instance_ids = sorted(int(v) for v in np.unique(instances[instances > 0]))
-    return len(points), final_instance_ids
+from worker_budget import DEFAULT_MEMORY_GB
 
 
 def run_merge(
@@ -124,265 +38,36 @@ def run_merge(
     threedtrees_dims: Optional[List[str]] = None,
     threedtrees_suffix: str = "SAT",
     chunk_size: int = 1_000_000,
+    memory_gb: float = DEFAULT_MEMORY_GB,
+    filter_anchor: str = "centroid",
 ) -> Path:
+    """Run the strict remap-first pipeline (3DT-2101).
+
+    Legacy tuning arguments remain accepted by this Python/CLI adapter. Dense
+    geometry uses core ownership filtering before reconciliation; small-cluster
+    reassignment stays disabled. Final original coverage is 100% within the first-stage voxel diagonal.
     """
-    Run the tile merge pipeline.
+    from strict_prediction_pipeline import merge_collections
 
-    Args:
-        segmented_dir: Directory containing segmented LAZ tiles
-        output_tiles_dir: Output directory for retiled files
-        original_tiles_dir: Directory with original tile files for retiling
-        original_input_dir: Directory with original input LAZ files for final remap (optional)
-        output_merged: Output path for merged LAZ file (auto-derived if None)
-        tile_bounds_json: Tile layout metadata; its tile_buffer is the merge buffer source of truth
-        overlap_threshold: Overlap ratio threshold for instance matching
-        max_centroid_distance: Max distance between centroids to merge instances
-        correspondence_tolerance: Max distance for point correspondence (internal, not exposed via Parameters)
-        max_volume_for_merge: Max convex hull volume for small instance merging
-        num_threads: Number of workers for parallel processing
-        enable_matching: Enable cross-tile instance matching
-        require_overlap: Require overlap ratio check (vs centroid distance only)
-        enable_volume_merge: Enable small volume instance merging
-        skip_merged_file: Skip creating merged LAZ file (only retile)
-        verbose: Print detailed merge decisions
-        retile_buffer: Spatial buffer expansion in meters for filtering merged points during retiling
-        retile_max_radius: Maximum distance threshold in meters for cKDTree nearest neighbor matching during retiling
-        transfer_original_dims_to_merged: Legacy compatibility flag for callers that still pass the old merged-enrichment option. The orchestrator creates prod-merged outputs separately from Original-with-predictions files.
-
-    Returns:
-        Path to merged output file
-    """
-    print("=" * 60)
-    print("3DTrees Merge Pipeline")
-    print("=" * 60)
-
-    # Validate input
-    if not segmented_dir.exists():
-        raise ValueError(f"Segmented directory not found: {segmented_dir}")
-
-    if not original_tiles_dir.exists():
-        raise ValueError(f"Original tiles directory not found: {original_tiles_dir}")
-
-    if not output_tiles_dir.exists():
-        output_tiles_dir.mkdir(parents=True, exist_ok=True)
-
-    # Validate tile bounds JSON (required)
-    if tile_bounds_json is None:
-        raise ValueError("tile_bounds_json is required but was not provided.")
-    if not tile_bounds_json.exists():
-        raise FileNotFoundError(
-            f"tile_bounds_tindex.json not found: {tile_bounds_json}. "
-            "Merge requires this file and will not run without it."
-        )
-    buffer = derive_tile_buffer_from_json(tile_bounds_json)
-    tree_sidecars_present = input_has_tree_sidecars(segmented_dir)
-    if tree_sidecars_present:
-        if enable_matching:
-            print("Tree sidecar files detected; disabling cross-tile instance matching.")
-        if enable_volume_merge:
-            print("Tree sidecar files detected; disabling small cluster reassignment.")
-        enable_matching = False
-        enable_volume_merge = False
-
-    # Auto-derive output path if not provided (inside segmented dir so it is writable e.g. in Docker /out)
-    if output_merged is None:
-        output_merged = segmented_dir / "merged.laz"
-
-    # OPTIMIZATION: If only one file in each folder, skip merge and just remap
-    segmented_files = _point_cloud_files(segmented_dir)
-    original_tiles_files = _point_cloud_files(original_tiles_dir)
-
-    if len(segmented_files) == 1 and not original_tiles_files and original_input_dir is None:
-        print("\n" + "=" * 60)
-        print("SINGLE TARGET-RESOLUTION FILE DETECTED - Using direct merge path")
-        print("=" * 60)
-        print("Skipping cross-tile matching and deduplication; only one tile is present.")
-
-        source_file = segmented_files[0]
-        output_tiles_dir.mkdir(parents=True, exist_ok=True)
-        output_merged = Path(output_merged)
-
-        output_tile = output_tiles_dir / source_file.name
-        if not skip_merged_file:
-            output_merged.parent.mkdir(parents=True, exist_ok=True)
-            point_count, final_instance_ids = _write_direct_merged_file(
-                source_file,
-                output_merged,
-                segmented_dir,
-                instance_dimension,
-            )
-            print(f"  Merged file written: {output_merged}")
-            validate_merged_output_contract(output_merged, instance_dimension)
-            if output_tile != output_merged:
-                shutil.copy2(str(output_merged), str(output_tile))
-                print(f"  Output tile written: {output_tile}")
-        else:
-            point_count, final_instance_ids = _write_direct_merged_file(
-                source_file,
-                output_tile,
-                segmented_dir,
-                instance_dimension,
-            )
-            print(f"  Output tile written: {output_tile}")
-
-        csv_output_path = output_merged.parent / f"{output_merged.stem}_instance_metadata.csv"
-        csv_output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(csv_output_path, "w", newline="") as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow([instance_dimension, "has_added_clusters"])
-            for final_id in final_instance_ids:
-                writer.writerow([final_id, 0])
-
-        csv_copy_path = output_tiles_dir / csv_output_path.name
-        if csv_copy_path != csv_output_path:
-            shutil.copy2(str(csv_output_path), str(csv_copy_path))
-
-        print(f"  Instance metadata CSV: {csv_output_path}")
-        print(f"  Points: {point_count:,}")
-        print(f"  Instances: {len(final_instance_ids):,}")
-        print("\n" + "=" * 60)
-        print("Direct merge complete")
-        print("=" * 60)
-        return output_merged
-
-    # Check if we should use the single-file optimization
-    use_single_file_optimization = False
-    if len(segmented_files) == 1 and len(original_tiles_files) == 1:
-        # If original_input_dir is provided, also check it has exactly one file
-        if original_input_dir:
-            original_input_files = _point_cloud_files(original_input_dir)
-            if len(original_input_files) == 1:
-                use_single_file_optimization = True
-        else:
-            # No original_input_dir requirement
-            use_single_file_optimization = True
-
-    if use_single_file_optimization:
-        print("\n" + "=" * 60)
-        print("SINGLE FILE DETECTED - Using optimized path")
-        print("=" * 60)
-        print(f"Segmented files: {len(segmented_files)}")
-        print(f"Original tiles: {len(original_tiles_files)}")
-        if original_input_dir:
-            print(f"Original inputs: {len(original_input_files)}")
-        print("\nSkipping merge steps (no cross-tile matching needed)")
-        print("Directly remapping segmented → 1cm → original")
-        print()
-
-        # Import remap function
-        from main_remap import remap_single_tile
-
-        # Step 1: Remap segmented to 1cm (original_tiles)
-        segmented_file = segmented_files[0]
-        target_file = original_tiles_files[0]
-
-        print(f"Step 1: Remapping {segmented_file.name} → {target_file.name}")
-        remapped_1cm_file = output_tiles_dir / f"{target_file.stem}_segmented.laz"
-
-        _, success, message, point_count = remap_single_tile(
-            segmented_file,
-            target_file,
-            remapped_1cm_file,
-            instance_dimension=instance_dimension,
-            output_scales=None,
-        )
-
-        if not success:
-            raise RuntimeError(f"Failed to remap to 1cm: {message}")
-
-        print(f"  ✓ Remapped {point_count:,} points to 1cm resolution")
-
-        # Step 2: If original_input_dir provided, remap to original
-        if original_input_dir:
-            original_file = original_input_files[0]
-            print(f"\nStep 2: Remapping {remapped_1cm_file.name} → {original_file.name}")
-
-            original_output_dir = output_tiles_dir.parent / "original_with_predictions"
-            final_output_file = original_output_dir / _original_with_predictions_name(original_file)
-
-            _, success, message, point_count = remap_single_tile(
-                remapped_1cm_file,
-                original_file,
-                final_output_file,
-                threedtrees_dims=set(threedtrees_dims) if threedtrees_dims else None,
-                threedtrees_suffix=threedtrees_suffix,
-                instance_dimension=instance_dimension,
-                output_scales=None,
-            )
-
-            if not success:
-                raise RuntimeError(f"Failed to remap to original: {message}")
-
-            print(f"  ✓ Remapped {point_count:,} points to original resolution")
-
-        # Step 3: Write merged file (remapped file renamed to output_merged)
-        # Always use the target-resolution remap as merged source. If original
-        # inputs are present, Step 2 writes a separate original-resolution output.
-        merged_source = remapped_1cm_file
-        if not skip_merged_file and output_merged is not None:
-            output_merged = Path(output_merged)
-            output_merged.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(merged_source), str(output_merged))
-            print(f"\nStep 3: Merged file written: {output_merged.name}")
-
-            validate_merged_output_contract(output_merged, instance_dimension)
-
-        print("\n" + "=" * 60)
-        print("Single-file optimization complete")
-        print("=" * 60)
-        print(f"Output: {output_tiles_dir}")
-        if not skip_merged_file and output_merged is not None:
-            print(f"Merged file: {output_merged}")
-
-        return output_merged
-
-    print(f"Input: {segmented_dir}")
-    print(f"Output merged: {output_merged}" + (" (SKIPPED)" if skip_merged_file else ""))
-    print(f"Buffer: {buffer}m (from tile_bounds_tindex.json)")
-    print(f"Instance matching: {'ENABLED' if enable_matching else 'DISABLED'}")
-    if enable_matching:
-        print(f"  Overlap threshold: {overlap_threshold}")
-        print(f"  Max centroid distance: {max_centroid_distance}m")
-    print(f"Tree sidecar files: {'PRESENT' if tree_sidecars_present else 'none'}")
-    print(f"Small cluster reassignment: {'ENABLED' if enable_volume_merge else 'DISABLED'}")
-    if enable_volume_merge:
-        print(f"  Min cluster size: {min_cluster_size} points")
-    print(f"Volume merge: {'ENABLED' if enable_volume_merge else 'DISABLED'}")
-    if enable_volume_merge:
-        print(f"  Max volume: {max_volume_for_merge} m³")
-    print(f"Workers: {num_threads}")
-    print(f"Tile bounds JSON: {tile_bounds_json}")
-    if original_input_dir:
-        print(f"Original input dir: {original_input_dir} (Stage 7 enabled)")
-    print()
-
-    # Run the core merge function
-    core_merge_tiles(
-        input_dir=segmented_dir,
-        original_tiles_dir=original_tiles_dir,
-        output_merged=output_merged,
-        output_tiles_dir=output_tiles_dir,
-        tile_bounds_json=tile_bounds_json,
-        original_input_dir=original_input_dir,
-        overlap_threshold=overlap_threshold,
-        correspondence_tolerance=correspondence_tolerance,
-        max_volume_for_merge=max_volume_for_merge,
-        border_zone_width=border_zone_width,
-        min_cluster_size=min_cluster_size,
-        num_threads=num_threads,
-        enable_matching=enable_matching,
-        enable_volume_merge=enable_volume_merge,
-        skip_merged_file=skip_merged_file,
-        verbose=verbose,
-        retile_buffer=retile_buffer,
-        instance_dimension=instance_dimension,
-        transfer_original_dims_to_merged=transfer_original_dims_to_merged,
-        threedtrees_dims=threedtrees_dims,
-        threedtrees_suffix=threedtrees_suffix,
-        chunk_size=chunk_size,
+    if memory_gb <= 0:
+        raise ValueError("memory_gb must be greater than 0")
+    if tile_bounds_json is None or not Path(tile_bounds_json).is_file():
+        raise ValueError("tile_bounds_json is required")
+    source = Path(segmented_dir)
+    target = Path(original_tiles_dir) if original_tiles_dir else None
+    ready = target is None or not _point_cloud_files(target)
+    merged = Path(output_merged or Path(output_tiles_dir).parent / "merged.laz")
+    merge_collections(
+        collections=[source], target_dir=None if ready else target,
+        output_tiles=Path(output_tiles_dir), tile_bounds_json=Path(tile_bounds_json),
+        originals=Path(original_input_dir) if original_input_dir else None,
+        merged_output=None if skip_merged_file else merged,
+        filter_anchor=filter_anchor, workers=num_threads,
+        overlap_threshold=overlap_threshold, correspondence_radius=correspondence_tolerance,
+        ready=ready, matching=enable_matching, instance_dimension=instance_dimension,
+        target_dims=set(threedtrees_dims) if threedtrees_dims else None,
     )
-
-    return output_merged
+    return merged
 
 
 def main() -> None:
@@ -529,6 +214,17 @@ def main() -> None:
         help="Print detailed merge decisions"
     )
 
+    parser.add_argument(
+        "--memory-gb",
+        type=float,
+        default=DEFAULT_MEMORY_GB,
+        help=f"Memory cap for merge worker pools in GiB (default: {DEFAULT_MEMORY_GB})",
+    )
+
+    parser.add_argument("--filter-anchor", "--filter_anchor",
+                        choices=("centroid", "highest_point", "lowest_point"), default="centroid",
+                        help="Representative point for dense instance core ownership")
+
     args = parser.parse_args()
 
     # Run pipeline
@@ -554,6 +250,8 @@ def main() -> None:
             border_zone_width=args.border_zone_width,
             retile_buffer=args.retile_buffer,
             retile_max_radius=args.retile_max_radius,
+            memory_gb=args.memory_gb,
+            filter_anchor=args.filter_anchor,
         )
         if not args.skip_merged_file:
             print(f"\nMerged output: {output_file}")

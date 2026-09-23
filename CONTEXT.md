@@ -4,7 +4,66 @@ This file is for coding agents working on SmartTile. It is intentionally more
 implementation-facing than `README.md`; use the README for user-facing behavior
 and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 
-## Current Handoff State (2026-07-08)
+## Current merge contract (2026-09-21 / 3DT-2101)
+
+- `run.py` merge/filter/remap and `main_merge.run_merge` use
+  `strict_prediction_pipeline.py`, `dense_tile_merge.py` and
+  `bounded_point_index.py`. Older centroid/orphan merge modules are legacy
+  helpers and must not be reintroduced into the supported task path.
+- RCT predictions (`PredInstance_RCT`) require paired `_trees.txt` and
+  `_trees_info.txt` per tile. The strict merge path transfers labels and filters
+  whole instances by core ownership, but preserves every retained tile-local
+  ID. It skips orphan recovery, cross-tile reconciliation, point deduplication,
+  and renumbering. Filter both tree tables to exactly the retained IDs, keeping
+  the original 1-based ID as a leading `predinstance` column. Require
+  `--skip-merged-file` because IDs may repeat across tiles.
+- Transfer each model's unfiltered predictions to its own 1 cm target tiles
+  first: 100% assignment within the separately configured 0.1732 m XYZ radius.
+- Remove whole instances whose selected dense anchor is outside their core;
+  background uses half-open spatial cores. Reconcile IDs independently per
+  model, selecting one core-owning source per reconciled instance and keeping
+  its semantic values and other attributes.
+- For distinct retained positive instances sharing points within 0.01 m,
+  assign disputed points to the retained claimant nearest its closed XY core
+  rectangle; break equal-distance ties by stable source filename order. A tile
+  predicting background or a removed instance cannot win a tree claim. Preserve
+  the winner's instance ID and per-point attributes, and retain unshared buffer
+  tails. Record these decisions in shared_point_ownership.
+- After tree/tree resolution, retained trees override neighboring background
+  within 0.01 m, preserving the tree owner's semantic values and attributes.
+  Query actual surviving trees; removed instances cannot override background.
+- A tiling bypass writes one layout entry with actual cloud bounds and no buffer.
+  Historical unused grid plans may be recovered only for one cloud matching the
+  complete projected extent within 1 cm, with untouched planned bounds and an
+  extent larger than any individual planned tile. Record the recovery; preserve
+  missing-neighbor ownership for partial collections.
+- Deduplicate label-consistent cross-tile points against actual final survivors
+  within 0.01 m XYZ. Adjacent points in separate cores may retain different tree
+  labels or background semantics. Other label conflicts still fail.
+  Same-tile points are never thinned.
+- Validate baseline original coverage at 100% within the first-stage voxel
+  diagonal (17.32 mm for 1 cm resolution). Require 100% final coverage for
+  non-RCT models. For RCT only, assign zero to every prediction field when no
+  surviving point matches within that radius, and record the count and examples
+  in the coverage report. Other sampling gaps, conflicts and missing predictions
+  still fail before publication; the earlier 99% fallback is not used.
+- Preserve unfiltered dense geometry and its manifest for the separate final
+  remap task; Galaxy wrappers must carry the baseline collection explicitly if
+  they do not preserve the manifest. See the README for flags and diagnostics.
+- `--workers` controls native spatial-query threads in strict merge/filter,
+  bounded by scheduler slots, affinity and detected cgroup CPU quotas. Small
+  queries stay serial; index writes and model/tile ordering stay deterministic.
+  Record the requested and effective query budget in `parallelism`.
+- Standalone strict remap uses CPU-capped batch processes after serial indexing.
+  Each process opens completed indexes read-only and uses one query thread.
+  Admit at most two batches per process, preserve input order with one writer,
+  and join workers before deleting scratch indexes. Tiny inputs stay serial.
+  Keep coverage, stable ties, original fields and transactional publication
+  identical to the serial path; report indexing/enrichment timings separately.
+- Dense searches use fixed-size disk-backed spatial batches. Exact production
+  replays of 3110/3111 and resource benchmarking remain release obligations.
+
+## Historical Handoff State (2026-07-08)
 
 - Repo/branch: `/home/kg281/projects/3dtrees_smart_tile`, branch `v2.2`,
   tracking `upstream/v2.2`.
@@ -57,12 +116,9 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 - `tile`: converts uploaded LAZ/LAS/COPC inputs into spatial COPC tiles, then
   creates subsampled products. The default first resolution is 1cm COPC LAZ; the
   default second resolution is 10cm regular LAZ.
-- `merge`: filters duplicate buffer-zone instances from segmented predictions,
-  remaps the filtered predictions to the target resolution, merges the remapped
-  predictions into per-tile 1cm products, and can enrich uploaded originals from
-  those per-tile products before optional prod-merged creation.
-- `filter`: removes duplicate buffer-zone instances from segmented/remapped
-  tile files before downstream merge/remap workflows.
+- `merge`: transfers predictions to dense 1 cm tiles before reconciling IDs and
+  deduplicating label-consistent cross-tile points; can strictly enrich originals.
+- `filter`: runs the same reconciliation/deduplication on already-dense tiles.
 - `remap`: transfers prediction dimensions back to original source points. It
   supports multiple segmented prediction collections when their dimension names
   are already unique. The explicit production interface is

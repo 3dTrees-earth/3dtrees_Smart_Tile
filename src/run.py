@@ -5,7 +5,7 @@ Main orchestrator script for the 3DTrees smart tiling pipeline.
 Routes to appropriate task modules based on --task parameter:
 - tile: XYZ reduction, COPC conversion, tiling, and subsampling (1cm and 10cm)
 - merge: Remap predictions and merge tiles with instance matching
-- filter: Remove duplicate buffer-zone instances from segmented/remapped tiles
+- filter: Remove non-owned dense instances, then reconcile and deduplicate
 - remap: Remap merged file dimensions to original input files
 - create_merged_file: Create prod-merged files from original_with_predictions
 
@@ -30,7 +30,7 @@ if str(_src_dir) not in sys.path:
 # Import Pydantic-based parameters
 try:
     from parameters import Parameters, print_params, get_tile_params, get_merge_params, get_remap_params
-    from merge_prediction_collections import comma_paths, prepare_merge_prediction_collection_source
+    from merge_prediction_collections import comma_paths
 except ImportError as e:
     print(f"Error: Could not import parameters.py: {e}")
     print("Please install required dependencies: pip install pydantic pydantic-settings")
@@ -390,520 +390,93 @@ def run_tile_task(params: Parameters):
 
 
 def run_merge_task(params: Parameters):
-    """
-    Run the merge task: filter predictions, remap if needed, and merge tiles.
+    """Transfer to dense geometry, filter ownership, reconcile and deduplicate."""
+    from strict_prediction_pipeline import merge_collections
 
-    Pipeline:
-    1. Filter duplicate buffer-zone instances from segmented predictions
-    2. Remap filtered predictions from 10cm to target resolution (via main_remap.py)
-    3. Merge target-resolution tiles with instance matching (via main_merge.py)
-    4. Remap to original input files with the shared remap helper (if configured)
-    """
-    # Import Python modules
-    try:
-        from filter_task_support import derive_tile_buffer_from_json
-        from filter_buffer_instances import filter_buffer_instances_dir
-        from main_remap import remap_all_tiles
-        from main_merge import run_merge
-        from prediction_collection_remap import remap_prediction_collections_to_original_files
-    except ImportError as e:
-        print(f"Error: Could not import required modules: {e}")
-        print("Make sure main_remap.py and main_merge.py exist.")
+    modes = [bool(params.subsampled_10cm_folder), bool(params.segmented_folders),
+             bool(params.segmented_remapped_folder)]
+    if sum(modes) != 1:
+        print("Error: provide exactly one segmented input mode")
         sys.exit(1)
-
-    # Required arguments - need either a 10cm segmented source, multiple finalized
-    # prediction collections, or an already-remapped segmented folder.
-    # Note: subsampled_10cm_folder is populated by --subsampled-segmented-folder via alias
-    if not params.subsampled_10cm_folder and not params.segmented_folders and not params.segmented_remapped_folder:
-        print(
-            "Error: --subsampled-segmented-folder, --segmented-folders, "
-            "or --segmented-remapped-folder is required for merge task"
-        )
-        sys.exit(1)
-    source_modes = [
-        bool(params.subsampled_10cm_folder),
-        bool(params.segmented_folders),
-        bool(params.segmented_remapped_folder),
-    ]
-    if sum(source_modes) > 1:
-        print(
-            "Error: --subsampled-segmented-folder/--subsampled-10cm-folder, "
-            "--segmented-folders, and --segmented-remapped-folder are mutually exclusive"
-        )
-        sys.exit(1)
-
-    # Get parameters from Pydantic model
-    workers = params.workers
-    buffer = None
-    overlap_threshold = params.overlap_threshold
-    max_centroid_distance = params.max_centroid_distance
-    max_volume_for_merge = params.max_volume_for_merge
-    border_zone_width = params.border_zone_width
-    min_cluster_size = params.min_cluster_size
-    retile_buffer = 2.0  # Fixed to 2.0m
-    output_merged = params.output_merged_laz
-    output_tiles_dir = params.output_tiles_folder
-    original_tiles_dir = params.original_tiles_dir
-    original_input_dir = params.original_raw_input_dir or params.original_input_dir
-
-    print("=" * 60)
-    print("Running Merge Task (Python Pipeline)")
-    print("=" * 60)
-    tile_bounds_json = _require_tile_bounds_json(params.tile_bounds_json)
-    prediction_collections = comma_paths(params.segmented_folders)
+    tile_bounds = _require_tile_bounds_json(params.tile_bounds_json)
+    collections = (comma_paths(params.segmented_folders) if params.segmented_folders else
+                   [Path(params.subsampled_10cm_folder or params.segmented_remapped_folder)])
+    work = Path(params.output_folder or
+                (Path(params.output_tiles_folder).parent if params.output_tiles_folder else
+                 Path(params.output_merged_laz).parent if params.output_merged_laz else
+                 collections[0].parent))
+    output_tiles = Path(params.output_tiles_folder or work / "output_tiles")
+    target = params.subsampled_target_folder or params.original_tiles_dir
+    if target is None and params.subsampled_10cm_folder:
+        target = collections[0].parent / "subsampled_res1"
+    ready = bool(params.segmented_remapped_folder) or (bool(params.segmented_folders) and target is None)
+    originals = params.original_raw_input_dir or params.original_input_dir
+    original_output = Path(params.original_raw_output_dir or output_tiles.parent / "original_with_predictions")
     try:
-        buffer = derive_tile_buffer_from_json(tile_bounds_json)
-    except ValueError:
-        buffer = border_zone_width
-
-    try:
-        if params.original_copc_input_dir and original_input_dir:
+        if params.original_copc_input_dir:
+            if not originals:
+                raise ValueError("--original-laz-input-dir is required with --original-copc-input-dir")
             _validate_copc_original_lane(Path(params.original_copc_input_dir))
-            _validate_copc_laz_source_pairs(Path(params.original_copc_input_dir), Path(original_input_dir))
-        elif params.original_copc_input_dir:
-            print(
-                "Error: --original-laz-input-dir is required when --original-copc-input-dir "
-                "is used for merge/remap-to-originals."
-            )
-            sys.exit(1)
-
-        def merge_work_dir(input_folder: Path) -> Path:
-            if params.output_folder:
-                return Path(params.output_folder)
-            if output_tiles_dir:
-                return Path(output_tiles_dir).parent
-            if output_merged:
-                return Path(output_merged).parent
-            return input_folder.parent
-
-        tree_sidecars_passed_to_filter = False
-
-        def filter_predictions(input_folder: Path) -> Path:
-            nonlocal tree_sidecars_passed_to_filter
-            filtered_folder = merge_work_dir(input_folder) / "segmented_filtered"
-            print()
-            print("=" * 60)
-            print("Filtering Segmented Predictions")
-            print("=" * 60)
-            filter_summary = filter_buffer_instances_dir(
-                input_dir=input_folder,
-                output_dir=filtered_folder,
-                buffer=buffer,
-                suffix="_filtered",
-                instance_dimension=params.instance_dimension,
-                output_extension=".laz",
-            )
-            if filter_summary["input_files"] == 0:
-                print(f"Error: No filterable prediction files found in {input_folder}")
-                sys.exit(1)
-            if filter_summary.get("tree_files") or filter_summary.get("tree_output_files"):
-                tree_sidecars_passed_to_filter = True
-                print(
-                    "Tree sidecar files passed through filter; "
-                    "merge will disable cross-tile matching and small cluster reassignment."
-                )
-            return filtered_folder
-
-        # Step 1: Filter predictions, then remap if a source-resolution folder is provided.
-        segmented_for_merge_folder = None
-        segmented_source_folder = None
-        filtered_segmented_folder = None
-
-        if params.subsampled_10cm_folder:
-            subsampled_10cm_dir = Path(params.subsampled_10cm_folder)
-            segmented_source_folder = subsampled_10cm_dir
-
-        if params.subsampled_10cm_folder:
-            subsampled_10cm_dir = Path(params.subsampled_10cm_folder)
-            if not subsampled_10cm_dir.exists():
-                print(f"Error: Input directory does not exist: {subsampled_10cm_dir}")
-                sys.exit(1)
-
-            print(f"Input (10cm): {subsampled_10cm_dir}")
-            print()
-
-            # Derive target folder and output folder
-            # The resolution folders are now at: tiles_*/subsampled_res1 and tiles_*/subsampled_res2
-            # For backward compatibility, also check old naming: subsampled_{resolution}cm
-            parent_dir = subsampled_10cm_dir.parent
-            target_folder = params.subsampled_target_folder
-
-            if target_folder is None:
-                # Try new naming first (subsampled_res1) as default target
-                target_folder_res1 = parent_dir / "subsampled_res1"
-                if target_folder_res1.exists():
-                    target_folder = target_folder_res1
-                else:
-                    # Fallback or error
-                    pass
-
-            output_folder = params.output_folder
-            if output_folder is None:
-                output_folder = merge_work_dir(subsampled_10cm_dir) / "segmented_remapped"
-
-            if target_folder is None or not target_folder.exists():
-                print(f"Error: Target resolution folder does not exist or not specified")
-                if target_folder:
-                    print(f"Path: {target_folder}")
-                print(f"Please provide --subsampled-target-folder")
-                sys.exit(1)
-
-            filtered_segmented_folder = filter_predictions(subsampled_10cm_dir)
-
-            # Optional: tile_bounds_tindex.json for remap matching (use --tile_bounds_json first)
-            remap_tile_bounds_json = tile_bounds_json
-
-            # Remap - source is filtered segmented predictions, target is the configured resolution-1 subsample
-            segmented_for_merge_folder = remap_all_tiles(
-                source_folder=filtered_segmented_folder,
-                target_folder=target_folder,
-                output_folder=output_folder,
-                tile_bounds_json=remap_tile_bounds_json,
-                verbose=bool(params.verbose),
-                num_workers=workers,
-                spatial_workers=params.num_spatial_chunks,
-                instance_dimension=params.instance_dimension,
-                output_scales=None,
-            )
-
-        elif prediction_collections:
-            print(f"Input prediction collections: {prediction_collections}")
-            print()
-
-            collection_work_dir = (
-                Path(params.output_folder)
-                if params.output_folder
-                else merge_work_dir(prediction_collections[0])
-            )
-            segmented_source_folder = prepare_merge_prediction_collection_source(
-                prediction_collections=prediction_collections,
-                reference_dir=None,
-                output_folder=collection_work_dir,
-                params=params,
-                retile_buffer=retile_buffer,
-                workers=workers,
-            )
-            filtered_segmented_folder = filter_predictions(segmented_source_folder)
-            segmented_for_merge_folder = filtered_segmented_folder
-
-        elif params.segmented_remapped_folder:
-            segmented_source_folder = Path(params.segmented_remapped_folder)
-            if not segmented_source_folder.exists():
-                print(f"Error: Segmented folder does not exist: {segmented_source_folder}")
-                sys.exit(1)
-            filtered_segmented_folder = filter_predictions(segmented_source_folder)
-            segmented_for_merge_folder = filtered_segmented_folder
-
-        if segmented_for_merge_folder is None:
-            print("Error: No segmented folder available for merge")
-            sys.exit(1)
-
-        print()
-        if segmented_source_folder is not None:
-            print(f"Segmented folder: {segmented_source_folder}")
-        print(f"Filtered segmented folder: {filtered_segmented_folder}")
-        print(f"Merge input folder: {segmented_for_merge_folder}")
-        print(f"Buffer: {buffer}m")
-        print(f"Overlap threshold: {overlap_threshold}")
-        print(f"Workers: {workers}")
-        if params.original_raw_input_dir or params.original_input_dir:
-            print(f"LAZ original input dir: {params.original_raw_input_dir or params.original_input_dir}")
-        print()
-
-        # Auto-derive paths if not provided
-        parent_dir = Path(segmented_for_merge_folder).parent
-        if output_tiles_dir is None:
-            # Use segmented folder's parent, but ensure it's writable
-            # If parent is root or not writable, use segmented folder itself
-            if parent_dir == Path('/') or not os.access(parent_dir, os.W_OK):
-                output_tiles_dir = Path(segmented_for_merge_folder) / "output_tiles"
-            else:
-                output_tiles_dir = parent_dir / "output_tiles"
-        if original_tiles_dir is None:
-            # Try to find the tiles directory (parent of subsampled folders)
-            original_tiles_dir = Path(segmented_for_merge_folder).parent
-        original_with_predictions_dir = None
-        if original_input_dir:
-            original_with_predictions_dir = (
-                Path(params.original_raw_output_dir)
-                if params.original_raw_output_dir
-                else Path(output_tiles_dir).parent / "original_with_predictions"
-            )
-            _validate_raw_original_lane(
-                Path(original_input_dir),
-                original_with_predictions_dir,
-            )
-
-        # Parse 3DTrees dimension branding params
-        threedtrees_dims = _effective_threedtrees_dims(params)
-        threedtrees_suffix = params.threedtrees_suffix
-
-        merged_output = run_merge(
-            segmented_dir=segmented_for_merge_folder,
-            output_tiles_dir=output_tiles_dir,
-            original_tiles_dir=original_tiles_dir,
-            tile_bounds_json=tile_bounds_json,
-            original_input_dir=None,
-            output_merged=output_merged,
-            overlap_threshold=overlap_threshold,
-            max_centroid_distance=max_centroid_distance,
-            max_volume_for_merge=max_volume_for_merge,
-            border_zone_width=border_zone_width,
-            min_cluster_size=min_cluster_size,
-            num_threads=workers,
-            enable_matching=not params.disable_matching and not tree_sidecars_passed_to_filter,
-            require_overlap=True,
-            enable_volume_merge=not params.disable_volume_merge and not tree_sidecars_passed_to_filter,
-            skip_merged_file=params.skip_merged_file,
-            verbose=params.verbose,
-            retile_buffer=retile_buffer,
-            instance_dimension=params.instance_dimension,
-            transfer_original_dims_to_merged=False,
-            threedtrees_dims=threedtrees_dims,
-            threedtrees_suffix=threedtrees_suffix,
-            chunk_size=params.chunk_size or 1_000_000,
+            _validate_copc_laz_source_pairs(Path(params.original_copc_input_dir), Path(originals))
+        if originals:
+            _validate_raw_original_lane(Path(originals), original_output)
+        merged = None if params.skip_merged_file else params.output_merged_laz
+        if merged is None and not params.skip_merged_file and len(collections) == 1:
+            merged = work / "merged.laz"
+        report = merge_collections(
+            collections=collections, target_dir=Path(target) if target else None,
+            output_tiles=output_tiles, tile_bounds_json=tile_bounds,
+            originals=Path(originals) if originals else None, original_output=original_output,
+            merged_output=Path(merged) if merged else None,
+            workers=params.workers,
+            resolution_1=params.resolution_1, remap_tolerance=params.remap_tolerance,
+            transfer_radius=params.prediction_transfer_tolerance,
+            overlap_threshold=params.overlap_threshold, matching=not params.disable_matching,
+            ready=ready, instance_dimension=params.instance_dimension, filter_anchor=params.filter_anchor,
+            target_dims=set(_parse_csv(params.remap_dims)) if params.remap_dims else None,
         )
-
-        if original_input_dir:
-            product_output_dir = Path(merged_output).parent if merged_output else Path(output_tiles_dir).parent
-            print()
-            print("=" * 60)
-            print("Remapping merged 1cm tiles to uploaded originals")
-            print("=" * 60)
-            remap_prediction_collections_to_original_files(
-                [Path(output_tiles_dir)],
-                Path(original_input_dir),
-                original_with_predictions_dir,
-                tolerance=0.1,
-                num_threads=workers,
-                retile_buffer=retile_buffer,
-                target_dims=set(threedtrees_dims) if threedtrees_dims else None,
-                chunk_size=params.chunk_size or 5_000_000,
-                num_spatial_chunks=params.num_spatial_chunks,
-                prefer_copc_sources=False,
-            )
-
-        if original_input_dir and params.transfer_original_dims_to_merged:
-            _create_prod_merged_outputs(
-                original_with_predictions_dir=original_with_predictions_dir,
-                output_dir=product_output_dir,
-                params=params,
-            )
-        elif original_input_dir:
-            print("  Skipping prod-merged output creation (disabled).")
-
-        print()
-        print("=" * 60)
-        print("Merge Task Complete")
-        print("=" * 60)
-        if params.skip_merged_file:
-            print("Merged output: skipped")
-        else:
-            print(f"Merged output: {merged_output}")
-
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+        if originals and params.transfer_original_dims_to_merged:
+            _create_prod_merged_outputs(original_output, output_tiles.parent, params)
+        print(f"Merge complete: {report['state']}; report: {output_tiles.parent / 'remap_first_report.json'}")
+    except Exception as exc:
+        print(f"Error: {exc}")
         sys.exit(1)
 
 
 def run_remap_task(params: Parameters):
-    """
-    Run the remap task.
+    """Validate baseline and final coverage independently for every model."""
+    from strict_prediction_pipeline import strict_remap
 
-    Supported modes:
-    - --segmented-folders: finalized prediction collections -> original files folder.
-      Extra dimensions are preserved as-is and duplicate prediction names fail.
-    - --merged-laz: one merged LAZ/COPC LAZ file -> original files folder.
-      3DTrees dimensions are suffixed during transfer.
-    """
+    originals = params.original_raw_input_dir or params.original_input_dir
+    if not originals or bool(params.segmented_folders) == bool(params.merged_laz):
+        print("Error: remap requires raw originals and exactly one of --segmented-folders or --merged-laz")
+        sys.exit(1)
+    if params.pre_remap_reassign_instances:
+        print("Error: pre-remap label reassignment is incompatible with the strict reconciled-label contract")
+        sys.exit(1)
+    original_dir = Path(originals)
+    output = _raw_original_output_dir(params, original_dir)
     try:
-        from prediction_collection_remap import remap_prediction_collections_to_original_files
-        from merge_tiles import (
-            load_merged_file,
-            reassign_small_instances_in_dims,
-            remap_to_original_input_files,
+        _validate_raw_original_lane(original_dir, output)
+        if params.original_copc_input_dir:
+            _validate_copc_original_lane(Path(params.original_copc_input_dir))
+            _validate_copc_laz_source_pairs(Path(params.original_copc_input_dir), original_dir)
+        collections = comma_paths(params.segmented_folders) if params.segmented_folders else [Path(params.merged_laz)]
+        strict_remap(
+            collections=collections, originals=original_dir, output=output,
+            baseline_collections=comma_paths(params.baseline_1cm_folders) or None,
+            workers=params.workers,
+            resolution_1=params.resolution_1 if "resolution_1" in params.model_fields_set else None,
+            remap_tolerance=params.remap_tolerance,
+            instance_dimension=params.instance_dimension,
+            target_dims=set(_parse_csv(params.remap_dims)) if params.remap_dims else None,
         )
-        from output_remap import remap_merged_file_to_original_input_files
-        from point_cloud_outputs import write_loaded_point_cloud
-    except ImportError as e:
-        print(f"Error: Could not import required modules: {e}")
-        sys.exit(1)
-
-    if not params.original_raw_input_dir and not params.original_input_dir:
-        print("Error: --original-laz-input-dir is required for remap task")
-        print("       Legacy --original-input-dir is still accepted as a LAZ/LAS source for compatibility.")
-        sys.exit(1)
-    if not params.segmented_folders and not params.merged_laz:
-        print("Error: --segmented-folders or --merged-laz is required for remap task")
-        sys.exit(1)
-    if params.segmented_folders and params.merged_laz:
-        print("Error: --segmented-folders and --merged-laz are mutually exclusive for remap task")
-        sys.exit(1)
-    if params.segmented_folders and params.pre_remap_reassign_instances:
-        print("Error: --pre-remap-reassign-instances is only supported with --merged-laz")
-        sys.exit(1)
-    if params.merged_laz and params.remap_dims:
-        print("Error: --remap-dims is only supported with --segmented-folders; use --threedtrees-dims with --merged-laz")
-        sys.exit(1)
-
-    laz_input_dir = Path(params.original_raw_input_dir or params.original_input_dir)
-    laz_output_dir = _raw_original_output_dir(params, laz_input_dir)
-    _validate_raw_original_lane(laz_input_dir, laz_output_dir)
-
-    workers = max(1, params.workers)
-    retile_buffer = 2.0
-    tolerance = params.remap_tolerance
-
-    if params.segmented_folders:
-        collections = [Path(p.strip()) for p in params.segmented_folders.split(",") if p.strip()]
-        target_dims = {d.strip() for d in params.remap_dims.split(",") if d.strip()} if params.remap_dims else None
-
-        print("=" * 60)
-        print("Remap: prediction collections -> original files")
-        print("=" * 60)
-        print(f"Collections: {[str(c) for c in collections]}")
-        print(f"LAZ original input dir: {laz_input_dir}")
-        print(f"LAZ output dir: {laz_output_dir}")
-        print(f"Remap dims: {sorted(target_dims) if target_dims else 'all extra dimensions'}")
-        print()
-
-        try:
-            print()
-            print("=" * 60)
-            print("Remap: prediction collections -> uploaded LAZ originals")
-            print("=" * 60)
-            remap_prediction_collections_to_original_files(
-                collections,
-                laz_input_dir,
-                laz_output_dir,
-                tolerance=tolerance,
-                num_threads=workers,
-                retile_buffer=retile_buffer,
-                target_dims=target_dims,
-                chunk_size=params.chunk_size or 5_000_000,
-                num_spatial_chunks=params.num_spatial_chunks,
-            )
-        except Exception as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-
         if params.transfer_original_dims_to_merged:
-            product_output_dir = laz_output_dir.parent
-            _create_prod_merged_outputs(
-                original_with_predictions_dir=laz_output_dir,
-                output_dir=product_output_dir,
-                params=params,
-            )
-        else:
-            print("  Skipping prod-merged output creation (disabled).")
-
-        print()
-        print("Remap complete.")
-        return
-
-    merged_laz = Path(params.merged_laz)
-    if not merged_laz.exists():
-        print(f"Error: Merged file not found: {merged_laz}")
+            _create_prod_merged_outputs(output, output.parent, params)
+        print(f"Strict original remap complete: {output}")
+    except Exception as exc:
+        print(f"Error: {exc}")
         sys.exit(1)
-
-    print("=" * 60)
-    print("Remap: merged file -> original files")
-    print("=" * 60)
-    print(f"Merged file: {merged_laz}")
-    print(f"LAZ original input dir: {laz_input_dir}")
-    print(f"LAZ output dir: {laz_output_dir}")
-    print()
-
-    # Parse 3DTrees dimension branding params
-    threedtrees_dims = _effective_threedtrees_dims(params)
-    threedtrees_suffix = params.threedtrees_suffix
-
-    if not params.pre_remap_reassign_instances:
-        remap_merged_file_to_original_input_files(
-            merged_laz,
-            laz_input_dir,
-            laz_output_dir,
-            tolerance=tolerance,
-            num_threads=workers,
-            retile_buffer=retile_buffer,
-            threedtrees_dims=threedtrees_dims,
-            threedtrees_suffix=threedtrees_suffix,
-            num_spatial_chunks=params.num_spatial_chunks,
-            chunk_size=params.chunk_size or 5_000_000,
-        )
-    else:
-        merged_points, merged_extra_dims, merged_extra_dim_params = load_merged_file(merged_laz)
-        candidate_dims = threedtrees_dims or []
-        instance_dimension = params.pre_remap_reassign_instance_dimension
-        if instance_dimension is None:
-            instance_dimension = next((d for d in candidate_dims if "instance" in d.lower()), None)
-        if instance_dimension is None:
-            print("Error: --pre-remap-reassign-instances requires an instance dimension")
-            sys.exit(1)
-
-        print()
-        print("Pre-remap small instance reassignment")
-        print(f"  Instance dimension: {instance_dimension}")
-        print(f"  Reassign point-count clusters below: {params.pre_remap_reassign_min_cluster_size}")
-        print(f"  Hull check for clusters below: {params.pre_remap_reassign_hull_point_threshold}")
-        print(f"  Reassign hull volume below: {params.pre_remap_reassign_max_volume} m3")
-        reassignment_stats = reassign_small_instances_in_dims(
-            merged_points,
-            merged_extra_dims,
-            instance_dimension=instance_dimension,
-            min_cluster_size=params.pre_remap_reassign_min_cluster_size,
-            hull_point_threshold=params.pre_remap_reassign_hull_point_threshold,
-            max_volume_for_merge=params.pre_remap_reassign_max_volume,
-            max_search_radius=float("inf"),
-            num_threads=workers,
-            verbose=bool(params.verbose),
-        )
-        print(
-            "  Reassignment result: "
-            f"{reassignment_stats['changed_points']:,} points changed, "
-            f"{reassignment_stats['instances_before']:,} -> "
-            f"{reassignment_stats['instances_after']:,} instances"
-        )
-        if params.pre_remap_reassigned_laz:
-            reassigned_laz = Path(params.pre_remap_reassigned_laz)
-            print(f"  Saving reassigned segmented point cloud: {reassigned_laz}")
-            write_loaded_point_cloud(
-                source_file=merged_laz,
-                output_file=reassigned_laz,
-                points=merged_points,
-                all_dims=merged_extra_dims,
-            )
-
-        remap_to_original_input_files(
-            merged_points,
-            merged_extra_dims,
-            merged_extra_dim_params,
-            laz_input_dir,
-            laz_output_dir,
-            tolerance=tolerance,
-            num_threads=workers,
-            retile_buffer=retile_buffer,
-            threedtrees_dims=threedtrees_dims,
-            threedtrees_suffix=threedtrees_suffix,
-            num_spatial_chunks=params.num_spatial_chunks,
-            chunk_size=params.chunk_size or 1_000_000,
-        )
-
-    # Create prod-merged files from the enriched original outputs (optional).
-    if params.transfer_original_dims_to_merged:
-        product_output_dir = laz_output_dir.parent
-        _create_prod_merged_outputs(
-            original_with_predictions_dir=laz_output_dir,
-            output_dir=product_output_dir,
-            params=params,
-        )
-    else:
-        print("  Skipping prod-merged output creation (disabled).")
-
-    print()
-    print("Remap complete.")
 
 
 def run_create_merged_file_task(params: Parameters):
@@ -967,58 +540,25 @@ def run_create_merged_file_task(params: Parameters):
 
 
 def run_filter_task(params: Parameters):
-    """Filter buffer-zone duplicate instances from segmented/remapped tiles."""
+    """Filter core ownership and deduplicate already-dense tiles."""
+    from strict_prediction_pipeline import merge_collections
+
+    if not params.input_dir or not params.output_dir:
+        print("Error: --input-dir and --output-dir are required for filter")
+        sys.exit(1)
+    if Path(params.input_dir).resolve() == Path(params.output_dir).resolve():
+        print("Error: filter input and output must differ")
+        sys.exit(1)
+    tile_bounds = _require_tile_bounds_json(params.tile_bounds_json)
     try:
-        from filter_buffer_instances import filter_buffer_instances_dir
-    except ImportError as e:
-        print(f"Error: Could not import filter_buffer_instances.py: {e}")
+        merge_collections(collections=[Path(params.input_dir)], target_dir=None,
+                          output_tiles=Path(params.output_dir), tile_bounds_json=tile_bounds,
+                          ready=True, matching=not params.disable_matching, workers=params.workers,
+                          instance_dimension=params.instance_dimension,
+                          overlap_threshold=params.overlap_threshold, filter_anchor=params.filter_anchor)
+    except Exception as exc:
+        print(f"Error: {exc}")
         sys.exit(1)
-
-    if not params.input_dir:
-        print("Error: --input-dir is required for filter task")
-        sys.exit(1)
-    if not params.output_dir:
-        print("Error: --output-dir is required for filter task")
-        sys.exit(1)
-
-    input_dir = Path(params.input_dir)
-    output_dir = Path(params.output_dir)
-    if not input_dir.exists():
-        print(f"Error: Input directory does not exist: {input_dir}")
-        sys.exit(1)
-    if output_dir.resolve() == input_dir.resolve() and params.filter_suffix == "":
-        print("Error: --output-dir must differ from --input-dir when --filter-suffix is empty")
-        sys.exit(1)
-
-    print("=" * 60)
-    print("Running Filter Task")
-    print("=" * 60)
-    print(f"Input directory: {input_dir}")
-    print(f"Output directory: {output_dir}")
-    print(f"Buffer: {params.buffer}m")
-    print(f"Instance dimension: {params.instance_dimension}")
-    print(f"Output suffix: {params.filter_suffix!r}")
-    if params.filter_output_extension:
-        print(f"Output extension: {params.filter_output_extension}")
-    print()
-
-    try:
-        summary = filter_buffer_instances_dir(
-            input_dir=input_dir,
-            output_dir=output_dir,
-            buffer=params.buffer,
-            suffix=params.filter_suffix,
-            instance_dimension=params.instance_dimension,
-            output_extension=params.filter_output_extension,
-        )
-    except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
-
-    print()
-    print("Filter task complete.")
-    print(f"  Files processed: {summary['input_files']}")
-    print(f"  Output files: {len(summary['output_files'])}")
 
 
 def preprocess_boolean_flags(args_list):
@@ -1134,7 +674,7 @@ def _field_cli_flags(field_name: str) -> list[str]:
 def _print_cli_help() -> None:
     """Print a compact SmartTile CLI help page."""
     option_groups = [
-        ("Common", ["task", "input_dir", "output_dir", "workers", "num_spatial_chunks", "chunk_size"]),
+        ("Common", ["task", "input_dir", "output_dir", "workers", "num_spatial_chunks", "chunk_size", "memory_gb"]),
         (
             "Tile",
             [

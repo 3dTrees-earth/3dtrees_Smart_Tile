@@ -71,6 +71,29 @@ def _write_shifted_prediction_las(path: Path) -> None:
     las.write(path)
 
 
+def _write_linear_las(
+    path: Path,
+    count: int,
+    *,
+    dim_name: str | None = None,
+    no_data: int | None = None,
+) -> None:
+    header = _base_header()
+    las = laspy.LasData(header)
+    las.x = 500.0 + np.arange(count, dtype=np.float64) * 0.001
+    las.y = np.full(count, 600.0)
+    las.z = np.full(count, 50.0)
+    if dim_name:
+        params = laspy.ExtraBytesParams(
+            name=dim_name,
+            type=np.uint16,
+            no_data=None if no_data is None else [no_data],
+        )
+        las.add_extra_dim(params)
+        setattr(las, dim_name, np.arange(1, count + 1, dtype=np.uint16))
+    las.write(path)
+
+
 class MultiCollectionRemapTests(unittest.TestCase):
     def test_prediction_collection_files_prefer_copc_twins(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -293,7 +316,7 @@ class MultiCollectionRemapTests(unittest.TestCase):
                 prediction_collections=[primary_dir, secondary_dir],
                 reference_dir=None,
                 output_folder=output_dir,
-                params=Parameters(remap_tolerance=0.001, workers=1, _cli_parse_args=False),
+                params=Parameters(workers=1, _cli_parse_args=False),
                 retile_buffer=0.0,
                 workers=1,
             )
@@ -412,7 +435,7 @@ class MultiCollectionRemapTests(unittest.TestCase):
             _write_las(original_dir / "source.las")
             _write_shifted_prediction_las(shifted_dir / "shifted.las")
 
-            with self.assertRaisesRegex(RuntimeError, "matched 0/4 points"):
+            with self.assertRaisesRegex(RuntimeError, "0/4 matched"):
                 remap_prediction_collections_to_original_files(
                     [shifted_dir],
                     original_dir,
@@ -421,6 +444,108 @@ class MultiCollectionRemapTests(unittest.TestCase):
                     num_threads=1,
                     prefer_copc_sources=False,
                 )
+            self.assertFalse((output_dir / "source.las").exists())
+            self.assertFalse(any(output_dir.glob("*.smarttile-part")))
+
+    def test_small_gap_is_accepted_and_keeps_unmatched_point_as_no_data(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_dir = root / "originals"
+            prediction_dir = root / "prediction"
+            output_dir = root / "out"
+            original_dir.mkdir()
+            prediction_dir.mkdir()
+            _write_linear_las(original_dir / "source.las", 100)
+            _write_linear_las(
+                prediction_dir / "prediction.las",
+                99,
+                dim_name="PredInstance_Model",
+                no_data=65535,
+            )
+
+            remap_prediction_collections_to_original_files(
+                [prediction_dir],
+                original_dir,
+                output_dir,
+                tolerance=0.0001,
+                num_threads=1,
+                prefer_copc_sources=False,
+                min_match_fraction=0.99,
+            )
+
+            out = laspy.read(output_dir / "source.las")
+            np.testing.assert_array_equal(
+                out.PredInstance_Model[:99],
+                np.arange(1, 100, dtype=np.uint16),
+            )
+            self.assertEqual(int(out.PredInstance_Model[99]), 65535)
+
+    def test_severe_gap_fails_after_full_file_without_publishing_partial_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_dir = root / "originals"
+            prediction_dir = root / "prediction"
+            output_dir = root / "out"
+            original_dir.mkdir()
+            prediction_dir.mkdir()
+            _write_linear_las(original_dir / "source.las", 100)
+            _write_linear_las(
+                prediction_dir / "prediction.las",
+                98,
+                dim_name="PredInstance_Model",
+                no_data=65535,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "98/100 matched"):
+                remap_prediction_collections_to_original_files(
+                    [prediction_dir],
+                    original_dir,
+                    output_dir,
+                    tolerance=0.0001,
+                    num_threads=1,
+                    prefer_copc_sources=False,
+                    min_match_fraction=0.99,
+                )
+
+            self.assertFalse((output_dir / "source.las").exists())
+            self.assertFalse(any(output_dir.glob("*.smarttile-part")))
+
+    def test_each_prediction_collection_has_independent_coverage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_dir = root / "originals"
+            complete_dir = root / "complete"
+            small_gap_dir = root / "small_gap"
+            output_dir = root / "out"
+            original_dir.mkdir()
+            complete_dir.mkdir()
+            small_gap_dir.mkdir()
+            _write_linear_las(original_dir / "source.las", 100)
+            _write_linear_las(
+                complete_dir / "complete.las",
+                100,
+                dim_name="PredInstance_Complete",
+            )
+            _write_linear_las(
+                small_gap_dir / "small_gap.las",
+                99,
+                dim_name="PredInstance_SmallGap",
+                no_data=65535,
+            )
+
+            remap_prediction_collections_to_original_files(
+                [complete_dir, small_gap_dir],
+                original_dir,
+                output_dir,
+                tolerance=0.0001,
+                num_threads=1,
+                prefer_copc_sources=False,
+                min_match_fraction=0.99,
+            )
+
+            out = laspy.read(output_dir / "source.las")
+            self.assertEqual(int(out.PredInstance_Complete[99]), 100)
+            self.assertEqual(int(out.PredInstance_SmallGap[99]), 65535)
 
     def test_stream_remap_honors_caller_spatial_buffer(self):
         with tempfile.TemporaryDirectory() as tmpdir:

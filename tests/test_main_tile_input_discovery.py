@@ -1,4 +1,5 @@
 import sys
+import json
 import tempfile
 import types
 import unittest
@@ -13,22 +14,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.modules.setdefault(
     "plot_tiles_and_copc",
     types.SimpleNamespace(plot_extents=lambda *_args, **_kwargs: None),
-)
-sys.modules.setdefault(
-    "tile_tindex",
-    types.SimpleNamespace(
-        bounds_overlap=lambda *_args, **_kwargs: False,
-        build_tindex=lambda *_args, **_kwargs: None,
-        calculate_tile_bounds=lambda *_args, **_kwargs: None,
-        filter_source_files_for_tile=lambda *_args, **_kwargs: [],
-        get_bounds=lambda *_args, **_kwargs: None,
-        get_pdal_path=lambda: "pdal",
-        get_pdal_wrench_path=lambda: "pdal_wrench",
-        get_source_bounds_from_tindex=lambda *_args, **_kwargs: {},
-        get_source_files_from_tindex=lambda *_args, **_kwargs: [],
-        parse_proj_bounds=lambda *_args, **_kwargs: None,
-        update_tile_bounds_json_from_files=lambda *_args, **_kwargs: 0,
-    ),
 )
 
 import main_tile  # noqa: E402
@@ -54,7 +39,13 @@ class MainTileInputDiscoveryTests(unittest.TestCase):
             input_dir.mkdir()
             output_dir.mkdir()
             source = input_dir / "source.copc.laz"
-            source.write_bytes(b"copc")
+            las = laspy.LasData(laspy.LasHeader(point_format=0, version="1.4"))
+            las.x = [100., 782.]; las.y = [200., 772.]; las.z = [0., 10.]
+            las.write(source)
+            (output_dir / "bounds.json").write_text(json.dumps({
+                "tile_buffer": 20, "tiles": [
+                    {"col": c, "row": r, "bounds": [[100+c*300, 400+c*300], [200+r*300, 500+r*300]]}
+                    for c in range(3) for r in range(2)]}))
 
             def fake_build_tindex(_input_dir, output_gpkg):
                 output_gpkg.parent.mkdir(parents=True, exist_ok=True)
@@ -78,7 +69,16 @@ class MainTileInputDiscoveryTests(unittest.TestCase):
                             )
 
             self.assertEqual(result, output_dir / "copc_single")
-            self.assertEqual((result / "source.copc.laz").read_bytes(), b"copc")
+            self.assertEqual((result / "source.copc.laz").read_bytes(), source.read_bytes())
+            layout = json.loads((output_dir / "bounds.json").read_text())
+            self.assertTrue(layout["tiling_skipped"])
+            self.assertEqual(layout["tile_buffer"], 0)
+            self.assertEqual(len(layout["tiles"]), 1)
+            self.assertEqual(layout["tiles"][0]["core"], [[100., 782.], [200., 772.]])
+            from dense_instance_ownership import ownership_regions
+            regions = ownership_regions([(source, source, "source")], output_dir / "bounds.json")
+            self.assertEqual(regions[0]["core"], [[100., 782.], [200., 772.]])
+            self.assertTrue(all(n is None for n in regions[0]["neighbors"].values()))
             convert.assert_not_called()
 
     def test_single_source_range_tasks_split_large_source_with_bounded_chunks(self):

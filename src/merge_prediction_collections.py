@@ -1,5 +1,6 @@
 """Helpers for preparing merge-ready prediction collection inputs."""
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -51,18 +52,20 @@ def prepare_merge_prediction_collection_source(
     print(f"Reference geometry/source: {reference_dir}")
     print(f"Additional collections: {[str(path) for path in collections_to_add]}")
     print(f"Combined merge source: {combined_dir}")
-    print(f"Remap tolerance: {params.remap_tolerance}m")
+    tolerance = params.remap_tolerance if params.remap_tolerance is not None else math.sqrt(3.0) * params.resolution_1
+    print(f"Remap tolerance: {tolerance}m")
     print()
 
     remap_prediction_collections_to_original_files(
         collections_to_add,
         reference_dir,
         combined_dir,
-        tolerance=params.remap_tolerance,
+        tolerance=tolerance,
         num_threads=workers,
         retile_buffer=retile_buffer,
         target_dims=target_dims,
         chunk_size=params.chunk_size or 5_000_000,
         num_spatial_chunks=params.num_spatial_chunks or params.workers,
+        min_match_fraction=params.min_remap_match_fraction,
     )
     return combined_dir

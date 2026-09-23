@@ -18,8 +18,6 @@ from copc_metadata import (
     srs_assignment_from_file,
 )
 
-UNTWINE_STRIP_EXTRA_DIMS_ARG = "Classification"
-
 
 def get_pdal_path() -> str:
     """Return the PDAL executable path."""
@@ -38,23 +36,25 @@ def _run_untwine(
     if not untwine_cmd:
         return (False, "untwine not available")
 
-    input_args = []
-    for path in inputs:
-        input_args.extend(["-i", str(path)])
-    # Untwine treats --dims as an extra-dimension keep-list while X/Y/Z and the
-    # standard LAS fields remain loaded. An empty keep-list is rejected by
-    # Untwine 1.5.1, so Classification is used as a stable standard LAS
-    # dimension to activate Untwine's dimension-limiting path. Callers inspect
-    # the output and fall back to PDAL when extra bytes remain.
-    dims_args = ["--dims", UNTWINE_STRIP_EXTRA_DIMS_ARG] if strip_extra_dims else []
-    srs_args = ["--a_srs", srs_arg] if srs_arg else []
     try:
-        result = subprocess.run(
-            [untwine_cmd] + input_args + ["-o", str(output_copc)] + dims_args + srs_args,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        output_copc.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".smarttile-standard-", dir=output_copc.parent) as tmpdir:
+            input_args = []
+            for i, path in enumerate(inputs):
+                if strip_extra_dims and _has_extra_dimensions(path):
+                    staged = Path(tmpdir) / f"{i}.las"
+                    _stage_standard_dimensions(path, staged)
+                    path = staged
+                input_args.extend(["-i", str(path)])
+            # Inputs are already reduced when requested. Untwine's --dims may
+            # retain extras, and can crash on an already reduced PF0/LAS 1.4 file.
+            srs_args = ["--a_srs", srs_arg] if srs_arg else []
+            result = subprocess.run(
+                [untwine_cmd] + input_args + ["-o", str(output_copc)] + srs_args,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
     except Exception as exc:
         return (False, f"untwine error: {exc}")
     if result.returncode != 0:
@@ -62,6 +62,28 @@ def _run_untwine(
     if not output_copc.exists() or output_copc.stat().st_size == 0:
         return (False, "untwine produced no output")
     return (True, "untwine")
+
+
+def _stage_standard_dimensions(source: Path, output: Path) -> None:
+    """Stream native LAS fields into an uncompressed input for bounded Untwine.
+
+    The original remains authoritative and untouched. This is used only for
+    processing tiles whose contract already drops ExtraBytes, never enriched
+    original or prod-merged products.
+    """
+    import laspy
+    from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
+
+    with laspy.open(source) as reader:
+        header = copy_single_source_header(reader.header)
+        header.remove_extra_dims(list(header.point_format.extra_dimension_names))
+        with laspy.open(output, mode="w", header=header) as writer:
+            for record in reader.chunk_iterator(32_768):
+                standard = laspy.ScaleAwarePointRecord.zeros(len(record), header=header)
+                for name in standard.array.dtype.names:
+                    standard.array[name] = record.array[name]
+                writer.write_points(standard)
+            write_retained_evlrs(writer, header)
 
 
 def _has_extra_dimensions(path: Path) -> bool:
@@ -226,9 +248,9 @@ def finalize_tile_to_copc_untwine(
                 strip_extra_dims=True,
             )
             if success and _output_has_no_extra_dimensions(final_tile):
-                return (True, "untwine-dims-classification")
+                return (True, "untwine-standard-dimensions")
             if success:
-                message = "untwine --dims Classification retained extra dimensions"
+                message = "untwine retained extra dimensions after standard-field staging"
             try:
                 final_tile.unlink(missing_ok=True)
             except OSError:
@@ -286,12 +308,65 @@ def convert_laz_to_copc(
     output_copc: Path,
     preserve_extra_dims: bool = False,
 ) -> bool:
+    """Convert to COPC, automatically scalarizing vector ExtraBytes when kept."""
+    if not preserve_extra_dims:
+        return _convert_laz_to_copc_impl(input_laz, output_copc, preserve_extra_dims=False)
+
+    from vector_extra_bytes import (
+        preserve_vector_schema,
+        scalarize_vector_extra_bytes,
+        validate_vector_conversion,
+        vector_schema_sidecar_path,
+    )
+
+    output_copc.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".smarttile-vector-extra-", dir=output_copc.parent) as tmpdir:
+        scalar_input = Path(tmpdir) / "scalarized.laz"
+        working_input, schema = scalarize_vector_extra_bytes(input_laz, scalar_input)
+        if schema is None:
+            return _convert_laz_to_copc_impl(working_input, output_copc, preserve_extra_dims=True)
+        # Keep vector outputs private until both data and reconstruction metadata pass.
+        candidate_dir = Path(tmpdir) / "candidate"
+        candidate_dir.mkdir()
+        candidate = candidate_dir / output_copc.name
+        if not _convert_laz_to_copc_impl(working_input, candidate, preserve_extra_dims=True):
+            return False
+        valid, message = validate_vector_conversion(working_input, candidate)
+        if not valid:
+            print(f"  Warning: vector ExtraBytes validation failed: {message}")
+            return False
+        preserved, message = preserve_vector_schema(working_input, candidate)
+        if not preserved:
+            print(f"  Warning: {message}")
+            return False
+        # Install the cloud last; restore the previous sidecar if that rename fails.
+        sidecar = vector_schema_sidecar_path(output_copc)
+        previous_sidecar = Path(tmpdir) / "previous-sidecar.json"
+        if sidecar.exists():
+            sidecar.replace(previous_sidecar)
+        try:
+            vector_schema_sidecar_path(candidate).replace(sidecar)
+            candidate.replace(output_copc)
+        except OSError:
+            if previous_sidecar.exists():
+                previous_sidecar.replace(sidecar)
+            else:
+                sidecar.unlink(missing_ok=True)
+            raise
+        return True
+
+
+def _convert_laz_to_copc_impl(
+    input_laz: Path,
+    output_copc: Path,
+    preserve_extra_dims: bool = False,
+) -> bool:
     """Convert a single LAZ/LAS file to COPC with CRS/GeoTIFF validation.
 
-    The default SmartTile COPC conversion first tries Untwine's
-    ``--dims Classification`` path while forwarding header metadata/CRS, then
-    validates that no extra byte dimensions remain. If Untwine retains extras,
-    SmartTile falls back to PDAL's standard-dimension writer path. Prod-merged creation passes
+    The default SmartTile COPC conversion streams standard dimensions into a
+    temporary LAS when needed, then runs Untwine and validates the schema/CRS.
+    This avoids a full enriched conversion followed by a memory-heavy PDAL retry.
+    Prod-merged creation passes
     preserve_extra_dims=True because those products must retain enriched
     prediction and source attributes.
     """

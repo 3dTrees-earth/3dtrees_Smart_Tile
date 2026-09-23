@@ -28,6 +28,21 @@ def get_pdal_wrench_path() -> str:
     return wrench_path if wrench_path else "pdal_wrench"
 
 
+def _common_header_srs(paths: List[Path]) -> Optional[str]:
+    """Only assign a missing PDAL CRS when every source header agrees."""
+    import laspy
+    from copc_metadata import crs_equivalent, parse_crs
+
+    common = None
+    for path in paths:
+        with laspy.open(path) as reader:
+            crs = parse_crs(reader.header)
+        if crs is None or (common is not None and not crs_equivalent(common, crs)):
+            return None
+        common = crs
+    return common.to_wkt() if common is not None else None
+
+
 def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
     """Build a GeoPackage tindex from LAZ/LAS/COPC source files."""
     print()
@@ -47,7 +62,8 @@ def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
     if not source_files:
         raise ValueError(f"No LAZ/LAS files found in {input_dir}")
 
-    tindex_srs = None
+    common_header_srs = _common_header_srs(source_files)
+    tindex_srs = common_header_srs
     try:
         info_result = subprocess.run(
             [get_pdal_path(), "info", "--metadata", str(source_files[0])],
@@ -60,6 +76,7 @@ def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
             tindex_srs = (
                 meta.get("metadata", {}).get("srs", {}).get("compoundwkt")
                 or meta.get("metadata", {}).get("spatialreference")
+                or common_header_srs
             )
     except Exception as exc:
         print(f"  Warning: Could not extract SRS for tindex: {exc}")
@@ -90,6 +107,9 @@ def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
             if tindex_srs:
                 tmp_cmd.append(f"--t_srs={tindex_srs}")
 
+            if common_header_srs:
+                tmp_cmd.append(f"--a_srs={common_header_srs}")
+
             result = subprocess.run(tmp_cmd, capture_output=True, text=True, check=False)
             if result.returncode != 0 and "Unexpected argument 'filelist'" in (result.stderr or result.stdout):
                 stdin_cmd = [
@@ -105,6 +125,8 @@ def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
                 ]
                 if tindex_srs:
                     stdin_cmd.append(f"--t_srs={tindex_srs}")
+                if common_header_srs:
+                    stdin_cmd.append(f"--a_srs={common_header_srs}")
                 result = subprocess.run(
                     stdin_cmd,
                     input=file_list_path.read_text(),
@@ -176,6 +198,19 @@ def calculate_tile_bounds(
     return jobs_file, bounds_json, env
 
 
+def write_single_cloud_bounds(tile_bounds_json: Path, source_file: Path) -> None:
+    """Describe the actual single cloud when the size threshold bypasses tiling."""
+    import laspy
+
+    with laspy.open(source_file) as reader:
+        h = reader.header
+        x0, y0, x1, y1 = float(h.x_min), float(h.y_min), float(h.x_max), float(h.y_max)
+    data = json.loads(tile_bounds_json.read_text())
+    from tile_bounds_graph import single_cloud_layout
+    data = single_cloud_layout(data, (x0, x1, y0, y1))
+    tile_bounds_json.write_text(json.dumps(data, indent=2) + "\n")
+
+
 def update_tile_bounds_json_from_files(
     tile_bounds_json: Path,
     files_dir: Path,
@@ -191,6 +226,13 @@ def update_tile_bounds_json_from_files(
     tiles = data.get("tiles", [])
     if not tiles:
         return 0
+
+    if data.get("tiling_skipped"):
+        files = point_cloud_files(files_dir)
+        if len(tiles) != 1 or len(files) != 1:
+            raise ValueError("Skipped tiling requires exactly one cloud and one layout entry")
+        write_single_cloud_bounds(tile_bounds_json, files[0])
+        return 1
 
     label_to_path: Dict[str, Path] = {}
     for path in files_dir.glob(file_glob):

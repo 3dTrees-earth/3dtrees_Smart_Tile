@@ -22,9 +22,7 @@ from point_cloud_metadata import (
     raw_point_cloud_files,
 )
 from worker_budget import kdtree_query_workers
-
-
-MIN_ORIGINAL_REMAP_MATCH_FRACTION = 0.99
+from remap_coverage import MIN_ORIGINAL_REMAP_MATCH_FRACTION
 
 
 def _branded_prediction_name(dim_name: str, suffix: str) -> str:

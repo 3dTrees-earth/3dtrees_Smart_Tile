@@ -52,6 +52,7 @@ from tile_tindex import (
     get_source_files_from_tindex,
     parse_proj_bounds as _parse_proj_bounds,
     update_tile_bounds_json_from_files,
+    write_single_cloud_bounds,
 )
 
 
@@ -314,7 +315,19 @@ def _distribute_source_file(args: Tuple) -> List[Tuple[str, int]]:
                 cx = np.asarray(chunk.x)
                 cy = np.asarray(chunk.y)
 
-                for i, label in enumerate(tile_labels):
+                chunk_minx = float(cx.min()) if len(cx) else 0.0
+                chunk_maxx = float(cx.max()) if len(cx) else 0.0
+                chunk_miny = float(cy.min()) if len(cy) else 0.0
+                chunk_maxy = float(cy.max()) if len(cy) else 0.0
+                candidate_tile_indices = np.flatnonzero(
+                    (tile_xmax >= chunk_minx)
+                    & (tile_xmin <= chunk_maxx)
+                    & (tile_ymax >= chunk_miny)
+                    & (tile_ymin <= chunk_maxy)
+                )
+
+                for i in candidate_tile_indices:
+                    label = tile_labels[i]
                     mask = (
                         (cx >= tile_xmin[i])
                         & (cx <= tile_xmax[i])
@@ -673,7 +686,17 @@ def run_tiling_pipeline(
     if not fixed_tindex.exists() and tindex_file.exists():
         if fixed_tindex.is_symlink():
             fixed_tindex.unlink()
-        fixed_tindex.symlink_to(tindex_file.name)
+        try:
+            fixed_tindex.symlink_to(tindex_file.name)
+        except OSError:
+            # Windows developer environments may not grant symlink privileges.
+            # Galaxy only needs a stable path, so a byte-for-byte copy is safe.
+            shutil.copy2(tindex_file, fixed_tindex)
+
+    if should_skip_tiling:
+        write_single_cloud_bounds(bounds_json, source_files[0])
+        from prepare_tile_jobs import write_job_list
+        write_job_list(bounds_json, jobs_file)
 
     # Plot overview
     plot_tiles_and_copc.plot_extents(
@@ -700,6 +723,7 @@ def run_tiling_pipeline(
                 print(f"  Using existing {out_copc.name}")
             print("  Returning COPC directory for direct subsampling")
             print("=" * 60)
+            write_single_cloud_bounds(bounds_json, out_copc)
             return copc_single_dir
 
         out_copc = copc_single_dir / f"{source_file.stem}.copc.laz"
@@ -728,6 +752,7 @@ def run_tiling_pipeline(
             print(f"  Using existing {out_copc.name}")
         print(f"  Returning COPC directory for direct subsampling")
         print("=" * 60)
+        write_single_cloud_bounds(bounds_json, out_copc)
         return copc_single_dir
 
     # Step 3: Create tiles

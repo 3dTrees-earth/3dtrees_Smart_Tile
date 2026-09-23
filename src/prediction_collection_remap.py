@@ -27,6 +27,13 @@ from point_cloud_metadata import (
 )
 from dimension_transfer import next_available_suffix
 from worker_budget import file_worker_count, kdtree_query_workers
+from remap_coverage import (
+    MIN_ORIGINAL_REMAP_MATCH_FRACTION,
+    coverage_diagnostic,
+    distance_coverage,
+    empty_coverage,
+    merge_coverage,
+)
 
 
 def prediction_collection_files(path: Path) -> List[Path]:
@@ -37,6 +44,53 @@ def prediction_collection_files(path: Path) -> List[Path]:
             return [path]
         return []
     return point_cloud_files(path)
+
+
+def _promote_collection_extra_dim(
+    current: laspy.ExtraBytesParams,
+    incoming,
+) -> laspy.ExtraBytesParams:
+    """Return a lossless collection-wide schema for one prediction dimension."""
+    current_dtype = np.dtype(current.type)
+    incoming_dtype = np.dtype(incoming.dtype)
+    promoted_dtype = np.promote_types(current_dtype, incoming_dtype)
+    if promoted_dtype == current_dtype:
+        return current
+    return laspy.ExtraBytesParams(
+        name=current.name,
+        type=promoted_dtype,
+        description=getattr(current, "description", "") or "",
+        offsets=getattr(current, "offsets", None),
+        scales=getattr(current, "scales", None),
+        no_data=getattr(current, "no_data", None),
+    )
+
+
+def _assign_prediction_values(out_record, name: str, values: np.ndarray, *, mask=None, raw=False) -> None:
+    """Assign one prediction dimension, rejecting lossy integer downcasts."""
+    values = np.asarray(values)
+    target = out_record.array[name] if raw else out_record[name]
+    target_dtype = np.asarray(target).dtype
+    if np.issubdtype(values.dtype, np.integer) and np.issubdtype(
+        target_dtype, np.integer
+    ):
+        limits = np.iinfo(target_dtype)
+        minimum = int(values.min()) if values.size else 0
+        maximum = int(values.max()) if values.size else 0
+        if minimum < limits.min or maximum > limits.max:
+            raise OverflowError(
+                f"Prediction dimension {name} has values [{minimum}, {maximum}] "
+                f"that do not fit output dtype {target_dtype}"
+            )
+    if raw:
+        if mask is None:
+            target[:] = values
+        else:
+            target[mask] = values
+    elif mask is None:
+        out_record[name] = values
+    else:
+        out_record[name][mask] = values
 
 
 def scan_prediction_collection_metadata(
@@ -63,8 +117,13 @@ def scan_prediction_collection_metadata(
                 for dim in header.point_format.extra_dimensions:
                     if target_dims is not None and dim.name not in target_dims:
                         continue
-                    if dim.name not in collection_dims:
-                        collection_dims[dim.name] = extra_bytes_params_from_dimension_info(dim)
+                    if dim.name in collection_dims:
+                        collection_dims[dim.name] = _promote_collection_extra_dim(collection_dims[dim.name], dim)
+                    else:
+                        collection_dims[dim.name] = extra_bytes_params_from_dimension_info(
+                            dim,
+                            header=header,
+                        )
                 file_meta.append({
                     "path": file_path,
                     "bounds": bounds,
@@ -194,7 +253,13 @@ def load_collection_subset_for_bounds(
                         dim_chunks[dim_name].append(np.asarray(chunk[dim_name])[mask])
 
     if not point_chunks:
-        raise ValueError(f"No prediction points found in {coll_meta['path']} for bounds {bounds}")
+        return (
+            np.empty((0, 3), dtype=np.float64),
+            {
+                name: np.empty(0, dtype=coll_meta["extra_params"][name].type)
+                for name in coll_meta["dims"]
+            },
+        )
 
     points = np.concatenate(point_chunks, axis=0)
     dims = {name: np.concatenate(chunks) for name, chunks in dim_chunks.items()}
@@ -210,6 +275,7 @@ def stream_add_collections_to_file(
     chunk_size: int = 5_000_000,
     kdtree_workers: int = 1,
     chunk_parallel_workers: int = 1,
+    min_match_fraction: float = MIN_ORIGINAL_REMAP_MATCH_FRACTION,
 ) -> Tuple[int, int]:
     """Stream all prediction collections onto one original file in one write pass."""
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -228,76 +294,36 @@ def stream_add_collections_to_file(
             flush=True,
         )
 
-    with laspy.open(str(input_file), laz_backend=laspy.LazBackend.LazrsParallel) as reader:
-        header = copy_single_source_header(reader.header, preserve_extra_dimensions=True)
-        output_names = _prediction_output_names_for_header(header, collection_meta)
-        _log_prediction_name_collisions(output_names, input_file.name)
-        extra_dims_to_add = []
-        for coll_meta in collection_meta:
-            for dim_name in coll_meta["dims"]:
-                params = coll_meta["extra_params"][dim_name]
-                extra_dims_to_add.append(
-                    extra_bytes_params_from_params(params, name=output_names[dim_name])
-                )
-        if extra_dims_to_add:
-            header.add_extra_dims(extra_dims_to_add)
-
-        n_points = 0
-        matched_total = 0
-        with laspy.open(
-            str(output_file),
-            mode="w",
-            header=header,
-            laz_backend=laspy.LazBackend.LazrsParallel,
-        ) as writer:
-            if chunk_parallel_workers <= 1:
-                for chunk in reader.chunk_iterator(read_chunk_size):
-                    out_chunk, chunk_matches = _enrich_original_chunk(
-                        chunk,
-                        header,
-                        collection_meta,
-                        chunk_spatial_buffer,
-                        tolerance,
-                        kdtree_workers,
-                        input_file.name,
-                        output_names,
+    temp_output = output_file.with_name(f".{output_file.name}.smarttile-part")
+    if temp_output.exists():
+        temp_output.unlink()
+    coverage = _empty_collection_coverage(collection_meta)
+    try:
+        with laspy.open(str(input_file), laz_backend=laspy.LazBackend.LazrsParallel) as reader:
+            header = copy_single_source_header(reader.header, preserve_extra_dimensions=True)
+            output_names = _prediction_output_names_for_header(header, collection_meta)
+            _log_prediction_name_collisions(output_names, input_file.name)
+            extra_dims_to_add = []
+            for coll_meta in collection_meta:
+                for dim_name in coll_meta["dims"]:
+                    params = coll_meta["extra_params"][dim_name]
+                    extra_dims_to_add.append(
+                        extra_bytes_params_from_params(params, name=output_names[dim_name])
                     )
-                    writer.write_points(out_chunk)
-                    n_points += len(chunk)
-                    matched_total += chunk_matches
-                    del out_chunk
-                    if n_points % 25_000_000 < len(chunk):
-                        print(
-                            f"    prediction collections -> {output_file.name}: "
-                            f"{n_points:,} points",
-                            flush=True,
-                        )
-            else:
-                ready_chunks: Dict[int, Tuple[object, int, int]] = {}
-                future_to_idx = {}
-                next_submit_idx = 0
-                next_write_idx = 0
-                max_in_flight = chunk_parallel_workers
+            if extra_dims_to_add:
+                header.add_extra_dims(extra_dims_to_add)
 
-                with ThreadPoolExecutor(max_workers=chunk_parallel_workers) as executor:
+            n_points = 0
+            matched_total = 0
+            with laspy.open(
+                str(temp_output),
+                mode="w",
+                header=header,
+                laz_backend=laspy.LazBackend.LazrsParallel,
+            ) as writer:
+                if chunk_parallel_workers <= 1:
                     for chunk in reader.chunk_iterator(read_chunk_size):
-                        while len(future_to_idx) >= max_in_flight:
-                            done, _ = wait(future_to_idx, return_when=FIRST_COMPLETED)
-                            for future in done:
-                                idx = future_to_idx.pop(future)
-                                out_chunk, chunk_matches = future.result()
-                                ready_chunks[idx] = (out_chunk, chunk_matches, len(out_chunk))
-                            next_write_idx, n_points, matched_total = _write_ready_chunks_in_order(
-                                writer,
-                                ready_chunks,
-                                next_write_idx,
-                                output_file.name,
-                                n_points,
-                                matched_total,
-                            )
-
-                        future = executor.submit(
-                            _enrich_original_chunk,
+                        out_chunk, chunk_matches, chunk_coverage = _enrich_original_chunk(
                             chunk,
                             header,
                             collection_meta,
@@ -307,26 +333,98 @@ def stream_add_collections_to_file(
                             input_file.name,
                             output_names,
                         )
-                        future_to_idx[future] = next_submit_idx
-                        next_submit_idx += 1
+                        writer.write_points(out_chunk)
+                        n_points += len(chunk)
+                        matched_total += chunk_matches
+                        _merge_collection_coverage(coverage, chunk_coverage)
+                        del out_chunk
+                        if n_points % 25_000_000 < len(chunk):
+                            print(
+                                f"    prediction collections -> {output_file.name}: "
+                                f"{n_points:,} points",
+                                flush=True,
+                            )
+                else:
+                    ready_chunks: Dict[
+                        int,
+                        Tuple[object, int, int, Dict[str, Dict[str, object]]],
+                    ] = {}
+                    future_to_idx = {}
+                    next_submit_idx = 0
+                    next_write_idx = 0
+                    max_in_flight = chunk_parallel_workers
 
-                    while future_to_idx:
-                        done, _ = wait(future_to_idx, return_when=FIRST_COMPLETED)
-                        for future in done:
-                            idx = future_to_idx.pop(future)
-                            out_chunk, chunk_matches = future.result()
-                            ready_chunks[idx] = (out_chunk, chunk_matches, len(out_chunk))
-                        next_write_idx, n_points, matched_total = _write_ready_chunks_in_order(
-                            writer,
-                            ready_chunks,
-                            next_write_idx,
-                            output_file.name,
-                            n_points,
-                            matched_total,
-                        )
+                    with ThreadPoolExecutor(max_workers=chunk_parallel_workers) as executor:
+                        for chunk in reader.chunk_iterator(read_chunk_size):
+                            while len(future_to_idx) >= max_in_flight:
+                                done, _ = wait(future_to_idx, return_when=FIRST_COMPLETED)
+                                for future in done:
+                                    idx = future_to_idx.pop(future)
+                                    out_chunk, chunk_matches, chunk_coverage = future.result()
+                                    ready_chunks[idx] = (
+                                        out_chunk,
+                                        chunk_matches,
+                                        len(out_chunk),
+                                        chunk_coverage,
+                                    )
+                                next_write_idx, n_points, matched_total = _write_ready_chunks_in_order(
+                                    writer,
+                                    ready_chunks,
+                                    next_write_idx,
+                                    output_file.name,
+                                    n_points,
+                                    matched_total,
+                                    coverage,
+                                )
 
-    gc.collect()
-    return n_points, matched_total
+                            future = executor.submit(
+                                _enrich_original_chunk,
+                                chunk,
+                                header,
+                                collection_meta,
+                                chunk_spatial_buffer,
+                                tolerance,
+                                kdtree_workers,
+                                input_file.name,
+                                output_names,
+                            )
+                            future_to_idx[future] = next_submit_idx
+                            next_submit_idx += 1
+
+                        while future_to_idx:
+                            done, _ = wait(future_to_idx, return_when=FIRST_COMPLETED)
+                            for future in done:
+                                idx = future_to_idx.pop(future)
+                                out_chunk, chunk_matches, chunk_coverage = future.result()
+                                ready_chunks[idx] = (
+                                    out_chunk,
+                                    chunk_matches,
+                                    len(out_chunk),
+                                    chunk_coverage,
+                                )
+                            next_write_idx, n_points, matched_total = _write_ready_chunks_in_order(
+                                writer,
+                                ready_chunks,
+                                next_write_idx,
+                                output_file.name,
+                                n_points,
+                                matched_total,
+                                coverage,
+                            )
+
+        _validate_collection_coverage(
+            coverage,
+            tolerance=tolerance,
+            min_match_fraction=min_match_fraction,
+            input_name=input_file.name,
+        )
+        temp_output.replace(output_file)
+        gc.collect()
+        return n_points, matched_total
+    except Exception:
+        if temp_output.exists():
+            temp_output.unlink()
+        raise
 
 
 def _parallel_raw_chunk_plan(chunk_size: int, requested_workers: int) -> Tuple[int, int]:
@@ -374,6 +472,74 @@ def _copy_source_record_dimensions(source_points, out_record) -> None:
             out_record.array[field_name] = source_points.array[field_name]
 
 
+def _collection_key(coll_meta: Dict[str, object]) -> str:
+    return str(coll_meta["path"])
+
+
+def _empty_collection_coverage(
+    collection_meta: List[Dict[str, object]],
+) -> Dict[str, Dict[str, object]]:
+    return {_collection_key(coll_meta): empty_coverage() for coll_meta in collection_meta}
+
+
+def _merge_collection_coverage(
+    target: Dict[str, Dict[str, object]],
+    addition: Dict[str, Dict[str, object]],
+) -> None:
+    for collection, stats in addition.items():
+        merge_coverage(target[collection], stats)
+
+
+def _prediction_background_value(params: laspy.ExtraBytesParams):
+    no_data = getattr(params, "no_data", None)
+    if no_data is None:
+        return 0
+    values = np.asarray(no_data).reshape(-1)
+    return values[0] if values.size else 0
+
+
+def _initialize_prediction_dimensions(
+    out_record,
+    collection_meta: List[Dict[str, object]],
+    output_names: Dict[str, str],
+) -> None:
+    for coll_meta in collection_meta:
+        for dim_name in coll_meta["dims"]:
+            params = coll_meta["extra_params"][dim_name]
+            out_record.array[output_names[dim_name]] = np.full(
+                len(out_record),
+                _prediction_background_value(params),
+            )
+
+
+def _validate_collection_coverage(
+    coverage: Dict[str, Dict[str, object]],
+    *,
+    tolerance: float,
+    min_match_fraction: float,
+    input_name: str,
+) -> None:
+    failures = []
+    for collection, stats in coverage.items():
+        matched = int(stats["matched"])
+        total = int(stats["total"])
+        fraction = matched / total if total else 1.0
+        diagnostic = coverage_diagnostic(collection, stats, tolerance)
+        if fraction < min_match_fraction:
+            failures.append(diagnostic)
+        elif matched < total:
+            print(
+                f"    WARNING {input_name}: accepted incomplete remap; {diagnostic}",
+                flush=True,
+            )
+    if failures:
+        required = min_match_fraction * 100.0
+        raise ValueError(
+            f"Prediction coverage below required {required:.3f}% for {input_name}:\n    "
+            + "\n    ".join(failures)
+        )
+
+
 def _enrich_original_chunk(
     chunk,
     header,
@@ -383,7 +549,7 @@ def _enrich_original_chunk(
     kdtree_workers: int,
     input_name: str,
     output_names: Dict[str, str],
-) -> Tuple[object, int]:
+) -> Tuple[object, int, Dict[str, Dict[str, object]]]:
     """Copy one original chunk and add prediction collection dimensions."""
     chunk_points = np.column_stack([chunk.x, chunk.y, chunk.z])
     chunk_bounds = (
@@ -394,47 +560,52 @@ def _enrich_original_chunk(
     )
     out_chunk = laspy.ScaleAwarePointRecord.zeros(len(chunk), header=header)
     _copy_source_record_dimensions(chunk, out_chunk)
+    _initialize_prediction_dimensions(out_chunk, collection_meta, output_names)
 
     matched_total = 0
+    coverage = _empty_collection_coverage(collection_meta)
     for coll_meta in collection_meta:
         source_points, source_dims = load_collection_subset_for_bounds(
             coll_meta,
             chunk_bounds,
             chunk_spatial_buffer,
         )
-        tree = cKDTree(source_points)
-        distances, indices = tree.query(chunk_points, workers=kdtree_workers)
+        if len(source_points):
+            tree = cKDTree(source_points)
+            distances, indices = tree.query(chunk_points, workers=kdtree_workers)
+        else:
+            tree = None
+            distances = np.full(len(chunk_points), np.inf, dtype=np.float64)
+            indices = np.zeros(len(chunk_points), dtype=np.int64)
         matched = distances <= tolerance
         matched_count = int(np.count_nonzero(matched))
-        if matched_count != len(chunk):
-            raise ValueError(
-                f"Prediction collection {coll_meta['path']} matched "
-                f"{matched_count:,}/{len(chunk):,} points in chunk from {input_name} "
-                f"within tolerance {tolerance} m"
-            )
         for dim_name, values in source_dims.items():
-            out_chunk[output_names[dim_name]] = values[indices]
+            if matched_count:
+                _assign_prediction_values(out_chunk, output_names[dim_name], values[indices[matched]], mask=matched)
         matched_total += matched_count
+        coverage[_collection_key(coll_meta)] = distance_coverage(distances, tolerance)
         del source_points, source_dims, tree, distances, indices
 
     del chunk_points
-    return out_chunk, matched_total
+    return out_chunk, matched_total, coverage
 
 
 def _write_ready_chunks_in_order(
     writer,
-    ready_chunks: Dict[int, Tuple[object, int, int]],
+    ready_chunks: Dict[int, Tuple[object, int, int, Dict[str, Dict[str, object]]]],
     next_write_idx: int,
     output_name: str,
     n_points: int,
     matched_total: int,
+    coverage: Dict[str, Dict[str, object]],
 ) -> Tuple[int, int, int]:
     """Write completed chunk results while preserving source point order."""
     while next_write_idx in ready_chunks:
-        out_chunk, chunk_matches, chunk_len = ready_chunks.pop(next_write_idx)
+        out_chunk, chunk_matches, chunk_len, chunk_coverage = ready_chunks.pop(next_write_idx)
         writer.write_points(out_chunk)
         n_points += chunk_len
         matched_total += chunk_matches
+        _merge_collection_coverage(coverage, chunk_coverage)
         del out_chunk
         if n_points % 25_000_000 < chunk_len:
             print(
@@ -480,83 +651,104 @@ def stream_add_collections_to_copc_file_spatial(
     tolerance: float,
     num_spatial_chunks: int = 4,
     kdtree_workers: int = 1,
+    min_match_fraction: float = MIN_ORIGINAL_REMAP_MATCH_FRACTION,
 ) -> Tuple[int, int]:
     """Spatial-query a COPC original and write one enriched LAZ output."""
     output_file.parent.mkdir(parents=True, exist_ok=True)
     chunk_spatial_buffer = max(spatial_buffer, tolerance * 2.0, 0.25)
+    temp_output = output_file.with_name(f".{output_file.name}.smarttile-part")
+    if temp_output.exists():
+        temp_output.unlink()
+    coverage = _empty_collection_coverage(collection_meta)
 
-    with laspy.CopcReader.open(str(input_file)) as copc_reader:
-        source_header = copc_reader.header
-        header = copy_single_source_header(source_header, preserve_extra_dimensions=True)
-        output_names = _add_prediction_dims_to_header(header, collection_meta, input_file.name)
-        windows = _copc_spatial_windows(source_header, num_spatial_chunks)
+    try:
+        with laspy.CopcReader.open(str(input_file)) as copc_reader:
+            source_header = copc_reader.header
+            header = copy_single_source_header(source_header, preserve_extra_dimensions=True)
+            output_names = _add_prediction_dims_to_header(header, collection_meta, input_file.name)
+            windows = _copc_spatial_windows(source_header, num_spatial_chunks)
 
-        n_points = 0
-        matched_total = 0
-        with laspy.open(
-            str(output_file),
-            mode="w",
-            header=header,
-            laz_backend=laspy.LazBackend.LazrsParallel,
-        ) as writer:
-            for window_idx, (min_x, max_x, include_upper) in enumerate(windows, start=1):
-                source_points = _query_copc_window(copc_reader, source_header, min_x, max_x)
-                if len(source_points) == 0:
-                    continue
+            n_points = 0
+            matched_total = 0
+            with laspy.open(
+                str(temp_output),
+                mode="w",
+                header=header,
+                laz_backend=laspy.LazBackend.LazrsParallel,
+            ) as writer:
+                for window_idx, (min_x, max_x, include_upper) in enumerate(windows, start=1):
+                    source_points = _query_copc_window(copc_reader, source_header, min_x, max_x)
+                    if len(source_points) == 0:
+                        continue
 
-                xs = np.asarray(source_points.x)
-                if include_upper:
-                    mask = (xs >= min_x) & (xs <= max_x)
-                else:
-                    mask = (xs >= min_x) & (xs < max_x)
-                if not np.any(mask):
-                    continue
-                if not np.all(mask):
-                    source_points = source_points[mask]
+                    xs = np.asarray(source_points.x)
+                    if include_upper:
+                        mask = (xs >= min_x) & (xs <= max_x)
+                    else:
+                        mask = (xs >= min_x) & (xs < max_x)
+                    if not np.any(mask):
+                        continue
+                    if not np.all(mask):
+                        source_points = source_points[mask]
 
-                chunk_points = np.column_stack([source_points.x, source_points.y, source_points.z])
-                chunk_bounds = (
-                    float(np.min(chunk_points[:, 0])),
-                    float(np.max(chunk_points[:, 0])),
-                    float(np.min(chunk_points[:, 1])),
-                    float(np.max(chunk_points[:, 1])),
-                )
-                out_chunk = laspy.ScaleAwarePointRecord.zeros(len(source_points), header=header)
-                _copy_source_record_dimensions(source_points, out_chunk)
-
-                for coll_meta in collection_meta:
-                    prediction_points, prediction_dims = load_collection_subset_for_bounds(
-                        coll_meta,
-                        chunk_bounds,
-                        chunk_spatial_buffer,
+                    chunk_points = np.column_stack([source_points.x, source_points.y, source_points.z])
+                    chunk_bounds = (
+                        float(np.min(chunk_points[:, 0])),
+                        float(np.max(chunk_points[:, 0])),
+                        float(np.min(chunk_points[:, 1])),
+                        float(np.max(chunk_points[:, 1])),
                     )
-                    tree = cKDTree(prediction_points)
-                    distances, indices = tree.query(chunk_points, workers=kdtree_workers)
-                    matched = distances <= tolerance
-                    matched_count = int(np.count_nonzero(matched))
-                    if matched_count != len(source_points):
-                        raise ValueError(
-                            f"Prediction collection {coll_meta['path']} matched "
-                            f"{matched_count:,}/{len(source_points):,} points in COPC window "
-                            f"{window_idx}/{len(windows)} from {input_file.name} "
-                            f"within tolerance {tolerance} m"
+                    out_chunk = laspy.ScaleAwarePointRecord.zeros(len(source_points), header=header)
+                    _copy_source_record_dimensions(source_points, out_chunk)
+                    _initialize_prediction_dimensions(out_chunk, collection_meta, output_names)
+
+                    for coll_meta in collection_meta:
+                        prediction_points, prediction_dims = load_collection_subset_for_bounds(
+                            coll_meta,
+                            chunk_bounds,
+                            chunk_spatial_buffer,
                         )
-                    for dim_name, values in prediction_dims.items():
-                        out_chunk[output_names[dim_name]] = values[indices]
-                    matched_total += matched_count
-                    del prediction_points, prediction_dims, tree, distances, indices
+                        if len(prediction_points):
+                            tree = cKDTree(prediction_points)
+                            distances, indices = tree.query(chunk_points, workers=kdtree_workers)
+                        else:
+                            tree = None
+                            distances = np.full(len(chunk_points), np.inf, dtype=np.float64)
+                            indices = np.zeros(len(chunk_points), dtype=np.int64)
+                        matched = distances <= tolerance
+                        matched_count = int(np.count_nonzero(matched))
+                        for dim_name, values in prediction_dims.items():
+                            if matched_count:
+                                _assign_prediction_values(out_chunk, output_names[dim_name], values[indices[matched]], mask=matched)
+                        matched_total += matched_count
+                        merge_coverage(
+                            coverage[_collection_key(coll_meta)],
+                            distance_coverage(distances, tolerance),
+                        )
+                        del prediction_points, prediction_dims, tree, distances, indices
 
-                writer.write_points(out_chunk)
-                n_points += len(source_points)
-                del source_points, chunk_points, out_chunk
-                print(
-                    f"    COPC spatial remap {input_file.name}: "
-                    f"window {window_idx}/{len(windows)}, {n_points:,} points",
-                    flush=True,
-                )
+                    writer.write_points(out_chunk)
+                    n_points += len(source_points)
+                    del source_points, chunk_points, out_chunk
+                    print(
+                        f"    COPC spatial remap {input_file.name}: "
+                        f"window {window_idx}/{len(windows)}, {n_points:,} points",
+                        flush=True,
+                    )
 
-    gc.collect()
-    return n_points, matched_total
+        _validate_collection_coverage(
+            coverage,
+            tolerance=tolerance,
+            min_match_fraction=min_match_fraction,
+            input_name=input_file.name,
+        )
+        temp_output.replace(output_file)
+        gc.collect()
+        return n_points, matched_total
+    except Exception:
+        if temp_output.exists():
+            temp_output.unlink()
+        raise
 
 
 def _existing_output_is_reusable(
@@ -600,6 +792,7 @@ def remap_prediction_collections_to_original_files(
     chunk_size: int = 5_000_000,
     num_spatial_chunks: Optional[int] = None,
     prefer_copc_sources: bool = True,
+    min_match_fraction: float = MIN_ORIGINAL_REMAP_MATCH_FRACTION,
 ) -> None:
     """Remap finalized prediction collections onto original files."""
     print(f"\n{'=' * 60}", flush=True)
@@ -680,6 +873,7 @@ def remap_prediction_collections_to_original_files(
                     tolerance,
                     num_spatial_chunks=spatial_chunks,
                     kdtree_workers=query_workers,
+                    min_match_fraction=min_match_fraction,
                 )
             else:
                 stage_points, matched_total = stream_add_collections_to_file(
@@ -691,6 +885,7 @@ def remap_prediction_collections_to_original_files(
                     chunk_size=chunk_size,
                     kdtree_workers=query_workers,
                     chunk_parallel_workers=active_raw_chunk_workers,
+                    min_match_fraction=min_match_fraction,
                 )
             if stage_points != n_points:
                 raise ValueError(

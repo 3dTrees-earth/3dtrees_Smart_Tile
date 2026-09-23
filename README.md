@@ -124,10 +124,11 @@ This pipeline provides an end-to-end solution with five user-facing task modes:
 ### Multi-Resolution Processing
 - **Dual subsampling** - generates both 1cm and 10cm resolution outputs (configurable)
 - **Selectable voxel subsampling** - defaults to SmartTile `center-of-mass` XYZ averaging; `nearest-to-centroid` preserves the previous PDAL voxel centroid nearest-neighbor behavior
-- **Explicit dimension policy** - intermediate COPC conversion strips extra dimensions by default, trying Untwine `--dims Classification` first and falling back to PDAL if validation shows extras remain; prod-merged creation preserves enriched dimensions
+- **Explicit dimension policy** - intermediate COPC conversion strips extra dimensions by default, streaming standard fields to temporary LAS before Untwine when the input contains extras; prod-merged creation preserves enriched dimensions
 
 ### Smart Instance Merging
-- **Centroid-based filtering** - removes duplicate instances in buffer zones
+- **Core instance ownership** - removes whole non-owned instances using the selected dense anchor
+- **Point-level buffer deduplication** - retains points of owned instances without a final, label-consistent survivor within 1 cm
 - **Overlap ratio matching** - identifies same trees across tile boundaries using point correspondence
 - **Union-Find algorithm** - efficiently groups matched instances into unified trees
 - **Species ID preservation** - always preserves species from the larger instance fragment
@@ -155,15 +156,13 @@ This pipeline provides an end-to-end solution with five user-facing task modes:
 
 | Stage | Component | Description |
 |-------|-----------|-------------|
-| 0 | **Prediction Remapping** | Transfers PredInstance labels from 10cm predictions to 1cm resolution using KDTree nearest-neighbor lookup. |
-| 1 | **Load and Filter** | Loads tiles, applies centroid-based buffer zone filtering to remove duplicate instances. |
-| 2 | **Global ID Assignment** | Creates unique instance IDs across all tiles using tile-specific offsets. |
-| 3 | **Cross-tile Matching** | Identifies matching instances in tile overlaps using overlap ratio (Union-Find grouping). |
-| 3b | **Orphan Recovery** | Recovers filtered instances that no neighbor "covers", so no trees are lost. |
-| 4 | **Merge and Deduplicate** | Combines all tiles, removes duplicate points from overlapping buffer regions. |
-| 5 | **Small Volume Merge** | Reassigns tree fragments with volume < 4m³ to nearest large instance. |
-| 6 | **Retiling** | Maps final instance IDs back to original tile boundaries for per-tile output. |
-| 7 | **Original Remap** | Maps final instance IDs back to original input LAZ files (pre-tiling, optional). |
+| 1 | Dense transfer | Assign every 1 cm target point a prediction from its own model tile, within the explicit transfer radius (default 0.1732 m). |
+| 2 | Core ownership | Remove whole instances whose dense centroid (or selected anchor) lies outside the core on a side with a declared neighbor. Keep points of owned instances, resolving shared claims by nearest claimant core below. |
+| 3 | Instance reconciliation | Match retained local IDs across declared tile overlaps, independently for each model. |
+| 4 | Point deduplication | Assign shared points of distinct trees to the retained claimant nearest its core; otherwise remove only label-consistent duplicates within 0.01 m XYZ. |
+| 5 | Coverage validation | Require complete original-to-unfiltered coverage. Require complete original-to-final coverage for other models; unmatched RCT final labels become background 0 and are counted in the report. |
+| 6 | Publication | Publish validated staged outputs. On failure retain diagnostics, never partial final products. |
+
 
 ---
 
@@ -221,8 +220,11 @@ python src/run.py --task tile \
 
 ### Basic Merge Task
 
-Filter duplicate buffer-zone instances from segmented predictions, remap the
-filtered predictions to the target resolution, then merge the remapped tiles.
+Transfer predictions to the 1 cm target geometry first, remove non-owned instances,
+reconcile retained instance IDs, then deduplicate cross-tile buffer points.
+Transfer and unfiltered original coverage require 100% assignment. Final original
+coverage also requires 100% for non-RCT models; unmatched RCT points become
+background 0.
 The task always writes merged per-tile outputs for downstream processing and can
 also write the current processed merged LAZ (requires **tile_bounds_tindex.json**
 from the Tile task):
@@ -240,23 +242,57 @@ Optional: add `--original-laz-input-dir /path/to/original` to enrich uploaded
 originals from the merged 1cm tile outputs. Use `--original-laz-output-dir` to
 choose that folder.
 
+### RayCloudTools tree files
+
+Pass the RCT `*_segmented.laz`, `*_trees.txt`, and `*_trees_info.txt` files together in
+one segmented input folder. SmartTile detects `PredInstance_RCT` and requires both
+text files for every tile. Use the matching 1 cm tiles and tile-bounds JSON:
+
+```bash
+python src/run.py --task merge \
+    --subsampled-segmented-folder /path/to/rct_predictions \
+    --subsampled-target-folder /path/to/subsampled_res1 \
+    --tile-bounds-json /path/to/tile_bounds_tindex.json \
+    --output-tiles-folder /path/to/out/output_tiles \
+    --instance-dimension PredInstance_RCT --skip-merged-file
+```
+
+This mode transfers the RCT labels to the 1 cm tiles, removes whole trees whose
+selected anchor is outside the owning core, and leaves every retained positive
+instance ID unchanged. It does not reconcile, merge, or renumber RCT trees. The
+filtered LAZ tiles are in `output_tiles/`; matching tree and treeinfo tables are
+in `segmented_filtered/` beside that folder. Each retained row gets a leading
+`predinstance` column equal to its original local ID, so gaps left by removed
+trees do not change the ID-to-row relationship. `instance_metadata.csv`
+records each retained `(tile, PredInstance_RCT)` pair. Missing or inconsistent
+tree files fail before outputs are published. RCT IDs may repeat between tiles,
+so keep the LAZ tiles and their named text tables together; a single merged LAZ
+cannot identify the tree table for a repeated ID. During final original
+remap, an RCT point with no surviving prediction inside the matching radius
+receives `PredInstance_RCT=0` (and zero for any other RCT prediction fields).
+The report records its unmatched count and coordinates. Unfiltered 1 cm
+baseline coverage remains mandatory.
+
 ### Basic Filter Task
 
-Filter segmented or remapped tiles by removing instances whose centroids sit in
-overlap buffers facing neighboring tiles:
+Deduplicate already-remapped 1 cm tiles using the same point-level contract.
+Coarse predictions must enter through the merge task with a target folder first:
 
 ```bash
 python src/run.py --task filter \
     --input-dir /path/to/segmented_remapped \
     --output-dir /path/to/filtered_tiles \
-    --buffer 10.0 \
+    --tile-bounds-json /path/to/tile_bounds_tindex.json \
     --instance-dimension PredInstance
 ```
 
-The filter task writes one output file per input file and preserves all point
-dimensions in the kept points. Use `--filter-suffix` to change the default
-`_filtered` filename suffix. Use `--filter-output-extension .laz` when mixed
-LAZ/LAS inputs should be collected as LAZ outputs.
+The filter task writes regular LAZ tiles in deterministic order, preserves all
+kept-point dimensions, and includes ownership decisions and an ID/source mapping
+in the report. `--filter-anchor centroid` (default), `highest_point`, or
+`lowest_point` selects instance ownership for both merge and filter. Non-owned
+instances are removed entirely; retained instances keep their full crowns,
+including unshared buffer points. Shared points claimed by distinct retained trees use the nearest claimant core’s instance and attributes; equal distances use stable source filename order. Background ID 0 uses point-wise core ownership and retains the owning tile’s semantics. Legacy output naming
+options remain unused.
 
 ### Create Prod-Merged Products
 
@@ -296,20 +332,17 @@ then create prod-merged products from those Original-with-predictions files:
 ```bash
 python src/run.py --task remap \
     --merged-laz /path/to/merged.laz \
+    --baseline-1cm-folders /path/to/unfiltered_1cm_tiles \
     --original-input-dir /path/to/original/files \
     --output-dir /path/to/original_with_predictions \
     --merged-resolutions res1,res2 \
     --merged-output-formats laz,copc.laz
 ```
 
-When `--merged-laz` points to a `.copc.laz` file, SmartTile uses a bounded
-streaming remap path: uploaded original LAZ/LAS files are read in
-`--chunk-size` point chunks, each original chunk queries the merged COPC by its
-XY bounds plus remap buffer, a local KDTree is built only for that window, and
-the enriched original chunk is written immediately. This keeps the uploaded
-LAZ/LAS file as the metadata and geometry source while avoiding a full-original
-or full-merged KDTree in memory. Plain merged `.laz` inputs fall back to the
-legacy loaded-merged-cloud path.
+LAS, LAZ and COPC prediction sources are streamed into a disk-backed spatial
+index. Each query and stored batch contains at most 32,768 points. Enriched
+originals retain their raw coordinate records, source fields and source header
+metadata. No complete dense tile or merged cloud is loaded into one KDTree.
 
 ### Multi-Collection Remap Task (prediction collections → original files)
 
@@ -323,6 +356,7 @@ present before this step.
 ```bash
 python src/run.py --task remap \
     --segmented-folders /path/to/sat_predictions,/path/to/foma_predictions,/path/to/species_predictions \
+    --baseline-1cm-folders /path/to/unfiltered_1cm_tiles \
     --original-copc-input-dir /path/to/original_copc_files \
     --original-laz-input-dir /path/to/uploaded/raw_laz_files \
     --original-laz-output-dir /path/to/original_with_predictions_raw \
@@ -333,22 +367,30 @@ python src/run.py --task remap \
     --merged-output-formats laz
 ```
 
-If `--remap-dims` is omitted, all extra dimensions from every prediction
-collection are transferred. Duplicate extra-dimension names across prediction
+If `--remap-dims` is omitted, prediction extra dimensions from every collection
+are transferred. Native LAS fields carried as ExtraBytes after point-format
+conversion (for example SAT `scan_angle`) are excluded: the dense target and
+original files remain authoritative for those values. Duplicate extra-dimension
+names across prediction
 collections fail early; SmartTile does not auto-rename them to `_2`, `_3`, or
 add late model suffixes during final remap.
 
-Multi-collection remap writes each Original-with-predictions file in one pass:
-for every original-point chunk it loads the overlapping prediction points from
-each finalized collection, transfers all selected dimensions, and writes the
-enriched original chunk once. This avoids temporary per-collection LAZ rewrites.
-Use `--chunk-size` to tune the memory/speed tradeoff. Larger chunks reduce
-repeated prediction-window scans but increase peak memory; for large two-file
-datasets under a 30GB container cap, `10000000` points per chunk has been a
-useful validation setting.
-When there is only one raw LAZ/LAS original, SmartTile can still use the worker
-budget by enriching multiple original chunks concurrently. `--num-spatial-chunks`
-caps that raw chunk concurrency; if omitted, it defaults to `--workers`.
+Final remap requires one shared unfiltered 1 cm baseline folder, or one baseline
+folder per collection in the same order. For locally preserved merge outputs,
+`smarttile_merge.json` resolves the sibling baseline folder automatically. Galaxy
+wrappers must pass `--baseline-1cm-folders` explicitly when packaging only the LAZ
+collection and dropping its manifest. The merge manifest records the first-stage resolution. Standalone remap reads it
+when available; older manifests default to 1 cm. `--resolution-1` can specify a
+finer or coarser first-stage resolution, and `--remap-tolerance` can explicitly
+override the derived final radius. Baseline coverage still requires 100%, and a
+`--min-remap-match-fraction 0.99` request is rejected.
+
+Every original file and model has separate baseline and final coverage metrics.
+For non-RCT models, final coverage requires **100% within the 3D first-stage
+voxel diagonal** (17.32 mm at 1 cm resolution) in Euclidean XYZ. Missing
+coverage fails the entire remap before any enriched original is published.
+For RCT, final misses within that same search radius become prediction value 0;
+`background_assigned_points` and per-file final metrics record their count.
 
 Prod-merged output creation is controlled by `--produce-merged-file` /
 `--no-produce-merged-file` (aliases for the existing
@@ -436,6 +478,20 @@ python -m unittest discover -s tests -p 'test_*.py'
 
 The suite covers output format validation, metadata/header preservation helpers, COM subsampling method selection, scientific-notation bounds parsing, one-pass multi-collection remap behavior, and instance-label dtype rules.
 
+For a larger synthetic remap-first check, install the optional `psutil` package
+and run the following with a new output directory:
+
+```bash
+python benchmarks/remap_first_smoke.py --output-root out/remap-first-smoke
+```
+
+This generates three overlapping 1 cm tiles (300,000 points) and 200,000
+original points, then checks dense transfer, reconciliation, survivor-only
+deduplication, strict baseline/final coverage, and unchanged source fields.
+Inputs, coverage/checksum reports, timing, and sampled peak RSS remain in the
+output directory. This synthetic check does not replace the exact dataset
+3110/3111 replays required by 3DT-2101 or validate the Linux container/toolchain.
+
 ### Merge Task Options
 
 **Required:** `--subsampled-segmented-folder`, `--subsampled-target-folder`, `--tile_bounds_json` (from Tile task).
@@ -497,16 +553,16 @@ Each source file is read with laspy in memory-efficient chunks controlled by `--
 
 #### Phase 2: COPC Conversion
 
-All part files for each tile are merged and converted to COPC format. Untwine is preferred for COPC writing. Intermediate COPC conversion uses Untwine's `--dims Classification` path by default while forwarding header metadata and CRS records, then validates that no extra byte dimensions remain. If Untwine fails, CRS validation fails, or extra dimensions remain, SmartTile falls back to PDAL `writers.copc` without `extra_dims=all`. Prod-merged creation is the explicit exception and preserves enriched dimensions for final products.
+All part files for each tile are merged and converted to COPC format. Untwine is preferred for COPC writing. Intermediate COPC conversion streams native standard fields into a temporary LAS in 32,768-point batches when ExtraBytes are present, then runs Untwine and validates the output schema and CRS. If Untwine fails, CRS validation fails, or extra dimensions remain, SmartTile falls back to PDAL `writers.copc` without `extra_dims=all`. Prod-merged creation is the explicit exception and preserves enriched dimensions for final products.
 
-The SmartTile Docker image has been validated against Untwine 1.5.1: `--dims ""` is rejected; `--dims Classification` can leave prediction or source extras on enriched files; and long explicit standard-dimension lists such as `--dims Red,Green,Blue` are not used because they can crash this build. SmartTile therefore treats Untwine dimension limiting as the first attempt and accepts it only after output inspection confirms there are no extra byte dimensions.
+The SmartTile Docker image has been validated against Untwine 1.5.1: `--dims ""` is rejected; `--dims Classification` can leave prediction or source extras on enriched files; and long explicit standard-dimension lists such as `--dims Red,Green,Blue` are not used because they can crash this build. SmartTile therefore strips unwanted ExtraBytes before conversion, keeps all standard fields and retained metadata, and omits `--dims` on the reduced input. This avoids converting the complete enriched cloud twice when dimension limiting fails. Temporary staging is removed when conversion finishes.
 
 **Parallelization**: Multiple tiles converted concurrently (controlled by `--workers`).
 
 **Output**: `c{col}_r{row}.copc.laz` files in `tiles_{tile_length}m/`.
 
 **Options**:
-- **Default**: Try Untwine `--dims Classification`, inspect the COPC output, and fall back to PDAL standard-dimension output if extra dimensions remain.
+- **Default**: Stream away unwanted ExtraBytes when present, run Untwine on the standard-field input, and validate the output schema/CRS. PDAL remains a fallback for converter or validation failure.
 - **Prod-merged exception**: `create_merged_file` preserves extra dimensions in staged COPCs and final LAZ/COPC products.
 
 ### Stage 4-5: Multi-Resolution Subsampling
@@ -528,221 +584,135 @@ The SmartTile Docker image has been validated against Untwine 1.5.1: `--dims ""`
 - `subsampled_res1/`: Resolution_1 files, default 1cm COPC LAZ (`*.copc.laz`)
 - `subsampled_res2/`: Resolution_2 files, default 10cm regular LAZ (`*.laz`)
 
-### The Merge Process in Detail
+### The Merge Process in Detail (v2.4 / 3DT-2101)
 
-The merge process takes segmented tiles (each with local `PredInstance` IDs) and produces a single unified point cloud where every tree has a globally unique ID, even trees that were split across tile boundaries. It also writes per-tile outputs and optionally maps predictions back to the original input files.
+Each model collection is processed independently. Do not combine SAT and
+ForestMamba into one instance space. When merging several collections, output
+subdirectories `model_000`, `model_001`, etc. preserve their separate geometry.
+Use model-specific prediction dimension names before the final original remap.
 
-The diagram below shows the spatial layout. Tiles overlap by a configurable buffer (default 10 m). Trees near tile edges appear in both tiles with **different** local instance IDs. The merge must figure out which IDs in adjacent tiles refer to the same physical tree and unify them.
+1. **Transfer before filtering.** Match source/target tiles through the tile
+   layout and require a source for every target. For each 1 cm point, copy the
+   nearest prediction from its own coarse tile within
+   `--prediction-transfer-tolerance` (default **0.1732 m XYZ**). Empty or distant
+   prediction coverage fails. Zero is a valid model background label; a missing
+   match or declared label no-data value is never accepted as background.
+2. **Filter instance ownership on the dense tiles.** Compute each positive
+   instance's `--filter-anchor` (`centroid`, `highest_point`, or `lowest_point`)
+   from its remapped 1 cm points. Remove the entire instance if its anchor lies
+   outside the declared core on a side with a declared neighbor, even when that
+   neighbor is absent from a partial replay. Core boundaries are inclusive;
+   dataset exterior edges are retained. Older layouts without explicit cores
+   derive them from bounds and `tile_buffer`. A single-file bypass with no
+   declared grid owns its entire extent. Keep all points of owned instances
+   with their owning tile’s per-point semantic attributes. Background ID 0 has
+   no instance anchor: retain it only in its spatial core, with east/north
+   neighbors owning shared upper edges. Retain dataset exterior background.
+   Preserve full-instance anchors, bounds, and decisions before filtering.
+   Keep the unfiltered dense geometry separately for coverage validation.
+   Before reconciliation, scan rejected positive instances in declared core
+   overlaps. Where no retained tree point supports a positive 1 cm sample in
+   XYZ, admit the whole rejected instance with the most newly covered distinct
+   core samples. Recheck coverage after each admission; equal scores use stable
+   source filename and local ID order. Background never counts as tree support.
+   Other rejected instances do not participate in matching or conflicts.
+   `orphan_recovery` reports candidates, admissions and the final support check.
+3. **Reconcile retained IDs and select their owners.** Within declared tile overlaps,
+   use 0.05 m correspondences and mutual-best instance pairs meeting the configured
+   overlap threshold (default 30% of the smaller instance). Group matches
+   deterministically; a group cannot contain different instances from one tile.
+   Ambiguous pairs stay distinct. Recovery cannot bridge two groups that were
+   distinct among normally retained instances; rejected bridges are reported.
+   For a group with recovered members, select
+   the member that supplies the most newly covered core samples; otherwise
+   select the first retained tile in stable source-filename order. Remove
+   secondary copies. If this loses required recovered geometry, fail explicitly.
+   Preserve the owner’s
+   per-point semantic values and other attributes without voting or blending.
+   Record owners and removals in `semantic_ownership`. Labels use uint16,
+   promoted to uint32 when needed.
+4. **Assign shared points, then deduplicate.** Within declared buffered tile
+   overlaps, resolve points claimed by distinct positive instances using the
+   nearest claimant core: among retained tree claims within **0.01 m XYZ**,
+   choose the tile with the smallest XY distance to its closed core rectangle.
+   Break equal-distance ties by stable source filename order, including shared
+   tree-core edges. A background-only tile or removed instance cannot win, even
+   when its core contains the disputed point. Preserve the winner's instance ID,
+   per-point semantics and other attributes. Nearby distinct points across a
+   nearest-core bisector can retain their respective owners. Unshared buffer
+   tails remain intact; this rule does not merge instance IDs or crop whole
+   crowns to the core.
+   Decisions examine both earlier and later tiles and are recorded in
+   `shared_point_ownership`. Final original coverage remains mandatory.
+   Next, a retained tree wins over a neighboring background point within
+   **0.01 m XYZ**, keeping the tree owner's per-point semantic prediction and
+   other attributes. Use the surviving tree index after tree/tree resolution;
+   only retained or explicitly recovered tree instances can override background.
+   Record these removals
+   in `tree_background_ownership`. Unshared background remains unchanged.
+   Adjacent points in separate owning cores may retain different tree labels
+   or background semantics within 1 cm. Other unresolved label conflicts still
+   fail, including a non-nearest conflicting neighbor. Finally, process tiles in stable source-filename order and remove
+   label-consistent cross-tile duplicates only with an actual final survivor
+   within 0.01 m. Same-tile points never delete one another.
+5. **Measure original coverage directly.** Check every uploaded original against
+   both the unfiltered 1 cm geometry and final survivors, independently for every
+   model. Unfiltered 1 cm coverage requires 100% within the first-stage
+   voxel diagonal in XYZ (17.32 mm for 1 cm voxels); so does final coverage
+   for non-RCT models. A point and its voxel center of mass can be separated
+   by up to that distance. RCT final points without a surviving prediction
+   inside the radius receive background 0, with counts in the coverage report.
+   Orphan recovery never invents points or fills missing predictions.
+6. **Publish after validation.** Stage all model and enriched-original outputs
+   privately. A failed model/file discards the staged products and preserves a
+   JSON diagnostic report. Existing nonempty outputs are refused rather than
+   mixed with a new run. The processed merged file is an intermediate; final
+   prod-merged products still derive from the enriched raw originals.
 
-```
-Tile A                           Tile B
-┌──────────────────────┐  ┌──────────────────────┐
-│                      │  │                      │
-│   Tree 42            │  │            Tree 17   │
-│      ╲               │  │               ╱      │
-│       ╲   buffer     │  │    buffer    ╱       │
-│        ╲  zone ──────┤  ├──── zone    ╱        │
-│         ╲   ▓▓▓▓▓▓▓▓▓│  │▓▓▓▓▓▓▓▓▓  ╱         │
-│          ╲  ▓overlap▓│  │▓overlap▓  ╱          │
-│           ╲ ▓▓▓▓▓▓▓▓▓│  │▓▓▓▓▓▓▓▓▓ ╱           │
-│            ╲──────────┤  ├──────────╱            │
-│                      │  │                      │
-│   Tree 42 and Tree 17 are the SAME physical    │
-│   tree — the merge must unify them.            │
-└──────────────────────┘  └──────────────────────┘
-```
+Distance comparisons are inclusive and use an explicit eight-ULP float64
+roundoff guard after removing the common coordinate offset. This numerical guard
+is shared by transfer, deduplication and coverage; it is not a configurable
+spatial relaxation. Nearest ties choose the earlier tile and then source point.
 
-Below is each stage explained.
+The dense implementation is sequential and disk-backed. A fixed 32,768-point
+limit applies to stored/query batches, while small instance correspondence maps
+remain in memory. SQLite RTree indexes batch bounds; exact distances use each
+batch's float64 XYZ. Batch payloads are fixed binary records viewed directly
+from SQLite blobs, avoiding ZIP/NPY parsing on every query. Scratch space holds unfiltered tiles, final staged tiles and
+spatial indexes. Production-scale runtime and disk use need corpus benchmarking.
 
----
+`remap_first_report.json` contains source-to-tile mappings, transfer counts,
+reconciled IDs, duplicate/conflict counts, sample survivor references,
+per-original/per-model coverage and distance histograms, checksums, and CPU/wall
+time. `output_tiles_unfiltered_1cm/` preserves baseline geometry.
+`smarttile_merge.json` points to that baseline for a later strict remap.
 
-### Stage 0: Prediction Remapping (10 cm to 1 cm)
+Strict merge uses contract `3DT-2183/v7-orphan-recovery` (the standalone
+filter still uses normal core ownership). Full-instance anchor positions,
+retained/removed IDs, source and point counts are recorded in
+`instance_ownership`; admissions and post-dedup support are recorded in
+`orphan_recovery`. The final original coverage gate remains 100% within the
+first-stage voxel diagonal for non-RCT models; unmatched RCT final points
+become background 0 and are counted in the report. Small-cluster reassignment remains disabled;
+`--pre-remap-reassign-instances` is rejected because it would change the
+reconciled-label contract. Tree-instance ID changes are recorded in
+the reconciliation map; auxiliary tree text tables are not rewritten.
 
-**What it does**: The segmentation model ran on 10 cm subsampled tiles. This stage transfers the `PredInstance` labels from the coarse 10 cm points to the finer 1 cm subsampled points using nearest-neighbor lookup, so subsequent stages work at 1 cm resolution.
+### Single-file tiling bypass metadata
 
-**How it works**:
-1. For each tile, load the 10 cm segmented file and the corresponding 1 cm subsampled file.
-2. Build a cKDTree from the 10 cm points.
-3. For every 1 cm point, find the closest 10 cm point and copy its `PredInstance` (and `species_id` if present).
-4. Save the result as `{tile_id}_segmented_remapped.laz`.
+When the size threshold bypasses tiling, the bounds JSON describes one cloud
+with its actual extent and zero internal buffer. Subsampling updates that one
+entry using the output header, including filenames without grid labels.
 
-**Why**: Segmentation at 10 cm is fast but loses detail. Remapping to 1 cm gives the merge much denser point clouds to work with, which improves overlap detection and deduplication accuracy.
-
----
-
-### Stage 0b: Pre-Merge Buffer Filtering
-
-**What it does**: Filters segmented prediction tiles before remap. In the
-standard merge lane, `task merge` writes filtered 10 cm predictions to
-`segmented_filtered/`, remaps that directory to the target resolution, and feeds
-the remapped output into merge.
-
-**Why**: Filtering is part of the production merge lane, so operators do not
-need to run a separate `filter` task before merge.
-
----
-
-### Stage 1: Load and Merge Filtered Predictions
-
-**What it does**: Loads filtered-then-remapped target-resolution prediction tiles and prepares
-kept instances, border-region candidates, and recoverable filtered instances for
-cross-tile matching.
-
-**How it works**:
-
-1. Load each LAZ tile; read XYZ coordinates, `PredInstance`, and any extra dimensions (e.g. `species_id`).
-2. Use the `tile_bounds_tindex.json` file (from the Tile task) to determine which tiles are neighbors (east/west/north/south).
-3. For each tile, compute the centroid of every instance.
-4. An instance is **filtered** (removed) if its centroid falls in the buffer zone on a side that has a neighbor. The rule is: the tile with the lower column index (west) or lower row index (south) "owns" instances in the overlap.
-5. Instances **not** in any buffer zone are **kept**.
-
-**Result**: Each tile now has a set of "kept" instances and a set of "filtered" instances. Filtered instances are candidates for orphan recovery later.
-
-```
-Tile boundary:
-┌──────────────────────────────────────┐
-│ buffer │                     │ buffer│
-│  zone  │     CORE AREA       │  zone │
-│ (west) │  (instances here     │(east) │
-│        │   are always kept)   │       │
-│ ▓▓▓▓▓▓ │                     │▓▓▓▓▓▓│
-│ filtered│                     │filtered│
-│ if west │                     │if east│
-│ neighbor│                     │neighbor│
-└──────────────────────────────────────┘
-```
-
----
-
-### Stage 2: Global ID Assignment
-
-**What it does**: Assigns globally unique IDs to every kept instance across all tiles.
-
-**How it works**:
-- Each tile gets an offset: `tile_idx * 100000`.
-- A local instance ID `42` in tile 3 becomes global ID `300042`.
-- A Union-Find data structure is initialized with one entry per kept instance, tracking its point count (used later to preserve the species ID from the larger fragment).
-
-**Why**: Local IDs are only unique within one tile. Subsequent stages need IDs that are unique across the entire dataset.
-
----
-
-### Stage 3: Border Region Instance Matching
-
-**What it does**: Finds instances that represent the **same physical tree** across tile boundaries and groups them using Union-Find, so they end up with the same final ID.
-
-**How it works**:
-
-1. **Identify border instances**: For each tile, find kept instances whose centroid lies in the "border region" (the strip from `buffer` to `buffer + border_zone_width` meters from the tile edge, on sides with a neighbor). Only these instances can possibly match a counterpart in a neighbor tile.
-
-2. **For each neighbor pair** (e.g. tile A east <-> tile B west): compare border instances from tile A facing east with border instances from tile B facing west:
-   - **Bounding box check** (fast filter): Skip pairs whose 2D bounding boxes don't overlap or come within 10 cm. This eliminates most non-matching pairs cheaply.
-   - **FF3D overlap ratio** (expensive check): For surviving pairs, compute point-to-point correspondence using hash-based grid matching (O(n) per pair). The overlap ratio is `max(intersection/size_a, intersection/size_b)` -- this handles asymmetric cases where one fragment is much larger than the other.
-   - **Match decision**: If the overlap ratio exceeds `overlap_threshold` (default 0.3 = 30%), the pair is matched. Union-Find merges their global IDs into one group.
-
-3. **Species ID preservation**: When instances are grouped, the species ID is always taken from the **larger** instance (by point count).
-
-**Result**: A mapping from every global ID to a "merged ID". Matched instances share the same merged ID.
-
-```
-Tile A (east border)         Tile B (west border)
-┌──────────┐                 ┌──────────┐
-│          │   border zone   │          │
-│ inst 42 ─┼─────────────────┼─ inst 17 │  overlap ratio = 0.65
-│ (500 pts)│                 │ (480 pts)│  > threshold 0.3 → MATCH
-│          │                 │          │
-│ inst 99 ─┼─────────────────┼─ (none)  │  no counterpart → no match
-│          │                 │          │
-└──────────┘                 └──────────┘
-```
-
----
-
-### Stage 3b: Orphan Recovery
-
-**What it does**: Recovers filtered instances that would otherwise be lost because no neighbor tile "owns" them (e.g. a tree whose centroid landed in the buffer zone of **both** tiles due to slightly different segmentation results).
-
-**How it works**:
-
-1. Compute bounding boxes **only** for filtered instances and kept instances in the border region (not all instances -- this is fast).
-2. Build a cKDTree of the centers of all border-region kept instances.
-3. For each filtered (orphan) instance:
-   - Query the tree for kept instances within 30 m.
-   - For each nearby kept instance, check if their points overlap (>50% of the orphan's points are within 1 m of the neighbor's points, using a per-neighbor cKDTree that is cached so each neighbor tree is built at most once).
-   - If a covering instance is found, the orphan is skipped (it already exists in a neighbor tile).
-   - If **no** covering instance is found, the orphan is **recovered**: it gets a new unique merged ID and is added back to the kept set.
-
-**Why**: Without this step, trees at tile corners (where buffer zones of multiple tiles overlap) can be lost entirely.
-
----
-
-### Stage 4: Merge and Deduplicate
-
-**What it does**: Concatenates all kept points from all tiles into a single point cloud and removes duplicate points that exist in overlapping buffer regions.
-
-**How it works**:
-
-1. For each tile, remap local instance IDs to their final merged IDs (from Stage 3). Points belonging to filtered instances that were not recovered get ID `-1` and are discarded.
-2. Concatenate all tile points, instance arrays, and extra dimension arrays.
-3. **Deduplication**: Uses grid-based spatial hashing (not KDTree) for O(n) performance:
-   - Divide the point cloud into 50 m grid cells.
-   - Within each cell, hash each point's coordinates at 1 cm resolution.
-   - Points with the same hash in the same cell are duplicates; keep the one with the higher instance ID.
-
-**Result**: A single merged point cloud with no duplicate points and consistent instance IDs.
-
----
-
-### Stage 5: Small Volume Instance Merging
-
-**What it does**: Reassigns tiny tree fragments (orphaned clusters) to the nearest large instance.
-
-**How it works**:
-
-1. For each instance with a positive ID, compute its 3D convex hull volume (in parallel using ProcessPoolExecutor).
-2. Classify instances as "small" if: volume < `max_volume_for_merge` (default 4 m3) **or** point count < `min_cluster_size` (default 300).
-3. Build a cKDTree from the centroids of all "large" instances.
-4. For each small instance, find the nearest large instance by centroid distance.
-5. Reassign all points of the small instance to the nearest large instance (vectorized lookup table, no per-point loop).
-
-**Species preservation**: The species ID of the receiving (larger) instance is kept unchanged. Small fragments do not overwrite species.
-
----
-
-### Stage 6: Retiling to Original Tile Files
-
-**What it does**: Maps the final merged instance IDs back onto each original tile's point cloud, so you get per-tile output files with globally consistent IDs.
-
-**How it works**:
-
-1. For each original tile file:
-   - Read the tile's bounding box from its header.
-   - Filter the merged point cloud to points within `tile bounds + spatial buffer`.
-   - Build a cKDTree from those filtered merged points.
-   - Read the original tile's points and query the tree for the nearest merged point for each original point.
-   - Write the tile with the matched `PredInstance` (and any extra dims like `species_id`).
-
-**Parallelism**: Can process multiple tiles concurrently using `--workers`.
-
----
-
-### Stage 7: Uploaded Original Remapping (Optional)
-
-**What it does**: If `--original-laz-input-dir` is provided, maps the final
-merged 1 cm tile prediction dimensions back to the uploaded original LAZ/LAS
-files before tiling. `--original-input-dir` remains a legacy alias for this
-raw-LAZ lane. If matching original COPCs are available, pass them via
-`--original-copc-input-dir` for source matching/validation; SmartTile still
-writes enriched originals from the uploaded LAZ/LAS files so the original
-metadata/VLRs remain the writer source.
-
-**How it works**: Merge uses the same prediction-collection-to-original remap
-helper as the `remap` task. The post-merge 1 cm `output_tiles/` directory is the
-prediction collection, so uploaded originals receive the globally merged IDs from
-the per-tile products. `--skip-merged-file` can be used with original remap when
-only per-tile outputs, enriched originals, or prod-merged products are needed.
-
----
+Merge/filter can also recover historical bypass outputs whose JSON still contains
+an unused multi-tile plan. Recovery requires exactly one cloud matching the full
+`proj_extent` within 1 cm, unchanged `bounds`/`planned_bounds`, and an extent that
+cannot fit inside any individual planned tile. It uses the actual cloud bounds as
+one core with no internal neighbors and records `layout_recovery` in the ownership
+report. Each model output includes the effective `tile_bounds.json`, referenced by
+filename and SHA-256 in `smarttile_merge.json`. A recovered layout also records
+the original JSON checksum. The input JSON is preserved. Partial tile collections retain their declared
+neighbors; unrelated or already-updated layouts are not recovered this way.
 
 ## Parameters Reference
 
@@ -753,7 +723,7 @@ only per-tile outputs, enriched originals, or prod-merged products are needed.
 | `--tile-length` | 100 | Tile size in meters |
 | `--tile-buffer` | 20 | Buffer overlap in meters |
 | `--threads` | 10 | Threads per COPC writer |
-| `--workers` | 4 | Parallel file/tile processing |
+| `--workers` | 2 | Tile file workers; CPU-capped query threads for merge/filter and batch processes for final remap |
 | `--num-spatial-chunks` | `--workers` | Per-file subsampling parallelism for COM windows or stripe chunks |
 | `--resolution-1` | 0.01 | First subsampling resolution (1cm) |
 | `--resolution-2` | 0.1 | Second subsampling resolution (10cm) |
@@ -763,40 +733,28 @@ only per-tile outputs, enriched originals, or prod-merged products are needed.
 | `--chunk-size` | 20000000 | Points per chunk when reading LAZ/LAS in tiling Phase 1, multi-collection remap, and merged-COPC-to-original remap (smaller = less peak RAM; larger = fewer scans) |
 | `--tiling-threshold` | None | File size threshold in MB for skipping tiling on single small files |
 
-### Merge Task Parameters
+### Merge, Filter and Remap Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--tile_bounds_json` | **Required** | Path to tile_bounds_tindex.json from Tile task |
-| `--buffer` | 10.0 | Buffer distance for filtering (meters) |
-| `--border-zone-width` | 10.0 | Width of border zone beyond buffer for instance matching (meters) |
-| `--overlap-threshold` | 0.3 | Overlap ratio for instance matching (30%) |
-| `--max-centroid-distance` | 3.0 | Max centroid distance to merge (meters) |
-| `--max-volume-for-merge` | 4.0 | Max volume for small instance merge (m³) |
-| `--min-cluster-size` | 300 | Minimum cluster size in points for reassignment |
-| `--original-laz-input-dir` | None | Optional: uploaded original LAZ/LAS files to enrich; `--original-input-dir` is a legacy alias |
-| `--original-laz-output-dir` | None | Optional output directory for enriched uploaded originals |
-| `--original-copc-input-dir` | None | Optional matching original COPC LAZ files for source matching/validation |
-| `--merged-resolutions` | res1,res2 | Prod-merged output resolutions when original inputs are available |
-| `--merged-output-formats` | copc.laz | Prod-merged output formats: `laz`, `copc.laz`, `ply` |
-| `--skip-merged-file` | False | Skip creating the processed merged LAZ; per-tile outputs and optional original/prod-merged outputs can still be written |
-| `--disable-matching` | False | Disable cross-tile instance matching |
-| `--disable-volume-merge` | False | Disable small volume instance merging |
-| `--workers` | 4 | Parallel processing (tile loading, KDTree queries) |
-| `--tolerance` | 5.0 | Max difference in meters for bounds matching (remap task) |
+| `--tile-bounds-json` | Required for merge/filter | Declared buffered tile layout |
+| `--subsampled-target-folder` | Sibling subsampled_res1 | 1 cm target geometry for coarse predictions |
+| `--prediction-transfer-tolerance` | 0.1732 | Earlier model-to-dense transfer radius in XYZ metres |
+| `--overlap-threshold` | 0.3 | Required instance correspondence fraction |
+| `--disable-matching` | False | Leave IDs tile-local; shared tree points use nearest claimant core ownership |
+| `--baseline-1cm-folders` | Merge manifest | Shared baseline or folders in model order for final remap |
+| `--remap-tolerance` | Auto: sqrt(3) × `--resolution-1` | Optional final original coverage radius override in XYZ metres |
+| `--min-remap-match-fraction` | 1.0, fixed | Required coverage for every original and model |
+| `--original-laz-input-dir` | None | Uploaded raw originals; legacy alias: original-input-dir |
+| `--original-laz-output-dir` | Derived | Enriched raw originals |
+| `--original-copc-input-dir` | None | Optional twin validation, not product geometry |
+| `--skip-merged-file` | False | Omit the processed intermediate; use for multiple models |
+| `--merged-resolutions` | res1,res2 | Product resolutions after strict original validation |
+| `--merged-output-formats` | copc.laz | Final product formats |
 
-*Retile buffer is fixed internally at 2.0 m; correspondence tolerance is no longer a user parameter.*
-
-### Filter Task Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--input-dir` | **Required** | Directory with segmented/remapped LAZ/LAS tile files |
-| `--output-dir` | **Required** | Directory for filtered tile outputs |
-| `--buffer` | 10.0 | Buffer distance in meters |
-| `--instance-dimension` | PredInstance | Instance ID dimension to filter; falls back to `treeID` when absent |
-| `--filter-suffix` | _filtered | Suffix added to output filenames |
-| `--filter-output-extension` | None | Optional extension override such as `.laz`; by default the input extension is preserved |
+The dense merge/remap path uses fixed memory batches and one processing worker.
+The worker settings below continue to apply to tiling, subsampling and
+prod-merged generation, not the new disk-backed merge loop.
 
 ### Understanding `--workers`, `--threads`, and `--num-spatial-chunks`
 
@@ -804,15 +762,33 @@ These parameters control different aspects of parallelism:
 
 #### `--workers` (Global Parallelism)
 
-Controls how many files/tasks run simultaneously using Python's `ProcessPoolExecutor`:
+Controls file concurrency for tiling, native queries for merge/filter, and batch processes for final remap:
 
 | Task | What `--workers` Controls |
 |------|---------------------------|
 | **Tile Task** | Parallel source-file distribution; one large source is split into point ranges; tile COPC finalization runs in parallel |
-| **Merge Task** | Parallel tile loading, parallel convex hull computation, KDTree queries |
-| **Remap Task** | Parallel files/tiles; for one raw original, parallel original chunks; KDTree query workers are divided across the active workers |
+| **Merge / Filter Tasks** | Parallel KDTree queries within each bounded batch; model/tile order and index writes remain serial |
+| **Remap Task** | Independent query batches in worker processes, each with read-only index connections and one query thread; ordered output writer |
 
-**Memory impact**: Higher values = more files or remap chunks in memory simultaneously. Remap keeps the total KDTree CPU budget bounded by sharing `--workers` across outer remap workers, raw chunk workers, and inner SciPy query workers.
+For example, `--workers 4` requests up to four query threads for merge/filter or
+four processes for final remap.
+The effective limit is capped by `GALAXY_SLOTS`, CPU affinity and detected cgroup
+CPU quotas, and is recorded in the report's `parallelism` field. Queries use at
+most one thread per 1,024 query points to avoid thread startup overhead on tiny
+spatial cells. A Docker container capped at one CPU will therefore use one query
+thread even when more workers are requested.
+
+**Memory impact**: Merge/filter share batches and KDTrees between query threads.
+Final remap workers share completed disk indexes through separate read-only
+SQLite connections; each worker has its own bounded query arrays and SQLite
+cache (16 MiB per index), plus Python/library memory. The parent admits at most
+two 32,768-point batches per process and writes results in original order.
+Inputs with only one full batch remain serial; larger inputs require at least
+one full batch per process. `parallelism.enrichment_processes` records the actual
+process budget, and `timings` separates indexing from enrichment.
+Index construction and LAS/LAZ I/O remain serial, so total speedup depends on how
+much time the dataset spends querying. `--num-spatial-chunks` does not change
+this final-remap process budget.
 
 For tile distribution of a single large source, SmartTile caps each worker's laspy chunk size to approximately `--chunk-size / --workers` with a 100k-point floor. This prevents `--workers=20 --chunk-size=20_000_000` from trying to hold 20 full 20M-point chunks at once.
 
@@ -909,11 +885,29 @@ output_dir/
 └── logs/                        # Processing logs
 ```
 
+### Vector ExtraBytes in COPC
+
+COPC conversion scalarizes vector ExtraBytes automatically and retains their
+logical descriptors in an embedded schema and JSON sidecar. Source EVLRs are
+retained during scalarization. Generated field names avoid existing scalar
+names regardless of descriptor order; component descriptions fit the LAS byte
+limit while the schema retains the complete original description.
+
+Before publishing a vector COPC, SmartTile validates every component's storage
+type, scale, offset, and no-data descriptor, then compares all raw component
+values together with their XYZ coordinates. Point reordering is allowed;
+changed values, missing fields, and changed duplicate counts fail. Validation
+uses at most 32,768 points per batch and an exact SQLite multiset on the output
+filesystem, so it adds two streaming reads and disk space proportional to the
+number of distinct XYZ/vector records. Rejected outputs and sidecars remain
+private and are removed. Writer versions that normalize vector component types
+or descriptors are rejected until they satisfy this contract.
+
 ### Point Cloud Attributes
 
 #### Tile Task Output
 - `X`, `Y`, `Z`: 3D coordinates
-- Intermediate COPC conversion strips extra dimensions by default; Untwine `--dims Classification` is accepted only when output inspection confirms no extra byte dimensions remain.
+- Intermediate COPC conversion strips ExtraBytes in bounded batches before Untwine, then validates that none remain.
 - `create_merged_file` preserves enriched dimensions for prod-merged outputs.
 
 #### Merge Task Output
@@ -1111,7 +1105,7 @@ htop -p $(pgrep -f "python src/run.py")
 │   ├── tile_*.py                       # Tiling internals
 │   ├── subsample_*.py                  # Subsampling internals
 │   ├── copc_*.py                       # COPC metadata and staging helpers
-│   ├── filter_buffer_instances.py      # Buffer zone filtering
+│   ├── filter_buffer_instances.py      # Legacy standalone buffer filtering
 │   ├── prepare_tile_jobs.py            # Tile job generation
 │   ├── get_bounds_from_tindex.py       # Extent calculation
 │   └── plot_tiles_and_copc.py          # Visualization
@@ -1138,7 +1132,8 @@ htop -p $(pgrep -f "python src/run.py")
 | `merge_tiles.py`, `merge_*.py` | Merge orchestration and internals |
 | `tile_*.py`, `subsample_*.py` | Extracted tiling and subsampling helpers |
 | `copc_*.py`, `point_cloud_*.py` | COPC staging, metadata preservation, and output helpers |
-| `filter_buffer_instances.py` | Centroid-based buffer zone filtering |
+| `dense_instance_ownership.py` | Dense instance ownership by centroid, highest point, or lowest point |
+| `filter_buffer_instances.py` | Legacy standalone centroid filter |
 | `prepare_tile_jobs.py` | Tile grid calculation and job list generation |
 | `get_bounds_from_tindex.py` | Extent extraction from spatial index |
 | `plot_tiles_and_copc.py` | Matplotlib visualization of tiles |
@@ -1224,3 +1219,7 @@ If you use this pipeline in your research, please cite:
 ---
 
 **Questions or issues?** Open an issue on GitHub or contact the maintainers.
+
+COPC subsampling window bounds clamp the last grid edge to the actual LAS maximum.
+A non-advancing floating-point step raises an error rather than repeatedly appending
+windows (the dataset 3083 memory failure).

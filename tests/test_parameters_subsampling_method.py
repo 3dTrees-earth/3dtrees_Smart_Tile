@@ -50,7 +50,9 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
         self.assertFalse(params.transfer_original_dims_to_merged)
         self.assertEqual(params.merged_output_formats, "copc.laz")
         self.assertIsNone(params.staged_copc_dir)
-        self.assertEqual(params.remap_tolerance, 0.125)
+        self.assertIsNone(params.remap_tolerance)
+        self.assertEqual(params.prediction_transfer_tolerance, 0.1732)
+        self.assertEqual(params.min_remap_match_fraction, 1.0)
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_legacy_produce_merged_file_selects_prod_merged_creation(self):
