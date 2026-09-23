@@ -16,7 +16,9 @@ from test_dense_tile_merge import write_cloud
 def layout(root, number):
     path = root / "bounds.json"
     path.write_text(json.dumps({"tile_buffer": 1, "tiles": [
-        {"bounds": [[-.1 + i * .001, 2 + i * .001], [-1, 1]], "col": i, "row": 0}
+        # These fixtures isolate reconciliation/deduplication; both cores own the test points.
+        {"bounds": [[-.1 + i * .001, 2 + i * .001], [-1, 1]],
+         "core": [[-.1, 2], [-1, 1]], "col": i, "row": 0}
         for i in range(number)
     ]}))
     return path
@@ -41,6 +43,81 @@ def assert_extended_metadata(test, path):
 
 
 class StrictPipelineTests(unittest.TestCase):
+    def test_original_voxel_diagonal_gap_is_covered_and_scales_with_resolution(self):
+        # 3057: the center-of-mass representative was 10.69 mm from one
+        # original point in the same 1 cm voxel.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions, originals = root / "predictions", root / "originals"
+            predictions.mkdir()
+            originals.mkdir()
+            write_cloud(predictions / "a.las", [0], [7], [3])
+            write_cloud(originals / "a.las", [.0058], ys=[-.0062], zs=[-.0065])
+            report = strict_remap(collections=[predictions], baseline_collections=[predictions],
+                                  originals=originals, output=root / "enriched")
+            self.assertAlmostEqual(report["original_radius_m"], np.sqrt(3) * .01)
+            self.assertEqual(report["state"], "validated")
+            self.assertEqual(laspy.read(root / "enriched/a.las").PredInstance.tolist(), [7])
+            with self.assertRaisesRegex(ValueError, "100% original coverage"):
+                strict_remap(collections=[predictions], baseline_collections=[predictions],
+                             originals=originals, output=root / "finer", resolution_1=.005)
+
+    def test_remap_uses_manifest_resolution_when_not_explicitly_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions, originals = root / "predictions", root / "originals"
+            predictions.mkdir()
+            originals.mkdir()
+            write_cloud(predictions / "a.las", [0], [7], [3])
+            write_cloud(originals / "a.las", [.0107])
+            (predictions / "smarttile_merge.json").write_text(json.dumps({
+                "baseline": ".", "resolution_1_m": .005}))
+            with self.assertRaisesRegex(ValueError, "100% original coverage"):
+                strict_remap(collections=[predictions], originals=originals,
+                             output=root / "finer")
+            report = json.loads((root / "finer_coverage.json").read_text())
+            self.assertAlmostEqual(report["original_radius_m"], np.sqrt(3) * .005)
+            self.assertFalse((root / "finer").exists())
+
+    def test_transfer_radius_accepts_com_gap_without_relaxing_original_coverage(self):
+        for distance, original_x, expected in [(.131, 0, 'pass'), (.174, 0, 'transfer'), (.131, .018, 'original')]:
+            with self.subTest(distance=distance, original_x=original_x), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source, target, originals = [root / n for n in ('source', 'target', 'originals')]
+                for folder in (source, target, originals):folder.mkdir()
+                write_cloud(source / 'a.las', [distance], [7], [3])
+                write_cloud(target / 'a.las', [0])
+                write_cloud(originals / 'a.las', [original_x])
+                kwargs = dict(collections=[source], target_dir=target, output_tiles=root / 'out',
+                              tile_bounds_json=layout(root, 1), originals=originals)
+                if expected == 'pass':
+                    report = merge_collections(**kwargs)
+                    self.assertEqual(report['models'][0]['transfer'][0]['radius_m'], .1732)
+                    self.assertAlmostEqual(report['original_radius_m'], np.sqrt(3) * .01)
+                    self.assertEqual(report['state'], 'validated')
+                    self.assertEqual(laspy.read(root / 'original_with_predictions/a.las').PredSemantic.tolist(), [3])
+                else:
+                    message = 'incomplete prediction assignment' if expected == 'transfer' else '100% original coverage'
+                    with self.assertRaisesRegex(ValueError, message):merge_collections(**kwargs)
+                    self.assertFalse((root / 'out').exists())
+
+    def test_copc_hierarchy_is_dropped_but_passenger_evlrs_are_retained(self):
+        from laspy.copc import CopcHierarchyVlr
+        from laspy.vlrs.vlrlist import VLRList
+        from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
+        header = laspy.LasHeader(point_format=6, version="1.4")
+        header.evlrs = VLRList([CopcHierarchyVlr(),
+            laspy.VLR(user_id="test", record_id=99, record_data=b"passenger")])
+        copied = copy_single_source_header(header)
+        self.assertEqual([(v.user_id, v.record_id) for v in copied.evlrs], [("test", 99)])
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "dense.laz"
+            with laspy.open(output, mode="w", header=copied) as writer:
+                writer.write_points(laspy.ScaleAwarePointRecord.zeros(1, header=copied))
+                write_retained_evlrs(writer, copied)
+            with laspy.open(output) as reader:
+                self.assertEqual(reader.header.evlrs[0].record_data_bytes(), b"passenger")
+
     def test_streaming_stages_preserve_evlrs_and_source_no_data(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -95,8 +172,8 @@ class StrictPipelineTests(unittest.TestCase):
             predictions, originals = root / "predictions", root / "originals"
             predictions.mkdir()
             originals.mkdir()
-            write_cloud(predictions / "a.las", [0], [1])
-            write_cloud(predictions / "b.las", [.009], [5])
+            write_cloud(predictions / "a.las", [0], [0])
+            write_cloud(predictions / "b.las", [.009], [0])
             write_cloud(originals / "a.las", [.018])
             with self.assertRaisesRegex(ValueError, "100% original coverage"):
                 merge_collections(collections=[predictions], target_dir=None, output_tiles=root / "out",
@@ -114,7 +191,7 @@ class StrictPipelineTests(unittest.TestCase):
             predictions.mkdir()
             originals.mkdir()
             write_cloud(predictions / "a.las", [0], [0])
-            write_cloud(originals / "a.las", [.015])
+            write_cloud(originals / "a.las", [.018])
             with self.assertRaisesRegex(ValueError, "unfiltered_1cm"):
                 merge_collections(collections=[predictions], target_dir=None, output_tiles=root / "out",
                     tile_bounds_json=layout(root, 1), originals=originals, ready=True)
@@ -216,6 +293,27 @@ class StrictPipelineTests(unittest.TestCase):
             write_cloud(original / "a.las", [0])
             strict_remap(collections=[pred], baseline_collections=[pred], originals=original, output=root / "out")
             self.assertEqual(laspy.read(root / "out/a.las").species_probability[0], .75)
+
+    def test_standalone_remap_accepts_nan_descriptor_and_retains_finite_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            predictions, originals = root / "predictions", root / "originals"
+            predictions.mkdir()
+            originals.mkdir()
+            file = write_cloud(predictions / "a.las", [0, .1], [1, 1])
+            cloud = laspy.read(file)
+            cloud.add_extra_dim(laspy.ExtraBytesParams(name="score", type="f4", no_data=[np.nan]))
+            cloud.score = [.5, .75]
+            cloud.write(file)
+            write_cloud(originals / "a.las", [0, .1])
+            report = strict_remap(collections=[predictions], baseline_collections=[predictions],
+                                  originals=originals, output=root / "out")
+            self.assertEqual(report["state"], "validated")
+            result = laspy.read(root / "out/a.las")
+            np.testing.assert_array_equal(result.score, [.5, .75])
+            descriptor = next(d for v in result.header.vlrs for d in getattr(v, "extra_bytes_structs", ())
+                              if d.format_name() == "score")
+            self.assertTrue(np.isnan(descriptor.no_data[0]))
 
 
 if __name__ == "__main__":

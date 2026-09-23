@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
 import laspy
+import numpy as np
 from laspy.vlrs.vlrlist import VLRList
 
 
@@ -56,6 +57,15 @@ DIMENSION_NAME_ALIASES = {
 }
 
 
+def extra_bytes_attribute_equal(left, right) -> bool:
+    """Compare descriptor attributes, including declared NaN no-data values."""
+    if left is None or right is None:
+        return left is right
+    left, right = np.asarray(left), np.asarray(right)
+    numeric_nan = left.dtype.kind in "fc" and right.dtype.kind in "fc"
+    return np.array_equal(left, right, equal_nan=numeric_nan)
+
+
 def extra_bytes_params_from_dimension_info(
     dim_info,
     name: Optional[str] = None,
@@ -101,7 +111,7 @@ def extra_bytes_params_from_params(
 
 def is_stale_copc_vlr(vlr) -> bool:
     """Return True for COPC index VLRs that cannot be copied to a new container."""
-    return getattr(vlr, "user_id", "") == "copc" and getattr(vlr, "record_id", None) in (1, 2)
+    return getattr(vlr, "user_id", "") == "copc" and getattr(vlr, "record_id", None) in (1, 2, 1000)
 
 
 def is_extra_bytes_vlr(vlr) -> bool:
@@ -146,14 +156,22 @@ def copy_single_source_header(
     scales=None,
     preserve_extra_dimensions: bool = True,
 ) -> laspy.LasHeader:
-    """Copy a source header for outputs that still represent exactly that source file."""
+    """Copy source metadata, promoting LAS 1.0 to a writable output version."""
+    # laspy can read historical LAS 1.0 uploads but cannot write that version.
+    # Only promote this legacy version; retain point format, encoding and VLRs.
+    output_version = (
+        laspy.header.Version(1, 4)
+        if str(source_header.version) == "1.0" else source_header.version
+    )
     if preserve_extra_dimensions:
         header = source_header.copy()
+        if header.version != output_version:
+            header.version = output_version
     else:
         fmt_id = getattr(source_header.point_format, "id", source_header.point_format)
         if hasattr(fmt_id, "id"):
             fmt_id = fmt_id.id
-        header = laspy.LasHeader(point_format=int(fmt_id), version=source_header.version)
+        header = laspy.LasHeader(point_format=int(fmt_id), version=output_version)
         for attr in (
             "file_source_id",
             "global_encoding",

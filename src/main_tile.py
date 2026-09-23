@@ -52,6 +52,7 @@ from tile_tindex import (
     get_source_files_from_tindex,
     parse_proj_bounds as _parse_proj_bounds,
     update_tile_bounds_json_from_files,
+    write_single_cloud_bounds,
 )
 
 
@@ -692,6 +693,11 @@ def run_tiling_pipeline(
             # Galaxy only needs a stable path, so a byte-for-byte copy is safe.
             shutil.copy2(tindex_file, fixed_tindex)
 
+    if should_skip_tiling:
+        write_single_cloud_bounds(bounds_json, source_files[0])
+        from prepare_tile_jobs import write_job_list
+        write_job_list(bounds_json, jobs_file)
+
     # Plot overview
     plot_tiles_and_copc.plot_extents(
         tindex_file, bounds_json, output_dir / "overview_copc_tiles.png"
@@ -717,6 +723,7 @@ def run_tiling_pipeline(
                 print(f"  Using existing {out_copc.name}")
             print("  Returning COPC directory for direct subsampling")
             print("=" * 60)
+            write_single_cloud_bounds(bounds_json, out_copc)
             return copc_single_dir
 
         out_copc = copc_single_dir / f"{source_file.stem}.copc.laz"
@@ -745,6 +752,7 @@ def run_tiling_pipeline(
             print(f"  Using existing {out_copc.name}")
         print(f"  Returning COPC directory for direct subsampling")
         print("=" * 60)
+        write_single_cloud_bounds(bounds_json, out_copc)
         return copc_single_dir
 
     # Step 3: Create tiles

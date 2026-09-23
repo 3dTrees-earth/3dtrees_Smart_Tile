@@ -11,8 +11,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import struct
+import tempfile
 import zlib
+from collections import Counter
+from contextlib import closing
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -23,6 +27,8 @@ from laspy.vlrs.vlr import VLR
 from point_cloud_metadata import (
     copy_single_source_header,
     extra_bytes_params_from_dimension_info,
+    extra_bytes_attribute_equal,
+    write_retained_evlrs,
 )
 
 
@@ -74,6 +80,12 @@ def _component_name(original_name: str, index: int, used: set[str]) -> str:
         raise ValueError(f"Could not create unique scalar component name for {original_name}[{index}]")
     used.add(candidate)
     return candidate
+
+
+def _component_description(description: str, index: int) -> str:
+    suffix = f"[{index}]"
+    prefix = description.encode("utf-8")[:32 - len(suffix)].decode("utf-8", errors="ignore")
+    return prefix + suffix
 
 
 def _schema_payload(schema: Dict[str, object]) -> bytes:
@@ -158,7 +170,10 @@ def scalarize_vector_extra_bytes(
             source_header,
             preserve_extra_dimensions=False,
         )
+        # Reserve scalar names regardless of descriptor order.
         used = set(output_header.point_format.dimension_names)
+        used.update(dim.name for dim in source_header.point_format.extra_dimensions
+                    if _dimension_layout(dim)[1] == 1)
         schema_dimensions = []
         output_params = []
         component_names_by_original: Dict[str, List[str]] = {}
@@ -184,7 +199,7 @@ def scalarize_vector_extra_bytes(
                     laspy.ExtraBytesParams(
                         name=component_name,
                         type=base_dtype,
-                        description=f"{getattr(params, 'description', '') or dim.name}[{index}]",
+                        description=_component_description(params.description or dim.name, index),
                         scales=None if scales is None else [np.asarray(scales).reshape(-1)[index]],
                         offsets=None if offsets is None else [np.asarray(offsets).reshape(-1)[index]],
                         no_data=None if no_data is None else [np.asarray(no_data).reshape(-1)[index]],
@@ -233,6 +248,7 @@ def scalarize_vector_extra_bytes(
                 str(temp_output),
                 mode="w",
                 header=output_header,
+                do_compress=output.name.lower().endswith(".laz"),
                 laz_backend=laspy.LazBackend.LazrsParallel,
             ) as writer:
                 for chunk in reader.chunk_iterator(chunk_size):
@@ -243,6 +259,7 @@ def scalarize_vector_extra_bytes(
                         for index, component_name in enumerate(component_names):
                             out_chunk.array[component_name] = raw_values[:, index]
                     writer.write_points(out_chunk)
+                write_retained_evlrs(writer, output_header)
             temp_output.replace(output)
             write_vector_schema_sidecar(output, schema)
             return output, schema
@@ -271,7 +288,7 @@ def preserve_vector_schema(source: Path, output: Path) -> Tuple[bool, str]:
     if schema is None:
         return (True, "source has no vector ExtraBytes schema")
     existing = read_vector_schema(output)
-    if existing is not None and existing != schema:
+    if existing is not None and _schema_payload(existing) != _schema_payload(schema):
         return (False, "output contains a different vector ExtraBytes schema")
 
     if existing is None:
@@ -295,12 +312,108 @@ def preserve_vector_schema(source: Path, output: Path) -> Tuple[bool, str]:
             return (False, f"could not embed vector ExtraBytes schema: {exc}")
 
     try:
-        if read_vector_schema(output) != schema:
+        if _schema_payload(read_vector_schema(output)) != _schema_payload(schema):
             return (False, "embedded vector ExtraBytes schema validation failed")
         write_vector_schema_sidecar(output, schema)
     except Exception as exc:
         return (False, f"could not validate vector ExtraBytes schema: {exc}")
     return (True, "vector ExtraBytes schema and sidecar preserved")
+
+
+def _validated_vector_components(schema, headers):
+    """Check the transport fields against the embedded logical descriptors."""
+    components = []
+    for vector in schema["dimensions"]:
+        names = vector["component_names"]
+        if len(names) != vector["component_count"] or len(names) not in (2, 3):
+            raise ValueError(f"Invalid vector component mapping for {vector['original_name']}")
+        for index, name in enumerate(names):
+            if name in components:
+                raise ValueError(f"Duplicate vector component mapping: {name}")
+            components.append(name)
+            for header in headers:
+                if name not in set(header.point_format.extra_dimension_names):
+                    raise ValueError(f"Missing vector component: {name}")
+                dim = header.point_format.dimension_by_name(name)
+                params = extra_bytes_params_from_dimension_info(dim, header=header)
+                if np.dtype(params.type) != np.dtype(vector["base_dtype"]):
+                    raise ValueError(f"Changed vector component dtype: {name}")
+                for attribute in ("scales", "offsets", "no_data"):
+                    declared = vector[attribute]
+                    expected = None if declared is None else [declared[index]]
+                    if not extra_bytes_attribute_equal(expected, getattr(params, attribute)):
+                        raise ValueError(f"Changed vector component {attribute}: {name}")
+    if not components:
+        raise ValueError("Empty vector component mapping")
+    return components
+
+
+def _vector_record_keys(chunk, header, source_header, components):
+    """Encode XYZ and raw vector components together, without point-order assumptions.
+
+    COPC may reorder points or change coordinate offsets. Normalize coordinates
+    to the source integer lattice; accept only floating-point representation
+    roundoff, never a spatial matching tolerance. Component bytes remain exact.
+    """
+    dtype = np.dtype([(axis, "<i8") for axis in ("x", "y", "z")] +
+                     [(f"v{i}", chunk.array.dtype.fields[name][0])
+                      for i, name in enumerate(components)])
+    rows = np.empty(len(chunk), dtype=dtype)
+    for i, axis in enumerate(("X", "Y", "Z")):
+        local = (np.asarray(chunk[axis], dtype=np.longdouble) * np.longdouble(header.scales[i]) +
+                 (np.longdouble(header.offsets[i]) - np.longdouble(source_header.offsets[i])))
+        scale = np.longdouble(source_header.scales[i])
+        encoded = np.rint(local / scale)
+        magnitude = max(1.0, abs(float(header.offsets[i])), abs(float(source_header.offsets[i])),
+                        float(np.max(np.abs(local))) if len(local) else 0.0)
+        roundoff = 8 * np.spacing(magnitude)
+        if (np.any(~np.isfinite(encoded)) or
+            np.any(np.abs(local - encoded * scale) > roundoff) or
+            np.any(encoded < np.iinfo(np.int32).min) or
+            np.any(encoded > np.iinfo(np.int32).max)):
+            raise ValueError("Output coordinates do not match the source coordinate lattice")
+        rows[axis.lower()] = encoded.astype(np.int64)
+    for i, name in enumerate(components):
+        rows[f"v{i}"] = chunk.array[name]
+    return Counter(row.tobytes() for row in rows)
+
+
+def validate_vector_conversion(source: Path, output: Path, *, chunk_size: int = 32_768) -> Tuple[bool, str]:
+    """Compare every vector record exactly using a bounded, disk-backed multiset.
+
+    The source is the scalar transport file. A row includes XYZ and all raw
+    components, so swapped labels, missing duplicates and value changes fail,
+    while COPC point reordering succeeds. SQLite stores full rows, not hashes.
+    """
+    try:
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        schema = read_vector_schema(source)
+        if schema is None:
+            raise ValueError("Vector reconstruction schema is missing from the source")
+        with laspy.open(source) as before, laspy.open(output) as after:
+            if before.header.point_count != after.header.point_count:
+                raise ValueError("Vector conversion changed the point count")
+            components = _validated_vector_components(schema, (before.header, after.header))
+            with tempfile.TemporaryDirectory(prefix="smarttile-vector-check-", dir=output.parent) as tmp:
+                with closing(sqlite3.connect(Path(tmp) / "records.sqlite")) as db:
+                    db.execute("PRAGMA cache_size=-16384")
+                    db.execute("PRAGMA temp_store=FILE")
+                    db.execute("CREATE TABLE records (value BLOB PRIMARY KEY, amount INTEGER NOT NULL) WITHOUT ROWID")
+                    for reader, sign in ((before, 1), (after, -1)):
+                        for chunk in reader.chunk_iterator(min(chunk_size, 32_768)):
+                            keys = _vector_record_keys(chunk, reader.header, before.header, components)
+                            db.executemany(
+                                "INSERT INTO records VALUES (?, ?) ON CONFLICT(value) "
+                                "DO UPDATE SET amount=amount+excluded.amount",
+                                ((key, sign * count) for key, count in keys.items()),
+                            )
+                            db.commit()
+                    if db.execute("SELECT 1 FROM records WHERE amount != 0 LIMIT 1").fetchone():
+                        raise ValueError("Vector component values or their XYZ associations changed")
+    except Exception as exc:
+        return False, str(exc)
+    return True, "Vector descriptors and all component values validated"
 
 
 def reconstruct_vector_values(point_cloud: Path) -> Dict[str, np.ndarray]:

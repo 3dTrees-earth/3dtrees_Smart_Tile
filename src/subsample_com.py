@@ -24,7 +24,7 @@ def process_pool_kwargs() -> dict:
 
 
 def _is_stale_copc_vlr(vlr) -> bool:
-    return getattr(vlr, "user_id", "") == "copc" and getattr(vlr, "record_id", None) in (1, 2)
+    return getattr(vlr, "user_id", "") == "copc"
 
 
 def _is_extra_bytes_vlr(vlr) -> bool:
@@ -36,7 +36,7 @@ def make_center_of_mass_header(source_header: laspy.LasHeader, dimension_reducti
     from laspy.vlrs.vlrlist import VLRList
 
     if dimension_reduction:
-        header = laspy.LasHeader(point_format=0, version="1.2")
+        header = laspy.LasHeader(point_format=0, version=str(source_header.version))
         for attr in (
             "file_source_id",
             "global_encoding",
@@ -64,7 +64,7 @@ def make_center_of_mass_header(source_header: laspy.LasHeader, dimension_reducti
     ])
 
     source_evlrs = getattr(source_header, "evlrs", None)
-    if source_evlrs is not None and not dimension_reduction:
+    if source_evlrs is not None:
         header.evlrs = VLRList([vlr for vlr in source_evlrs if not _is_stale_copc_vlr(vlr)])
 
     return header
@@ -146,11 +146,15 @@ def aggregate_center_of_mass_xyz(points, resolution: float) -> np.ndarray:
 
 def aligned_edges(start: float, stop: float, step: float, align: float) -> List[Tuple[float, float]]:
     first = math.floor(start / align) * align
-    final = math.ceil(stop / align) * align
+    # The rounded grid boundary can fall one ULP below the actual LAS bound.
+    # Reach the true bound so the final window cannot repeat forever.
+    final = max(stop, math.ceil(stop / align) * align)
     edges = []
     cur = first
     while cur < stop:
         nxt = min(cur + step, final)
+        if nxt <= cur:
+            raise ValueError("Aligned edge step cannot advance at this coordinate magnitude")
         if nxt > start and cur < stop:
             edges.append((max(cur, start), min(nxt, stop)))
         cur = nxt
@@ -168,19 +172,32 @@ def iter_copc_center_of_mass_windows(header: laspy.LasHeader, resolution: float)
     step = _copc_com_window_size(resolution)
     x_edges = aligned_edges(header.x_min, header.x_max, step, resolution)
     y_edges = aligned_edges(header.y_min, header.y_max, step, resolution)
-    eps_x = float(header.scales[0]) * 0.5
-    eps_y = float(header.scales[1]) * 0.5
-
-    for xi, (xmin, xmax) in enumerate(x_edges):
-        for yi, (ymin, ymax) in enumerate(y_edges):
-            qmaxx = xmax if xi == len(x_edges) - 1 else xmax - eps_x
-            qmaxy = ymax if yi == len(y_edges) - 1 else ymax - eps_y
-            if qmaxx < xmin or qmaxy < ymin:
-                continue
+    for xmin, xmax in x_edges:
+        for ymin, ymax in y_edges:
             yield Bounds(
                 np.array([xmin, ymin, header.z_min], dtype=np.float64),
-                np.array([qmaxx, qmaxy, header.z_max], dtype=np.float64),
+                np.array([xmax, ymax, header.z_max], dtype=np.float64),
             )
+
+
+def _query_copc_window(reader, bounds):
+    """Apply half-open ownership after laspy's inclusive integer-bound query.
+
+    Subtracting half a LAS scale is unsafe: laspy rounds that midpoint to
+    an integer (ties to even), which can include the next window's boundary.
+    Query conservatively, then partition using the actual scaled coordinates.
+    The dataset's outermost edges stay inclusive.
+    """
+    points = reader.query(bounds)
+    keep = np.ones(len(points), dtype=bool)
+    for axis, name in enumerate(("x", "y")):
+        coords = np.asarray(getattr(points, name))
+        keep &= coords >= bounds.mins[axis]
+        if bounds.maxs[axis] >= reader.header.maxs[axis]:
+            keep &= coords <= bounds.maxs[axis]
+        else:
+            keep &= coords < bounds.maxs[axis]
+    return points[keep]
 
 
 def _copc_center_of_mass_window_worker(
@@ -190,8 +207,8 @@ def _copc_center_of_mass_window_worker(
     from laspy.copc import Bounds, CopcReader
 
     with CopcReader.open(input_file) as reader:
-        points = reader.query(
-            Bounds(
+        points = _query_copc_window(
+            reader, Bounds(
                 np.array(mins, dtype=np.float64),
                 np.array(maxs, dtype=np.float64),
             )
@@ -260,7 +277,7 @@ def center_of_mass_subsample_copc(
         if num_workers == 1 or len(windows) <= 1:
             with CopcReader.open(input_file) as reader:
                 for bounds in windows:
-                    points = reader.query(bounds)
+                    points = _query_copc_window(reader, bounds)
                     if len(points) == 0:
                         continue
                     total_input_points += len(points)
@@ -314,6 +331,14 @@ def center_of_mass_subsample_copc(
                     )
                     next_write += 1
 
+        from point_cloud_metadata import write_retained_evlrs
+        write_retained_evlrs(writer, output_header)
+
+    if total_input_points != header.point_count:
+        raise ValueError(
+            f"COPC windows read {total_input_points:,} points; "
+            f"expected exactly {header.point_count:,} from {input_file}"
+        )
     if total_output_points == 0:
         raise ValueError(f"No points available in {input_file}")
 

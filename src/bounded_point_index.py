@@ -6,12 +6,13 @@ bounded binary blobs. All coordinates use a common local origin.
 """
 from __future__ import annotations
 
-import io
 import sqlite3
 from pathlib import Path
 
 import numpy as np
 from scipy.spatial import cKDTree
+
+from worker_budget import spatial_query_worker_count
 
 
 MAX_BATCH_POINTS = 32_768
@@ -52,13 +53,25 @@ def spatial_batches(xyz):
 
 
 class PointIndex:
-    def __init__(self, path: Path, dimensions: dict[str, np.dtype]):
+    def __init__(self, path: Path, dimensions: dict[str, np.dtype], *, query_workers: int = 1,
+                 read_only: bool = False):
+        self.query_workers = spatial_query_worker_count(query_workers)
         self.dimensions = dimensions
-        self.db = sqlite3.connect(path)
+        self.path = Path(path).resolve()
+        self.db = (sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)
+                   if read_only else sqlite3.connect(self.path))
         self.db.execute("PRAGMA cache_size=-16384")
         self.db.execute("PRAGMA temp_store=FILE")
-        self.db.execute("CREATE TABLE batches (id INTEGER PRIMARY KEY, tile INTEGER, data BLOB)")
-        self.db.execute("CREATE VIRTUAL TABLE bounds USING rtree(id,x0,x1,y0,y1,z0,z1)")
+        if read_only:
+            self.db.execute("PRAGMA query_only=ON")
+        else:
+            self.db.execute("CREATE TABLE batches (id INTEGER PRIMARY KEY, tile INTEGER, data BLOB)")
+            self.db.execute("CREATE VIRTUAL TABLE bounds USING rtree(id,x0,x1,y0,y1,z0,z1)")
+
+    def query_tree(self, tree, xyz, **kwargs):
+        """Parallelize large native queries; avoid thread overhead on tiny cells."""
+        workers = min(self.query_workers, max(1, len(xyz) // 1024))
+        return tree.query(xyz, workers=workers, **kwargs)
 
     def close(self):
         self.db.close()
@@ -69,16 +82,26 @@ class PointIndex:
     def __exit__(self, *args):
         self.close()
 
+    def _storage_dtype(self):
+        # This database is private scratch created for one run. A fixed record
+        # layout avoids ZIP/NPY parsing and array copies for every spatial query.
+        # Derive it from current dimensions: survivor schemas may be narrowed
+        # before their first insertion.
+        return np.dtype([("xyz", np.float64, (3,)), ("indices", np.int64)] +
+                        [(f"value_{i}", dtype) for i, dtype in enumerate(self.dimensions.values())])
+
     def add(self, tile, xyz, values, point_indices):
         if len(xyz) > MAX_BATCH_POINTS:
             raise ValueError("Spatial index batch exceeds the fixed memory bound")
         for group in spatial_batches(xyz):
             pts = xyz[group]
-            payload = io.BytesIO()
-            np.savez(payload, xyz=pts, indices=point_indices[group],
-                     **{f"value_{i}": values[name][group] for i, name in enumerate(self.dimensions)})
+            payload = np.empty(len(group), dtype=self._storage_dtype())
+            payload["xyz"] = pts
+            payload["indices"] = point_indices[group]
+            for i, name in enumerate(self.dimensions):
+                payload[f"value_{i}"] = values[name][group]
             row = self.db.execute("INSERT INTO batches(tile,data) VALUES (?,?)",
-                                  (int(tile), payload.getvalue())).lastrowid
+                                  (int(tile), payload.tobytes())).lastrowid
             lo, hi = pts.min(axis=0), pts.max(axis=0)
             self.db.execute("INSERT INTO bounds VALUES (?,?,?,?,?,?,?)",
                             (row, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]))
@@ -102,10 +125,11 @@ class PointIndex:
             sql += " AND b.tile<?"
             args.append(int(before_tile))
         sql += " ORDER BY b.id"
+        dtype = self._storage_dtype()
         for tile_id, data in self.db.execute(sql, args):
-            with np.load(io.BytesIO(data), allow_pickle=False) as arrays:
-                yield tile_id, {"xyz": arrays["xyz"], "indices": arrays["indices"],
-                                "values": {name: arrays[f"value_{i}"] for i, name in enumerate(self.dimensions)}}
+            arrays = np.frombuffer(data, dtype=dtype)
+            yield tile_id, {"xyz": arrays["xyz"], "indices": arrays["indices"],
+                            "values": {name: arrays[f"value_{i}"] for i, name in enumerate(self.dimensions)}}
 
     def nearest(self, xyz, radius, *, tile=None, before_tile=None, overlaps=None):
         """Nearest within radius; ties resolve by tile insertion/point order."""
@@ -127,7 +151,7 @@ class PointIndex:
                     if not np.any(query_allowed) or not len(data["xyz"]):
                         continue
                 tree = cKDTree(data["xyz"])
-                ds, ns = tree.query(pts, k=2, distance_upper_bound=np.nextafter(limit, np.inf))
+                ds, ns = self.query_tree(tree, pts, k=2, distance_upper_bound=np.nextafter(limit, np.inf))
                 d, nearest = ds[:, 0], ns[:, 0]
                 found = np.isfinite(d) & (d <= limit) & query_allowed
                 # cKDTree does not specify equal-distance tie ordering. Resolve
@@ -154,7 +178,8 @@ class PointIndex:
                     values[name][chosen] = data["values"][name][nearest[better]]
         return distances, values, refs
 
-    def conflicting_match(self, xyz, labels, radius, *, before_tile, map_labels, overlaps=None):
+    def conflicting_match(self, xyz, labels, radius, *, before_tile, map_labels, overlaps=None,
+                          background_semantics_owned=False, core_preferred=None):
         """Find any conflicting neighbour, including a non-nearest neighbour.
 
         Group stored points by label tuple and query once per group. This avoids
@@ -177,8 +202,19 @@ class PointIndex:
                 unique, inverse = np.unique(other, axis=0, return_inverse=True)
                 for label_id, label in enumerate(unique):
                     subset = np.flatnonzero(inverse == label_id)
-                    d, nearest = cKDTree(data["xyz"][subset]).query(pts)
-                    conflict = (d <= limit) & query_allowed & np.any(labels[group] != label, axis=1)
+                    d, nearest = self.query_tree(cKDTree(data["xyz"][subset]), pts)
+                    disagrees = np.any(labels[group] != label, axis=1)
+                    if background_semantics_owned and label[0] == 0:
+                        # Adjacent spatial owners may legitimately classify nearby
+                        # background differently; each keeps its own semantic value.
+                        disagrees &= labels[group, 0] != 0
+                    if core_preferred is not None:
+                        other_pts = data["xyz"][subset[nearest]]
+                        separate_owners = (core_preferred(None, tile, pts) &
+                                           core_preferred(tile, None, other_pts))
+                        disagrees &= ~((labels[group, 0] > 0) & (label[0] > 0) &
+                                       (labels[group, 0] != label[0]) & separate_owners)
+                    conflict = (d <= limit) & query_allowed & disagrees
                     if np.any(conflict):
                         pos = int(np.flatnonzero(conflict)[0])
                         ref = subset[nearest[pos]]

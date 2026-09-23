@@ -55,7 +55,7 @@ class Parameters(BaseSettings):
 
     workers: int = Field(
         DEFAULT_FILE_WORKERS,
-        description="File-level parallelism. Defaults to two files processed concurrently.",
+        description="Worker budget (default 2): file parallelism for tiling; CPU-capped query threads for merge/filter and batch processes for final remap.",
         validation_alias=AliasChoices("workers", "number-of-threads", "number_of_threads"),
     )
 
@@ -105,7 +105,7 @@ class Parameters(BaseSettings):
 
     resolution_1: Optional[float] = Field(
         0.01,
-        description="First subsampling resolution in meters (1cm) (only for 'tile' task)",
+        description="First subsampling resolution in meters (default 1cm); also sets the automatic original-remap radius",
         validation_alias=AliasChoices("resolution-1", "resolution_1"),
     )
 
@@ -148,7 +148,7 @@ class Parameters(BaseSettings):
 
     filter_anchor: str = Field(
         "centroid",
-        description="Representative point used by filter task border ownership: centroid, highest_point, or lowest_point",
+        description="Representative point used by merge/filter instance ownership on 1 cm tiles: centroid, highest_point, or lowest_point",
         validation_alias=AliasChoices("filter-anchor", "filter_anchor"),
     )
 
@@ -354,19 +354,18 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("remap-dims", "remap_dims"),
     )
 
-    remap_tolerance: float = Field(
-        0.01,
-        ge=0.01,
-        le=0.01,
+    remap_tolerance: Optional[float] = Field(
+        None, gt=0,
         description=(
-            "Final original coverage radius: fixed at 0.01 m Euclidean XYZ for v2.4. "
-            "Use --prediction-transfer-tolerance for the earlier model-to-1cm transfer."
+            "Optional final original coverage radius in meters. By default it is the "
+            "3D voxel diagonal of --resolution-1 (17.32 mm for a 1 cm voxel). "
+            "Use --prediction-transfer-tolerance for the earlier coarse-to-dense transfer."
         ),
         validation_alias=AliasChoices("remap-tolerance", "remap_tolerance"),
     )
 
     prediction_transfer_tolerance: float = Field(
-        0.125, gt=0,
+        0.1732, gt=0,
         description="Maximum Euclidean XYZ distance for each tile's coarse predictions to its 1 cm geometry; 100% assignment required.",
         validation_alias=AliasChoices("prediction-transfer-tolerance", "prediction_transfer_tolerance"),
     )

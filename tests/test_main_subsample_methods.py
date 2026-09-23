@@ -137,11 +137,9 @@ class SubsamplingMethodTests(unittest.TestCase):
             fake_reader.__enter__ = mock.Mock(return_value=fake_reader)
             fake_reader.__exit__ = mock.Mock(return_value=False)
             fake_reader.header = source_header
-            fake_reader.query.return_value = FakePoints(
-                x=np.array([33368483.4336, 33368483.4436]),
-                y=np.array([5630000.0, 5630000.01]),
-                z=np.array([120.0, 120.01]),
-            )
+            # Exercise the real scaled point-record slicing used by COPC queries.
+            fake_reader.query.return_value = laspy.read(src).points
+
 
             with mock.patch("laspy.copc.CopcReader.open", return_value=fake_reader):
                 subsample_com.center_of_mass_subsample_copc(src, out, 0.01, num_workers=1)
@@ -166,7 +164,7 @@ class SubsamplingMethodTests(unittest.TestCase):
         self.assertTrue(any(np.allclose(center, [0.01, 0.01, 0.01]) for center in centers))
         self.assertTrue(any(np.allclose(center, [0.11, 0.0, 0.0]) for center in centers))
 
-    def test_copc_center_of_mass_windows_are_voxel_aligned_and_half_open(self):
+    def test_copc_center_of_mass_query_windows_include_boundary_candidates(self):
         header = types.SimpleNamespace(
             x_min=0.0,
             x_max=0.4,
@@ -182,7 +180,7 @@ class SubsamplingMethodTests(unittest.TestCase):
 
         self.assertEqual(len(windows), 2)
         self.assertTrue(np.allclose(windows[0].mins, [0.0, 0.0, 0.0]))
-        self.assertTrue(np.allclose(windows[0].maxs, [0.195, 0.2, 1.0]))
+        self.assertTrue(np.allclose(windows[0].maxs, [0.2, 0.2, 1.0]))
         self.assertTrue(np.allclose(windows[1].mins, [0.2, 0.0, 0.0]))
         self.assertTrue(np.allclose(windows[1].maxs, [0.4, 0.2, 1.0]))
 

@@ -106,6 +106,52 @@ def build_neighbor_graph_from_bounds_json(
     return json_bounds, centers, neighbors_idx
 
 
+def single_cloud_layout(data: dict, bounds: Tuple[float, float, float, float]) -> dict:
+    """Return metadata for the actual bypass cloud, preserving CRS/context fields."""
+    x0, x1, y0, y1 = map(float, bounds)
+    xy = [[x0, x1], [y0, y1]]
+    return dict(data, tiling_skipped=True, tile_buffer=0.0,
+                proj_extent={"minx": x0, "miny": y0, "maxx": x1, "maxy": y1},
+                grid_bounds={"xmin": x0, "xmax": x1, "ymin": y0, "ymax": y1},
+                tiles=[{"col": 0, "row": 0, "bounds": xy, "core": xy, "planned_bounds": xy}])
+
+
+def is_legacy_single_cloud_layout(data: dict, bounds: Tuple[float, float, float, float]) -> bool:
+    """Recognize an unused historical grid for a verified whole-cloud input.
+
+    Call only for one actual cloud. A lone tile from a partial collection must
+    retain its declared neighbors. Require the complete projected extent (within
+    1 cm), untouched planned bounds, and a cloud spanning beyond every individual
+    planned tile. New tiling runs write an explicit single-cloud layout instead.
+    """
+    tiles = data.get("tiles", [])
+    if len(tiles) < 2 or data.get("tiling_skipped") is False:
+        return False
+    tolerance = 0.01 + 1e-9
+    try:
+        extent = data["proj_extent"]
+        expected = tuple(float(extent[key]) for key in ("minx", "maxx", "miny", "maxy"))
+        if not all(math.isfinite(v) for v in (*bounds, *expected)):
+            return False
+        if any(abs(a - b) > tolerance for a, b in zip(bounds, expected)):
+            return False
+        x0, x1, y0, y1 = bounds
+        if x0 >= x1 or y0 >= y1:
+            return False
+        for tile in tiles:
+            if tile["bounds"] != tile["planned_bounds"]:
+                return False
+            (a0, a1), (b0, b1) = tile["bounds"]
+            if not all(math.isfinite(v) for v in (a0, a1, b0, b1)) or a0 >= a1 or b0 >= b1:
+                return False
+            if (x0 >= a0 - tolerance and x1 <= a1 + tolerance and
+                    y0 >= b0 - tolerance and y1 <= b1 + tolerance):
+                return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
 def match_tiles_to_json_bounds(
     tile_boundaries: Dict[str, Tuple[float, float, float, float]],
     json_bounds: List[Tuple[float, float, float, float]],

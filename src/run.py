@@ -5,7 +5,7 @@ Main orchestrator script for the 3DTrees smart tiling pipeline.
 Routes to appropriate task modules based on --task parameter:
 - tile: XYZ reduction, COPC conversion, tiling, and subsampling (1cm and 10cm)
 - merge: Remap predictions and merge tiles with instance matching
-- filter: Deduplicate overlapping dense tile points after instance reconciliation
+- filter: Remove non-owned dense instances, then reconcile and deduplicate
 - remap: Remap merged file dimensions to original input files
 - create_merged_file: Create prod-merged files from original_with_predictions
 
@@ -390,7 +390,7 @@ def run_tile_task(params: Parameters):
 
 
 def run_merge_task(params: Parameters):
-    """Transfer to dense geometry, reconcile per model, then deduplicate points."""
+    """Transfer to dense geometry, filter ownership, reconcile and deduplicate."""
     from strict_prediction_pipeline import merge_collections
 
     modes = [bool(params.subsampled_10cm_folder), bool(params.segmented_folders),
@@ -428,9 +428,11 @@ def run_merge_task(params: Parameters):
             output_tiles=output_tiles, tile_bounds_json=tile_bounds,
             originals=Path(originals) if originals else None, original_output=original_output,
             merged_output=Path(merged) if merged else None,
+            workers=params.workers,
+            resolution_1=params.resolution_1, remap_tolerance=params.remap_tolerance,
             transfer_radius=params.prediction_transfer_tolerance,
             overlap_threshold=params.overlap_threshold, matching=not params.disable_matching,
-            ready=ready, instance_dimension=params.instance_dimension,
+            ready=ready, instance_dimension=params.instance_dimension, filter_anchor=params.filter_anchor,
             target_dims=set(_parse_csv(params.remap_dims)) if params.remap_dims else None,
         )
         if originals and params.transfer_original_dims_to_merged:
@@ -463,6 +465,9 @@ def run_remap_task(params: Parameters):
         strict_remap(
             collections=collections, originals=original_dir, output=output,
             baseline_collections=comma_paths(params.baseline_1cm_folders) or None,
+            workers=params.workers,
+            resolution_1=params.resolution_1 if "resolution_1" in params.model_fields_set else None,
+            remap_tolerance=params.remap_tolerance,
             instance_dimension=params.instance_dimension,
             target_dims=set(_parse_csv(params.remap_dims)) if params.remap_dims else None,
         )
@@ -535,7 +540,7 @@ def run_create_merged_file_task(params: Parameters):
 
 
 def run_filter_task(params: Parameters):
-    """Deduplicate already-dense tiles under the same strict merge contract."""
+    """Filter core ownership and deduplicate already-dense tiles."""
     from strict_prediction_pipeline import merge_collections
 
     if not params.input_dir or not params.output_dir:
@@ -548,9 +553,9 @@ def run_filter_task(params: Parameters):
     try:
         merge_collections(collections=[Path(params.input_dir)], target_dir=None,
                           output_tiles=Path(params.output_dir), tile_bounds_json=tile_bounds,
-                          ready=True, matching=not params.disable_matching,
+                          ready=True, matching=not params.disable_matching, workers=params.workers,
                           instance_dimension=params.instance_dimension,
-                          overlap_threshold=params.overlap_threshold)
+                          overlap_threshold=params.overlap_threshold, filter_anchor=params.filter_anchor)
     except Exception as exc:
         print(f"Error: {exc}")
         sys.exit(1)

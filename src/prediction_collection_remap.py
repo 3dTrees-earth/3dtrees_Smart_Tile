@@ -46,6 +46,53 @@ def prediction_collection_files(path: Path) -> List[Path]:
     return point_cloud_files(path)
 
 
+def _promote_collection_extra_dim(
+    current: laspy.ExtraBytesParams,
+    incoming,
+) -> laspy.ExtraBytesParams:
+    """Return a lossless collection-wide schema for one prediction dimension."""
+    current_dtype = np.dtype(current.type)
+    incoming_dtype = np.dtype(incoming.dtype)
+    promoted_dtype = np.promote_types(current_dtype, incoming_dtype)
+    if promoted_dtype == current_dtype:
+        return current
+    return laspy.ExtraBytesParams(
+        name=current.name,
+        type=promoted_dtype,
+        description=getattr(current, "description", "") or "",
+        offsets=getattr(current, "offsets", None),
+        scales=getattr(current, "scales", None),
+        no_data=getattr(current, "no_data", None),
+    )
+
+
+def _assign_prediction_values(out_record, name: str, values: np.ndarray, *, mask=None, raw=False) -> None:
+    """Assign one prediction dimension, rejecting lossy integer downcasts."""
+    values = np.asarray(values)
+    target = out_record.array[name] if raw else out_record[name]
+    target_dtype = np.asarray(target).dtype
+    if np.issubdtype(values.dtype, np.integer) and np.issubdtype(
+        target_dtype, np.integer
+    ):
+        limits = np.iinfo(target_dtype)
+        minimum = int(values.min()) if values.size else 0
+        maximum = int(values.max()) if values.size else 0
+        if minimum < limits.min or maximum > limits.max:
+            raise OverflowError(
+                f"Prediction dimension {name} has values [{minimum}, {maximum}] "
+                f"that do not fit output dtype {target_dtype}"
+            )
+    if raw:
+        if mask is None:
+            target[:] = values
+        else:
+            target[mask] = values
+    elif mask is None:
+        out_record[name] = values
+    else:
+        out_record[name][mask] = values
+
+
 def scan_prediction_collection_metadata(
     collections: List[Path],
     target_dims: Optional[Set[str]] = None,
@@ -70,7 +117,9 @@ def scan_prediction_collection_metadata(
                 for dim in header.point_format.extra_dimensions:
                     if target_dims is not None and dim.name not in target_dims:
                         continue
-                    if dim.name not in collection_dims:
+                    if dim.name in collection_dims:
+                        collection_dims[dim.name] = _promote_collection_extra_dim(collection_dims[dim.name], dim)
+                    else:
                         collection_dims[dim.name] = extra_bytes_params_from_dimension_info(
                             dim,
                             header=header,
@@ -532,7 +581,7 @@ def _enrich_original_chunk(
         matched_count = int(np.count_nonzero(matched))
         for dim_name, values in source_dims.items():
             if matched_count:
-                out_chunk[output_names[dim_name]][matched] = values[indices[matched]]
+                _assign_prediction_values(out_chunk, output_names[dim_name], values[indices[matched]], mask=matched)
         matched_total += matched_count
         coverage[_collection_key(coll_meta)] = distance_coverage(distances, tolerance)
         del source_points, source_dims, tree, distances, indices
@@ -670,7 +719,7 @@ def stream_add_collections_to_copc_file_spatial(
                         matched_count = int(np.count_nonzero(matched))
                         for dim_name, values in prediction_dims.items():
                             if matched_count:
-                                out_chunk[output_names[dim_name]][matched] = values[indices[matched]]
+                                _assign_prediction_values(out_chunk, output_names[dim_name], values[indices[matched]], mask=matched)
                         matched_total += matched_count
                         merge_coverage(
                             coverage[_collection_key(coll_meta)],

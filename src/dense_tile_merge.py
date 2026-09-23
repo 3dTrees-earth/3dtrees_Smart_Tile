@@ -10,15 +10,22 @@ import numpy as np
 
 from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates
 from point_cloud_metadata import (
-    copy_single_source_header, extra_bytes_params_from_dimension_info,
+    copy_single_source_header, extra_bytes_params_from_dimension_info, extra_bytes_attribute_equal,
     update_extra_dimensions, write_retained_evlrs,
 )
-from prediction_collection_remap import prediction_collection_files
+from prediction_collection_remap import prediction_collection_files, _promote_collection_extra_dim
 from instance_labels import instance_extra_bytes_params
 
 
 DUPLICATE_RADIUS = 0.01
 ORIGINAL_RADIUS = 0.01
+
+# A model may downgrade the LAS point format and carry native fields (notably
+# SAT scan_angle) as ExtraBytes. Dense targets remain their authoritative source.
+STANDARD_DIMENSIONS = frozenset(
+    name for point_format in range(11)
+    for name in laspy.PointFormat(point_format).standard_dimension_names
+)
 
 
 @dataclass
@@ -49,18 +56,25 @@ def describe_model(source, instance_dimension, *, require_instance=True):
         semantic = instance.replace("PredInstance", "PredSemantic", 1) if instance else None
         semantic = semantic if semantic != instance and semantic in names else None
         dimensions = {d.name: extra_bytes_params_from_dimension_info(d, header=reader.header)
-                      for d in reader.header.point_format.extra_dimensions}
+                      for d in reader.header.point_format.extra_dimensions
+                      if d.name not in STANDARD_DIMENSIONS}
     for file in files:
         with laspy.open(file) as reader:
             actual = {d.name: extra_bytes_params_from_dimension_info(d, header=reader.header)
-                      for d in reader.header.point_format.extra_dimensions}
+                      for d in reader.header.point_format.extra_dimensions
+                      if d.name not in STANDARD_DIMENSIONS}
             if actual.keys() != dimensions.keys():
                 raise ValueError(f"{source}: inconsistent prediction schema in {file.name}")
             for name, expected in dimensions.items():
                 got = actual[name]
-                if any(not np.array_equal(getattr(expected, key), getattr(got, key))
-                       for key in ("type", "scales", "offsets", "no_data")):
+                if any(not extra_bytes_attribute_equal(getattr(expected, key), getattr(got, key))
+                       for key in ("scales", "offsets", "no_data")):
                     raise ValueError(f"{file.name}: inconsistent prediction schema for {name}")
+                if not extra_bytes_attribute_equal(expected.type, got.type):
+                    # Instance widths may vary between tiles; promote before indexing.
+                    if name != instance or {np.dtype(expected.type), np.dtype(got.type)} != {np.dtype("uint16"), np.dtype("uint32")}:
+                        raise ValueError(f"{file.name}: inconsistent prediction schema for {name}")
+                    dimensions[name] = _promote_collection_extra_dim(expected, reader.header.point_format.dimension_by_name(name))
     no_data = {name: param.no_data for name, param in dimensions.items()}
     for name in (instance, semantic):
         if name is None:
@@ -134,7 +148,8 @@ def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, repo
     counts = Counter()
     for tile, (source, target, _) in enumerate(pairs):
         source_index_path = output_dir / f"source_{tile}.sqlite"
-        with PointIndex(source_index_path, {n: p.type for n, p in model.dimensions.items()}) as source_index:
+        with PointIndex(source_index_path, {n: p.type for n, p in model.dimensions.items()},
+                        query_workers=index.query_workers) as source_index:
             if not ready:
                 index_file(source_index, source, 0, origin, model)
             output = output_dir / f"tile_{tile:05d}.laz"
@@ -174,16 +189,20 @@ def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, repo
     return files, counts
 
 
-def reconcile_instances(model, files, index, origin, counts, overlap_threshold, radius, report, *, enabled=True, overlaps=None):
+def reconcile_instances(model, files, index, origin, counts, overlap_threshold, radius, report, *,
+                        enabled=True, overlaps=None, normal_keys=None):
     """Match mutual-best instance pairs, then form consistent cross-tile groups.
 
     Each pair needs the configured overlap fraction of the smaller instance.
     A component cannot contain two different instances from the same tile;
-    ambiguous matches remain distinct and fail the later point conflict check.
-    Geometry is never removed during reconciliation.
+    ambiguous matches remain distinct for point ownership and conflict checks.
+    Geometry is never removed during reconciliation. With recovered candidates,
+    establish normal groups first and forbid a recovered path from joining two
+    groups that were distinct before recovery.
     """
     parent = {key: key for key in sorted(counts)}
     members = {key: {key[0]: key[1]} for key in parent}
+    normal_component = {key: key in normal_keys for key in parent} if normal_keys is not None else None
 
     def root(key):
         while parent[key] != key:
@@ -220,15 +239,33 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
                         continue
                     if n / min(counts[(tile, a)], counts[(other, b)]) >= overlap_threshold:
                         edges.append((tile, a, other, b, n))
-    accepted = []
+    if normal_keys is not None:
+        # Preserve the original normal/normal edge order. Recovery edges then
+        # take stronger mutual-best correspondences first, with stable ties.
+        edges = [edge for _, edge in sorted(enumerate(edges), key=lambda item: (
+            0 if (item[1][0], item[1][1]) in normal_keys and
+                 (item[1][2], item[1][3]) in normal_keys else 1,
+            0 if (item[1][0], item[1][1]) in normal_keys and
+                 (item[1][2], item[1][3]) in normal_keys else -item[1][4],
+            item[0]))]
+    accepted, rejected_bridges, rejected_bridge_count = [], [], 0
     for tile, a, other, b, n in edges:
         left, right = root((tile, a)), root((other, b))
         if left != right:
             if any(t in members[right] and members[right][t] != label for t, label in members[left].items()):
                 continue
+            if (normal_component is not None and normal_component[left] and normal_component[right]
+                    and not ((tile, a) in normal_keys and (other, b) in normal_keys)):
+                rejected_bridge_count += 1
+                if len(rejected_bridges) < 10:
+                    rejected_bridges.append({"tiles": [tile, other], "instances": [a, b],
+                                             "matches": n, "reason": "distinct retained groups"})
+                continue
             survivor, removed = sorted((left, right))
             parent[removed] = survivor
             members[survivor].update(members[removed])
+            if normal_component is not None:
+                normal_component[survivor] |= normal_component[removed]
         accepted.append({"tiles": [tile, other], "instances": [a, b], "matches": n})
     roots = {key: i + 1 for i, key in enumerate(sorted({root(key) for key in parent}))}
     mapping = {key: roots[root(key)] for key in parent}
@@ -237,6 +274,8 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
     model.dimensions[model.instance] = instance_extra_bytes_params(model.instance, np.array([len(roots)], dtype=np.uint64))
     report["reconciliation"] = {"radius_m": radius, "overlap_threshold": overlap_threshold,
                                 "groups": len(roots), "accepted_pairs": accepted,
+                                "rejected_recovery_bridge_count": rejected_bridge_count,
+                                "rejected_recovery_bridges": rejected_bridges,
                                 "ids": [[tile, local, final] for (tile, local), final in mapping.items()]}
     return mapping
 
@@ -255,7 +294,8 @@ def label_matrix(model, values):
     return np.column_stack([values[name] for name in names])
 
 
-def deduplicate(model, files, dense_index, survivor_index, origin, mapping, output_dir, report, *, overlaps=None):
+def deduplicate(model, files, dense_index, survivor_index, origin, mapping, output_dir, report, *,
+                overlaps=None, background_semantics_owned=False, core_preferred=None):
     """Keep stable tile/point order and compare only with final earlier survivors."""
     output_dir.mkdir(parents=True)
     survivor_index.dimensions = {n: p.type for n, p in model.dimensions.items()}
@@ -275,6 +315,11 @@ def deduplicate(model, files, dense_index, survivor_index, origin, mapping, outp
                 conflict = dense_index.conflicting_match(
                     xyz, label_matrix(model, values), DUPLICATE_RADIUS, before_tile=tile,
                     map_labels=lambda other, data: label_matrix(model, mapped_values(model, data, other, mapping)),
+                    background_semantics_owned=background_semantics_owned,
+                    core_preferred=(None if core_preferred is None else
+                                    lambda first, second, pts: core_preferred(
+                                        tile if first is None else first,
+                                        tile if second is None else second, pts)),
                     overlaps=None if overlaps is None else overlaps[tile],
                 )
                 if conflict is not None:
@@ -288,9 +333,11 @@ def deduplicate(model, files, dense_index, survivor_index, origin, mapping, outp
                     conflict["xyz"] = (np.asarray(conflict["xyz"]) + origin).tolist()
                     stats["conflicts"].append(conflict)
                     raise ValueError(f"Unresolved cross-tile label conflict: {conflict}")
-                distances, _, refs = survivor_index.nearest(xyz, DUPLICATE_RADIUS, before_tile=tile,
+                distances, survivor_values, refs = survivor_index.nearest(xyz, DUPLICATE_RADIUS, before_tile=tile,
                                                            overlaps=None if overlaps is None else overlaps[tile])
-                keep = ~np.isfinite(distances)
+                # A neighbor's class must never replace the owning tile's class.
+                same_labels = np.all(label_matrix(model, values) == label_matrix(model, survivor_values), axis=1)
+                keep = ~np.isfinite(distances) | ~same_labels
                 for pos in np.flatnonzero(~keep)[:5 - len(metric["removal_examples"])]:
                     metric["removal_examples"].append({"point": int(offset + pos),
                         "survivor": refs[pos].tolist(), "distance_m": float(distances[pos])})

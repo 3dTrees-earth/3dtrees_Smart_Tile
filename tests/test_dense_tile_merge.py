@@ -48,6 +48,52 @@ class DenseMergeTests(unittest.TestCase):
                                   root / "outputs", report, overlaps=overlaps)
         return [laspy.read(p) for p in outputs], report
 
+    def test_recovered_candidate_cannot_bridge_distinct_retained_groups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); source = root / 'source'; source.mkdir()
+            files = [write_cloud(source / 'a.las', [0, .01], [11, 11]),
+                     write_cloud(source / 'b.las', [1, 1.01], [22, 22]),
+                     write_cloud(source / 'c.las', [0, .01, 1, 1.01], [33] * 4)]
+            model = describe_model(source, 'PredInstance')
+            dimensions = {name: param.type for name, param in model.dimensions.items()}
+            overlap = (np.array([-2., -2.]), np.array([2., 2.]))
+            overlaps = [{other: overlap for other in range(tile)} for tile in range(3)]
+            with PointIndex(root / 'all.sqlite', dimensions) as index:
+                from dense_tile_merge import index_file
+                for tile, file in enumerate(files):
+                    index_file(index, file, tile, np.zeros(3), model)
+                report = {}
+                mapping = reconcile_instances(model, files, index, np.zeros(3),
+                    {(0, 11): 2, (1, 22): 2, (2, 33): 4}, .3, .05, report,
+                    overlaps=overlaps, normal_keys={(0, 11), (1, 22)})
+            self.assertNotEqual(mapping[(0, 11)], mapping[(1, 22)])
+            self.assertEqual(mapping[(2, 33)], mapping[(0, 11)])
+            self.assertEqual(report['reconciliation']['rejected_recovery_bridge_count'], 1)
+
+    def test_native_fields_carried_as_extras_are_not_predictions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = write_cloud(root / "source.las", [0, .1], [7, 7], [2, 2])
+            prediction = laspy.read(source)
+            prediction.add_extra_dim(laspy.ExtraBytesParams(name="scan_angle", type=np.int16))
+            prediction.scan_angle = [99, 98]
+            prediction.write(source)
+            header = laspy.LasHeader(point_format=6, version="1.4")
+            header.scales = np.array([.000001] * 3)
+            target = laspy.LasData(header)
+            target.x, target.y, target.z = [0, .1], [0, 0], [0, 0]
+            target.scan_angle = [12, 13]
+            target_path = root / "target.las"
+            target.write(target_path)
+            model = describe_model(source, "PredInstance")
+            self.assertNotIn("scan_angle", model.dimensions)
+            with PointIndex(root / "dense.sqlite", {n: p.type for n, p in model.dimensions.items()}) as index:
+                outputs, _ = prepare_dense(model, [(source, target_path, "tile")], root / "dense",
+                                           index, np.zeros(3), .125, {})
+            result = laspy.read(outputs[0])
+            np.testing.assert_array_equal(result.scan_angle, [12, 13])
+            np.testing.assert_array_equal(result.PredInstance, [7, 7])
+
     def test_exact_duplicates_reconcile_ids_and_preserve_tail(self):
         with tempfile.TemporaryDirectory() as tmp:
             outputs, report = self.run_case(Path(tmp), [([0, .1], [7, 7], [2, 2]),
@@ -155,6 +201,25 @@ class DenseMergeTests(unittest.TestCase):
                 self.assertEqual(refs[0].tolist(), [0, 2])
                 self.assertEqual(values["xyz"].tolist(), [1])
                 self.assertEqual(values["file"].tolist(), [[4, 5, 6]])
+
+    def test_nan_no_data_descriptors_match_but_real_schema_changes_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("a.las", "b.las"):
+                file = write_cloud(root / name, [0, .1], [1, 1])
+                cloud = laspy.read(file)
+                cloud.add_extra_dim(laspy.ExtraBytesParams(name="score", type="f4", no_data=[np.nan]))
+                cloud.score = [.5, .6]
+                cloud.write(file)
+            model = describe_model(root, "PredInstance")
+            self.assertTrue(np.isnan(model.no_data["score"][0]))
+            cloud = laspy.read(root / "b.las")
+            cloud.remove_extra_dim("score")
+            cloud.add_extra_dim(laspy.ExtraBytesParams(name="score", type="f4", no_data=[-99]))
+            cloud.score = [.5, .6]
+            cloud.write(root / "b.las")
+            with self.assertRaisesRegex(ValueError, "inconsistent prediction schema for score"):
+                describe_model(root, "PredInstance")
 
 
 if __name__ == "__main__":

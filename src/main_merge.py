@@ -39,12 +39,13 @@ def run_merge(
     threedtrees_suffix: str = "SAT",
     chunk_size: int = 1_000_000,
     memory_gb: float = DEFAULT_MEMORY_GB,
+    filter_anchor: str = "centroid",
 ) -> Path:
     """Run the strict remap-first pipeline (3DT-2101).
 
     Legacy tuning arguments remain accepted by this Python/CLI adapter. Dense
-    geometry is no longer passed through centroid filtering or small-cluster
-    reassignment. Final original coverage is always 100% within 0.01 m.
+    geometry uses core ownership filtering before reconciliation; small-cluster
+    reassignment stays disabled. Final original coverage is 100% within the first-stage voxel diagonal.
     """
     from strict_prediction_pipeline import merge_collections
 
@@ -61,6 +62,7 @@ def run_merge(
         output_tiles=Path(output_tiles_dir), tile_bounds_json=Path(tile_bounds_json),
         originals=Path(original_input_dir) if original_input_dir else None,
         merged_output=None if skip_merged_file else merged,
+        filter_anchor=filter_anchor, workers=num_threads,
         overlap_threshold=overlap_threshold, correspondence_radius=correspondence_tolerance,
         ready=ready, matching=enable_matching, instance_dimension=instance_dimension,
         target_dims=set(threedtrees_dims) if threedtrees_dims else None,
@@ -219,6 +221,10 @@ def main() -> None:
         help=f"Memory cap for merge worker pools in GiB (default: {DEFAULT_MEMORY_GB})",
     )
 
+    parser.add_argument("--filter-anchor", "--filter_anchor",
+                        choices=("centroid", "highest_point", "lowest_point"), default="centroid",
+                        help="Representative point for dense instance core ownership")
+
     args = parser.parse_args()
 
     # Run pipeline
@@ -245,6 +251,7 @@ def main() -> None:
             retile_buffer=args.retile_buffer,
             retile_max_radius=args.retile_max_radius,
             memory_gb=args.memory_gb,
+            filter_anchor=args.filter_anchor,
         )
         if not args.skip_merged_file:
             print(f"\nMerged output: {output_file}")

@@ -10,9 +10,14 @@ FROM condaforge/miniforge3:24.11.3-2@sha256:1148ac0d3edaa4f25ca77d35e440766883a1
 # Python 3.12, PDAL/GDAL/Untwine, and every Python dependency are installed
 # from the generated explicit conda lock, including immutable artifact hashes.
 COPY conda-linux-64.lock /tmp/conda-linux-64.lock
-RUN mamba install -n base --file /tmp/conda-linux-64.lock -y && \
+# Keep the locked runtime separate from the base package manager: the lock
+# may replace libraries needed by the bootstrap mamba itself.
+RUN mamba create -p /opt/smarttile --file /tmp/conda-linux-64.lock -y && \
     mamba clean --all -y && \
     rm /tmp/conda-linux-64.lock
+
+# Use the locked runtime for every subsequent build check and tool command.
+ENV PATH="/opt/smarttile/bin:${PATH}"
 
 # Verify PDAL and untwine
 RUN pdal --version
@@ -35,11 +40,10 @@ RUN chmod -R a+rX /src && chmod -R 755 /in /out /src/out
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/src
-ENV PATH="/opt/conda/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/conda/lib"
+ENV LD_LIBRARY_PATH="/opt/smarttile/lib"
 # Fix PROJ database path (conda location)
-ENV PROJ_DATA="/opt/conda/share/proj"
-ENV PROJ_LIB="/opt/conda/share/proj"
+ENV PROJ_DATA="/opt/smarttile/share/proj"
+ENV PROJ_LIB="/opt/smarttile/share/proj"
 # Fix matplotlib config directory (writable location)
 ENV MPLCONFIGDIR="/tmp/matplotlib"
 
