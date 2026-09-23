@@ -31,6 +31,7 @@ from dense_instance_ownership import (
 from prediction_collection_remap import prediction_collection_files, _assign_prediction_values
 from instance_labels import instance_extra_bytes_params
 from orphan_instance_recovery import recover_orphaned_instances, validate_recovered_geometry
+from raycloud_tree_files import filter_tree_sidecars, tree_sidecars
 from worker_budget import spatial_query_worker_count
 
 
@@ -223,6 +224,12 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
         raise ValueError(f"Unknown filter anchor: {filter_anchor}")
     if not collections:
         raise ValueError("At least one prediction collection is required")
+    sidecars_by_collection = [tree_sidecars(collection) for collection in collections]
+    tree_mode = any(sidecars_by_collection)
+    if tree_mode and len(collections) != 1:
+        raise ValueError("RayCloudTools tree files require one prediction collection")
+    if tree_mode and merged_output:
+        raise ValueError("RayCloudTools tree IDs are tile-local; a merged LAZ would lose their tree-file identity")
     if not (np.isfinite(transfer_radius) and transfer_radius > 0 and
             np.isfinite(correspondence_radius) and correspondence_radius > 0 and
             0 < overlap_threshold <= 1):
@@ -232,12 +239,16 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
     baseline_output = output_tiles.with_name(output_tiles.name + "_unfiltered_1cm")
     report_path = Path(report_path or output_tiles.parent / "remap_first_report.json")
     report = new_report(resolution_1, remap_tolerance)
-    report["contract"] = "3DT-2183/v7-orphan-recovery"
+    report["contract"] = "3DT-2101/rct-filter-only-v1" if tree_mode else "3DT-2183/v7-orphan-recovery"
+    report["instance_policy"] = "preserve tile-local RayCloudTools IDs; filter only" if tree_mode else "reconcile model instances"
+    tree_output = output_tiles.parent / "segmented_filtered" if tree_mode else None
     query_workers = spatial_query_worker_count(workers)
     report["parallelism"] = {"requested_workers": workers, "query_workers": query_workers,
                              "scope": "bounded spatial queries; small batches run serially"}
     start, cpu_start = time.monotonic(), time.process_time()
     destinations = [output_tiles, baseline_output]
+    if tree_output is not None:
+        destinations.append(tree_output)
     if originals:
         original_output = Path(original_output or output_tiles.parent / "original_with_predictions")
         destinations.append(original_output)
@@ -264,6 +275,10 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
             final_files = []
             for i, collection in enumerate(collections):
                 model = describe_model(collection, instance_dimension)
+                if model.instance == "PredInstance_RCT" and not tree_mode:
+                    raise ValueError("RayCloudTools predictions require matching _trees.txt and _trees_info.txt files; refusing to reassign tree IDs")
+                if tree_mode and model.instance != "PredInstance_RCT":
+                    raise ValueError("RayCloudTools tree files require the PredInstance_RCT dimension")
                 models.append(model)
                 model_report = {"model": model.name, "source": str(collection),
                                 "instance_dimension": model.instance, "semantic_dimension": model.semantic}
@@ -295,48 +310,73 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                 owned_files, counts = filter_owned_instances(
                     model, dense_files, regions, work / "owned" / suffix, owned, origin, model_report,
                     anchor=filter_anchor)
-                normal_keys = set(counts)
-                recovered = stack.enter_context(PointIndex(work / f"recovered_{i}.sqlite", dimensions,
-                                                           query_workers=query_workers))
-                owned_files, counts, admitted, claims_path = recover_orphaned_instances(
-                    model, dense_files, owned_files, owned, regions, overlaps,
-                    work / "recovered" / suffix, recovered, origin, counts, model_report)
-                if admitted:
-                    owned = recovered
-                mapping = reconcile_instances(model, owned_files, owned, origin, counts, overlap_threshold,
-                                              correspondence_radius, model_report, enabled=matching,
-                                              overlaps=overlaps, normal_keys=normal_keys if admitted else None)
-                owners = instance_owners(mapping, model_report, model_report["orphan_recovery"]["admitted"])
-                if len(owners) < len(mapping):
-                    authoritative = stack.enter_context(PointIndex(work / f"authoritative_{i}.sqlite", dimensions, query_workers=query_workers))
-                    owned_files = retain_instance_owners(
-                        model, owned_files, mapping, owners, work / "authoritative" / suffix,
-                        authoritative, origin, model_report)
-                    owned = authoritative
-                if len(owned_files) > 1:
-                    resolved = stack.enter_context(PointIndex(work / f"resolved_{i}.sqlite", dimensions, query_workers=query_workers))
-                    owned_files = assign_shared_points(
-                        model, owned_files, owned, regions, mapping, work / "resolved" / suffix,
-                        resolved, origin, model_report, overlaps=overlaps)
-                    owned = resolved
-                    if any(t["background_input"] > t["background_removed"]
-                           for t in model_report["instance_ownership"]["tiles"]):
-                        tree_priority = stack.enter_context(PointIndex(work / f"tree_priority_{i}.sqlite", dimensions, query_workers=query_workers))
+                if tree_mode:
+                    # RayCloudTools tree rows are indexed by the original local IDs.
+                    # Do not recover, reconcile, deduplicate, or renumber these labels.
+                    from shutil import copy2
+                    final_tile_dir = final_dir / suffix
+                    final_tile_dir.mkdir(parents=True)
+                    final_files = []
+                    for file in owned_files:
+                        output = final_tile_dir / file.name
+                        copy2(file, output)
+                        final_files.append(output)
+                    model_report["reconciliation"] = {
+                        "policy": "identity; no cross-tile merge or reassignment",
+                        "ids": [[tile, local, local] for tile, local in sorted(counts)],
+                        "accepted_pairs": [],
+                    }
+                    model_report["tree_sidecars"] = filter_tree_sidecars(
+                        pairs, sidecars_by_collection[i], model_report["instance_ownership"],
+                        work / "tree_files")
+                    with (final_tile_dir / "instance_metadata.csv").open("w", newline="", encoding="utf-8") as stream:
+                        writer = csv.writer(stream)
+                        writer.writerow(["tile", model.instance, "has_added_clusters"])
+                        writer.writerows((tile, local, 0) for tile, local in sorted(counts))
+                    indices.append(owned)
+                else:
+                    normal_keys = set(counts)
+                    recovered = stack.enter_context(PointIndex(work / f"recovered_{i}.sqlite", dimensions,
+                                                               query_workers=query_workers))
+                    owned_files, counts, admitted, claims_path = recover_orphaned_instances(
+                        model, dense_files, owned_files, owned, regions, overlaps,
+                        work / "recovered" / suffix, recovered, origin, counts, model_report)
+                    if admitted:
+                        owned = recovered
+                    mapping = reconcile_instances(model, owned_files, owned, origin, counts, overlap_threshold,
+                                                  correspondence_radius, model_report, enabled=matching,
+                                                  overlaps=overlaps, normal_keys=normal_keys if admitted else None)
+                    owners = instance_owners(mapping, model_report, model_report["orphan_recovery"]["admitted"])
+                    if len(owners) < len(mapping):
+                        authoritative = stack.enter_context(PointIndex(work / f"authoritative_{i}.sqlite", dimensions, query_workers=query_workers))
+                        owned_files = retain_instance_owners(
+                            model, owned_files, mapping, owners, work / "authoritative" / suffix,
+                            authoritative, origin, model_report)
+                        owned = authoritative
+                    if len(owned_files) > 1:
+                        resolved = stack.enter_context(PointIndex(work / f"resolved_{i}.sqlite", dimensions, query_workers=query_workers))
                         owned_files = assign_shared_points(
-                            model, owned_files, owned, regions, mapping, work / "tree_priority" / suffix,
-                            tree_priority, origin, model_report, overlaps=overlaps, background_only=True)
-                        owned = tree_priority
-                final_files = deduplicate(model, owned_files, owned, survivors, origin, mapping,
-                                          final_dir / suffix, model_report, overlaps=overlaps,
-                                          background_semantics_owned=True,
-                                          core_preferred=lambda first, second, pts: preferred_core(
-                                              pts, first, second, regions, origin))
-                validate_recovered_geometry(survivors, model, admitted, claims_path, model_report, origin)
-                with (final_dir / suffix / "instance_metadata.csv").open("w", newline="", encoding="utf-8") as stream:
-                    writer = csv.writer(stream)
-                    writer.writerow([model.instance, "has_added_clusters"])
-                    writer.writerows((value, 0) for value in sorted(set(mapping.values())))
-                indices.append(survivors)
+                            model, owned_files, owned, regions, mapping, work / "resolved" / suffix,
+                            resolved, origin, model_report, overlaps=overlaps)
+                        owned = resolved
+                        if any(t["background_input"] > t["background_removed"]
+                               for t in model_report["instance_ownership"]["tiles"]):
+                            tree_priority = stack.enter_context(PointIndex(work / f"tree_priority_{i}.sqlite", dimensions, query_workers=query_workers))
+                            owned_files = assign_shared_points(
+                                model, owned_files, owned, regions, mapping, work / "tree_priority" / suffix,
+                                tree_priority, origin, model_report, overlaps=overlaps, background_only=True)
+                            owned = tree_priority
+                    final_files = deduplicate(model, owned_files, owned, survivors, origin, mapping,
+                                              final_dir / suffix, model_report, overlaps=overlaps,
+                                              background_semantics_owned=True,
+                                              core_preferred=lambda first, second, pts: preferred_core(
+                                                  pts, first, second, regions, origin))
+                    validate_recovered_geometry(survivors, model, admitted, claims_path, model_report, origin)
+                    with (final_dir / suffix / "instance_metadata.csv").open("w", newline="", encoding="utf-8") as stream:
+                        writer = csv.writer(stream)
+                        writer.writerow([model.instance, "has_added_clusters"])
+                        writer.writerows((value, 0) for value in sorted(set(mapping.values())))
+                    indices.append(survivors)
                 baselines.append(dense)
                 manifest = {"contract": report["contract"], "model": model.name,
                             "resolution_1_m": resolution_1,
@@ -356,6 +396,8 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                 manifest["tile_bounds_sha256"] = digest(layout_path)
                 write_report(final_dir / suffix / "smarttile_merge.json", manifest)
             products = [(final_dir, output_tiles), (dense_dir, baseline_output)]
+            if tree_mode:
+                products.append((work / "tree_files", tree_output))
             if originals:
                 enrich_originals(models, indices, baselines, originals, work / "originals", origin, report,
                                  target_dims=target_dims)

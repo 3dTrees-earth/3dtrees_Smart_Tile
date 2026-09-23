@@ -10,6 +10,13 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
   `strict_prediction_pipeline.py`, `dense_tile_merge.py` and
   `bounded_point_index.py`. Older centroid/orphan merge modules are legacy
   helpers and must not be reintroduced into the supported task path.
+- RCT predictions (`PredInstance_RCT`) require paired `_trees.txt` and
+  `_trees_info.txt` per tile. The strict merge path transfers labels and filters
+  whole instances by core ownership, but preserves every retained tile-local
+  ID. It skips orphan recovery, cross-tile reconciliation, point deduplication,
+  and renumbering. Filter both tree tables to exactly the retained IDs, keeping
+  the original 1-based ID as a leading `predinstance` column. Require
+  `--skip-merged-file` because IDs may repeat across tiles.
 - Transfer each model's unfiltered predictions to its own 1 cm target tiles
   first: 100% assignment within the separately configured 0.1732 m XYZ radius.
 - Remove whole instances whose selected dense anchor is outside their core;

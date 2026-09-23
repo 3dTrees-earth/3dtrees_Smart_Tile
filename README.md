@@ -240,6 +240,35 @@ Optional: add `--original-laz-input-dir /path/to/original` to enrich uploaded
 originals from the merged 1cm tile outputs. Use `--original-laz-output-dir` to
 choose that folder.
 
+### RayCloudTools tree files
+
+Pass the RCT `*_segmented.laz`, `*_trees.txt`, and `*_trees_info.txt` files together in
+one segmented input folder. SmartTile detects `PredInstance_RCT` and requires both
+text files for every tile. Use the matching 1 cm tiles and tile-bounds JSON:
+
+```bash
+python src/run.py --task merge \
+    --subsampled-segmented-folder /path/to/rct_predictions \
+    --subsampled-target-folder /path/to/subsampled_res1 \
+    --tile-bounds-json /path/to/tile_bounds_tindex.json \
+    --output-tiles-folder /path/to/out/output_tiles \
+    --instance-dimension PredInstance_RCT --skip-merged-file
+```
+
+This mode transfers the RCT labels to the 1 cm tiles, removes whole trees whose
+selected anchor is outside the owning core, and leaves every retained positive
+instance ID unchanged. It does not reconcile, merge, or renumber RCT trees. The
+filtered LAZ tiles are in `output_tiles/`; matching tree and treeinfo tables are
+in `segmented_filtered/` beside that folder. Each retained row gets a leading
+`predinstance` column equal to its original local ID, so gaps left by removed
+trees do not change the ID-to-row relationship. `instance_metadata.csv`
+records each retained `(tile, PredInstance_RCT)` pair. Missing or inconsistent
+tree files fail before outputs are published. RCT IDs may repeat between tiles,
+so keep the LAZ tiles and their named text tables together; a single merged LAZ
+cannot identify the tree table for a repeated ID. A later remap to one original
+cloud still requires complete coverage and can fail if strict ownership removes
+both claims at a tile boundary.
+
 ### Basic Filter Task
 
 Deduplicate already-remapped 1 cm tiles using the same point-level contract.
