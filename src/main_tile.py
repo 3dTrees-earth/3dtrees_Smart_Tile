@@ -697,6 +697,11 @@ def run_tiling_pipeline(
         write_single_cloud_bounds(bounds_json, source_files[0])
         from prepare_tile_jobs import write_job_list
         write_job_list(bounds_json, jobs_file)
+    else:
+        from tile_core_occupancy import select_occupied_tile_jobs
+        select_occupied_tile_jobs(
+            source_files, bounds_json, jobs_file, tiles_dir, chunk_size=chunk_size,
+        )
 
     # Plot overview
     plot_tiles_and_copc.plot_extents(
