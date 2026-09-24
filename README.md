@@ -272,6 +272,10 @@ observed 488/94 case, matching radii, sidecar behavior, and reporting details.
 
 ### Basic Filter Task
 
+See the [complete filter decision diagrams](docs/filter-decision-flow.md) for
+input gates, core-boundary rules, the recovery loop, RCT versus non-RCT
+processing, conflict checks and publication.
+
 Deduplicate already-remapped 1 cm tiles using the same point-level contract.
 Coarse predictions must enter through the merge task with a target folder first:
 

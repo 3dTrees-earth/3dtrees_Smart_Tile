@@ -45,6 +45,9 @@ The diagram shows the separate tasks so their required artifacts are explicit.
 For RCT, keep both tree tables beside each prediction tile when entering merge
 or filter. The tables are not required again for standalone remap.
 
+For every filter decision, loop, boundary condition and failure path, see the
+[complete filter decision diagrams](filter-decision-flow.md).
+
 ## What happens inside merge and filter
 
 ```mermaid
