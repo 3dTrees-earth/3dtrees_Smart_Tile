@@ -43,65 +43,30 @@ Modern airborne and terrestrial LiDAR surveys can produce datasets with billions
 This pipeline provides an end-to-end solution with five user-facing task modes:
 `tile`, `merge`, `filter`, `remap`, and `create_merged_file`.
 
+```mermaid
+flowchart TD
+    RAW["Original point clouds"] --> TILE["tile: buffered tiles and subsampling"]
+    TILE --> DENSE["Dense targets: default 1 cm"]
+    TILE --> COARSE["Model input: default 10 cm"]
+    COARSE --> MODEL["External segmentation"]
+    MODEL --> MERGE["merge: transfer predictions, then process instances"]
+    DENSE --> MERGE
+    READY["Already-dense predictions"] --> FILTER["filter: process instances directly"]
+    MERGE --> RESULT["Processed tiles, unfiltered baseline, metadata; RCT tree files"]
+    FILTER --> RESULT
+    RESULT --> REMAP["remap: validate coverage and enrich original points"]
+    ORIGINAL["Uploaded raw LAS / LAZ originals"] --> REMAP
+    REMAP --> ENRICHED["original_with_predictions"]
+    ENRICHED --> PRODUCT["create_merged_file: final products at selected resolutions"]
+    ORIGINAL -. "Source-file union" .-> PRODUCT
 ```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                              TILE TASK                                          │
-│                                                                                 │
-│  Input LAZ/LAS Files                                                            │
-│         │                                                                       │
-│         ▼                                                                       │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                    │
-│  │ Spatial      │     │ Tile Grid    │     │ Two-Phase    │                    │
-│  │ Index        │────▶│ Calculation  │────▶│ Tiling       │                    │
-│  │ (tindex)     │     │ (bounds)     │     │ (laspy+COPC) │                    │
-│  └──────────────┘     └──────────────┘     └──────────────┘                    │
-│                                                   │                            │
-│                                                   ▼                            │
-│                                          ┌───────────────────┐                 │
-│                                          │ Multi-Resolution  │                 │
-│                                          │ Subsampling       │                 │
-│                                          │ (1cm + 10cm)      │                 │
-│                                          └───────────────────┘                 │
-│                                                   │                            │
-│                                                   ▼                            │
-│                                           Outputs: tiles_100m/                 │
-│                                                    ├─ c00_r00.copc.laz         │
-│                                                    ├─ subsampled_1cm/          │
-│                                                    └─ subsampled_10cm/         │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                          │
-                                          ▼
-                              [External Segmentation]
-                         (e.g., ForAINet, SegmentAnyTree)
-                                          │
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                              MERGE TASK                                         │
-│                                                                                 │
-│  Segmented 10cm Tiles (with PredInstance attribute)                            │
-│         │                                                                       │
-│         ▼                                                                       │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                    │
-│  │ Prediction   │     │ Buffer       │     │ Cross-tile   │                    │
-│  │ Remapping    │────▶│ Filtering    │────▶│ Instance     │                    │
-│  │ (10cm→1cm)   │     │              │     │ Matching     │                    │
-│  └──────────────┘     └──────────────┘     └──────────────┘                    │
-│                                                   │                            │
-│                                                   ▼                            │
-│                              ┌───────────────────────────────────┐             │
-│                              │ Deduplication + Small Volume Merge │            │
-│                              └───────────────────────────────────┘             │
-│                                                   │                            │
-│                                                   ▼                            │
-│                              ┌───────────────────────────────────┐             │
-│                              │ Remap to Original Input Files     │             │
-│                              └───────────────────────────────────┘             │
-│                                                   │                            │
-│                                                   ▼                            │
-│                                      Unified Point Cloud                       │
-│                               (Consistent Instance IDs Across Tiles)           │
-└─────────────────────────────────────────────────────────────────────────────────┘
-```
+
+See the [complete task workflow](docs/task-workflow.md) for inputs, outputs,
+matching distances, the RCT versus non-RCT decision flow, and optional combined
+invocations. Merge can also enrich originals in the same invocation. RCT keeps
+whole-instance membership and matching tree files, with recovery permitted only
+when no retained or recovered tree claims any candidate point within 1 cm.
+
 
 ---
 
@@ -131,13 +96,16 @@ This pipeline provides an end-to-end solution with five user-facing task modes:
 - **Point-level buffer deduplication** - retains points of owned instances without a final, label-consistent survivor within 1 cm
 - **Overlap ratio matching** - identifies same trees across tile boundaries using point correspondence
 - **Union-Find algorithm** - efficiently groups matched instances into unified trees
-- **Species ID preservation** - always preserves species from the larger instance fragment
-- **Small volume merging** - reassigns orphaned tree fragments to nearby larger instances
+- **Species ID preservation** - keeps per-point semantics from the selected source owner
+- **Whole-instance recovery** - restores rejected trees supplying unsupported core geometry; RCT additionally requires no ownership conflict anywhere in the candidate
 - **Original file remapping** - maps predictions back to original input files
 
 ---
 
 ## Pipeline Architecture
+
+The [task workflow diagrams](docs/task-workflow.md) cover all five tasks and
+show their model-specific branches.
 
 ### Stage-by-Stage Breakdown
 
@@ -158,8 +126,8 @@ This pipeline provides an end-to-end solution with five user-facing task modes:
 |-------|-----------|-------------|
 | 1 | Dense transfer | Assign every 1 cm target point a prediction from its own model tile, within the explicit transfer radius (default 0.1732 m). |
 | 2 | Core ownership | Remove whole instances whose dense centroid (or selected anchor) lies outside the core on a side with a declared neighbor. Keep points of owned instances, resolving shared claims by nearest claimant core below. |
-| 3 | Instance reconciliation | Match retained local IDs across declared tile overlaps, independently for each model. |
-| 4 | Point deduplication | Assign shared points of distinct trees to the retained claimant nearest its core; otherwise remove only label-consistent duplicates within 0.01 m XYZ. |
+| 3 | Recovery and reconciliation | Recover whole candidates supplying unsupported core geometry. Non-RCT models reconcile retained IDs across declared overlaps; RCT requires zero competing tree points and preserves membership with tile-prefixed IDs. |
+| 4 | Model-specific outputs | Non-RCT: assign shared points to the nearest claimant core and deduplicate label-consistent points within 0.01 m XYZ. RCT: preserve membership and filter both tree tables to the same encoded IDs as the LAZ. |
 | 5 | Coverage validation | Require complete original-to-unfiltered coverage. Require complete original-to-final coverage for other models; unmatched RCT final labels become background 0 and are counted in the report. |
 | 6 | Publication | Publish validated staged outputs. On failure retain diagnostics, never partial final products. |
 
@@ -257,25 +225,46 @@ python src/run.py --task merge \
     --instance-dimension PredInstance_RCT --skip-merged-file
 ```
 
-This mode transfers the RCT labels to the 1 cm tiles, removes whole trees whose
-selected anchor is outside the owning core, and leaves every retained positive
-instance ID unchanged. It does not reconcile, merge, or renumber RCT trees. The
-filtered LAZ tiles are in `output_tiles/`; matching tree and treeinfo tables are
-in `segmented_filtered/` beside that folder. Each retained row gets a leading
-`predinstance` column equal to its original local ID, so gaps left by removed
-trees do not change the ID-to-row relationship. `instance_metadata.csv`
-records each retained `(tile, PredInstance_RCT)` pair. Missing or inconsistent
-tree files fail before outputs are published. RCT IDs may repeat between tiles,
-so keep the LAZ tiles and their named text tables together; a single merged LAZ
-cannot identify the tree table for a repeated ID. During final original
-remap, an RCT point with no surviving prediction inside the matching radius
-receives `PredInstance_RCT=0` (and zero for any other RCT prediction fields).
-The report records its unmatched count and coordinates. Unfiltered 1 cm
-baseline coverage remains mandatory.
+This mode transfers the RCT labels to the 1 cm tiles and removes whole trees
+whose selected anchor is outside the owning core. A rejected tree can be recovered
+if it supplies unsupported core geometry and **none of its points**, including
+buffer tails, is within **1 cm XYZ** of a retained or already recovered tree.
+One conflicting point blocks the whole candidate. Recovery preserves membership
+and includes the recovered row in both tree files. Its decisions and blocked
+candidate examples are recorded in `orphan_recovery`. Retained trees receive a
+reversible tile prefix: **`PredInstance_RCT = tile_id * 100000 + local_id`**.
+Tile IDs are one-based positions in the tile-bounds JSON: local ID 78 becomes
+100078 in tile 1 and 200078 in tile 2. Background remains 0. Membership and
+semantic predictions are preserved; RCT trees are not reconciled or merged.
+Local positive IDs must be below 100000, and encoded IDs must fit uint32;
+invalid ranges fail before publication.
+
+Filtered LAZ tiles are in `output_tiles/`; matching tree and treeinfo tables are
+in `segmented_filtered/` beside that folder. Their leading `predinstance` column
+contains the same encoded ID as the LAZ. `instance_metadata.csv` records the
+zero-based processing `tile`, one-based `tile_id`, `local_instance_id`, encoded
+`PredInstance_RCT`, and `has_added_clusters`. Missing or inconsistent tree files
+fail before outputs are published. Existing explicit `predinstance` columns are
+read by ID, including gaps, instead of treating row positions as IDs.
+
+Each filtered LAZ carries an RCT namespace VLR, also described in
+`smarttile_merge.json`. A later filter pass retains that namespace without
+adding the offset again. Co-locate its tree tables with the input LAZ files for
+that pass. Keep `--skip-merged-file` for the intermediate merge task; final
+original remap combines predictions using their encoded IDs. Older collections
+of multiple unencoded RCT tiles must be regenerated with merge/filter and their
+tree files before standalone remap, to prevent publishing ambiguous IDs.
+
+During final original remap, a positive RCT tree prediction within the matching
+radius takes priority over neighboring background, preserving its attributes.
+An RCT point with no surviving prediction inside
+the matching radius receives `PredInstance_RCT=0` (and zero for any other RCT
+prediction fields). The report records unmatched counts and example coordinates.
+Unfiltered 1 cm baseline coverage remains mandatory.
 
 Overlapping tiles can assign the same point to different trees, each rejected
 by its own tile's core-ownership check. The neighboring tiles may still retain
-the main counterparts of both trees; only their disputed points lose both
+the main counterparts of both trees; their disputed points can lose both
 claims. Final remap uses a surviving prediction within the configured radius,
 or writes background 0 if none exists. See the
 [illustrated RCT ownership example](docs/raycloud-filter-only.md) for the

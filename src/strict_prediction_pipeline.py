@@ -17,7 +17,7 @@ import numpy as np
 from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates
 from parallel_remap import RemapBatchQueries
 from dense_tile_merge import (
-    copy_record, deduplicate, describe_model, index_file,
+    DUPLICATE_RADIUS, copy_record, deduplicate, describe_model, index_file,
     prepare_dense, reconcile_instances,
 )
 from point_cloud_metadata import (
@@ -32,6 +32,10 @@ from prediction_collection_remap import prediction_collection_files, _assign_pre
 from instance_labels import instance_extra_bytes_params
 from orphan_instance_recovery import recover_orphaned_instances, validate_recovered_geometry
 from raycloud_tree_files import filter_tree_sidecars, tree_sidecars
+from raycloud_recovery import RayCloudRecoveryGate
+from raycloud_instance_ids import (
+    namespace_rct_tiles, validate_rct_remap_sources, validate_namespaced_labels, RCT_ID_STRIDE,
+)
 from worker_budget import spatial_query_worker_count
 
 
@@ -246,7 +250,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
     if tree_mode and len(collections) != 1:
         raise ValueError("RayCloudTools tree files require one prediction collection")
     if tree_mode and merged_output:
-        raise ValueError("RayCloudTools tree IDs are tile-local; a merged LAZ would lose their tree-file identity")
+        raise ValueError("RayCloudTools intermediate merged output is unsupported; use encoded tiles for original remap")
     if not (np.isfinite(transfer_radius) and transfer_radius > 0 and
             np.isfinite(correspondence_radius) and correspondence_radius > 0 and
             0 < overlap_threshold <= 1):
@@ -256,8 +260,9 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
     baseline_output = output_tiles.with_name(output_tiles.name + "_unfiltered_1cm")
     report_path = Path(report_path or output_tiles.parent / "remap_first_report.json")
     report = new_report(resolution_1, remap_tolerance)
-    report["contract"] = "3DT-2101/rct-filter-only-v1" if tree_mode else "3DT-2183/v7-orphan-recovery"
-    report["instance_policy"] = "preserve tile-local RayCloudTools IDs; filter only" if tree_mode else "reconcile model instances"
+    report["contract"] = "3DT-2101/rct-filter-only-v3-safe-recovery" if tree_mode else "3DT-2183/v7-orphan-recovery"
+    report["instance_policy"] = ("RCT tile_id * 100000 + local_id; whole-instance filtering and conflict-free recovery"
+                                 if tree_mode else "reconcile model instances")
     tree_output = output_tiles.parent / "segmented_filtered" if tree_mode else None
     query_workers = spatial_query_worker_count(workers)
     report["parallelism"] = {"requested_workers": workers, "query_workers": query_workers,
@@ -328,29 +333,37 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                     model, dense_files, regions, work / "owned" / suffix, owned, origin, model_report,
                     anchor=filter_anchor)
                 if tree_mode:
-                    # RayCloudTools tree rows are indexed by the original local IDs.
-                    # Do not recover, reconcile, deduplicate, or renumber these labels.
-                    from shutil import copy2
+                    admitted_index = stack.enter_context(PointIndex(work / f"rct_admitted_{i}.sqlite",
+                        {model.instance: np.uint32}, query_workers=query_workers))
+                    gate = RayCloudRecoveryGate(model, dense, owned, admitted_index,
+                                                model_report["instance_ownership"], origin)
+                    owned_files, counts, admitted, claims_path = recover_orphaned_instances(
+                        model, dense_files, owned_files, owned, regions, overlaps,
+                        work / "recovered" / suffix, None, origin, counts, model_report,
+                        admit_candidate=gate)
+                    model_report["orphan_recovery"].update({
+                        "policy": "whole RCT instances only; no point shared with retained or recovered trees",
+                        "conflict_radius_m": DUPLICATE_RADIUS, "blocked": gate.blocked})
                     final_tile_dir = final_dir / suffix
-                    final_tile_dir.mkdir(parents=True)
-                    final_files = []
-                    for file in owned_files:
-                        output = final_tile_dir / file.name
-                        copy2(file, output)
-                        final_files.append(output)
+                    final_files, mapping, namespace = namespace_rct_tiles(
+                        model, owned_files, pairs, regions, model_report["instance_ownership"],
+                        survivors, origin, final_tile_dir)
+                    model_report["rct_instance_ids"] = namespace
+                    validate_recovered_geometry(survivors, model, admitted, claims_path, model_report, origin)
                     model_report["reconciliation"] = {
-                        "policy": "identity; no cross-tile merge or reassignment",
-                        "ids": [[tile, local, local] for tile, local in sorted(counts)],
+                        "policy": "tile namespace only; no cross-tile merge or reassignment",
+                        "ids": [[tile, local, final] for (tile, local), final in sorted(mapping.items())],
                         "accepted_pairs": [],
                     }
                     model_report["tree_sidecars"] = filter_tree_sidecars(
                         pairs, sidecars_by_collection[i], model_report["instance_ownership"],
-                        work / "tree_files")
+                        work / "tree_files", id_mapping=mapping)
                     with (final_tile_dir / "instance_metadata.csv").open("w", newline="", encoding="utf-8") as stream:
                         writer = csv.writer(stream)
-                        writer.writerow(["tile", model.instance, "has_added_clusters"])
-                        writer.writerows((tile, local, 0) for tile, local in sorted(counts))
-                    indices.append(owned)
+                        writer.writerow(["tile", "tile_id", "local_instance_id", model.instance, "has_added_clusters"])
+                        writer.writerows((tile, final // RCT_ID_STRIDE, final % RCT_ID_STRIDE, final, 0)
+                                         for (tile, _), final in sorted(mapping.items()))
+                    indices.append(survivors)
                 else:
                     normal_keys = set(counts)
                     recovered = stack.enter_context(PointIndex(work / f"recovered_{i}.sqlite", dimensions,
@@ -398,6 +411,8 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                 manifest = {"contract": report["contract"], "model": model.name,
                             "resolution_1_m": resolution_1,
                             "baseline": os.path.relpath(baseline_output / suffix, output_tiles / suffix)}
+                if tree_mode:
+                    manifest["rct_instance_ids"] = namespace
                 # Publish the layout used for ownership beside the predictions.
                 # Keep the source immutable and bind the effective copy by checksum.
                 from tile_bounds_graph import single_cloud_layout
@@ -501,8 +516,14 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
                 index = stack.enter_context(PointIndex(work / f"model_{i}.sqlite", {n: p.type for n, p in model.dimensions.items()},
                                                        query_workers=query_workers))
                 maximum = 0
-                for tile, file in enumerate(prediction_collection_files(collection)):
-                    maximum = max(maximum, index_file(index, file, tile, origin, model))
+                prediction_files = prediction_collection_files(collection)
+                namespaces = (validate_rct_remap_sources(prediction_files)
+                              if model.instance == "PredInstance_RCT" else [None] * len(prediction_files))
+                for tile, (file, namespace) in enumerate(zip(prediction_files, namespaces)):
+                    validate = (lambda record: validate_namespaced_labels(record[model.instance], namespace)
+                                ) if namespace is not None else None
+                    maximum = max(maximum, index_file(index, file, tile, origin, model,
+                                                     validate_record=validate))
                 if model.instance:
                     model.dimensions[model.instance] = instance_extra_bytes_params(model.instance, np.array([maximum], dtype=np.uint64))
                 baseline_index = stack.enter_context(PointIndex(work / f"baseline_{i}.sqlite", {}, query_workers=query_workers))

@@ -131,7 +131,7 @@ class PointIndex:
             yield tile_id, {"xyz": arrays["xyz"], "indices": arrays["indices"],
                             "values": {name: arrays[f"value_{i}"] for i, name in enumerate(self.dimensions)}}
 
-    def nearest(self, xyz, radius, *, tile=None, before_tile=None, overlaps=None):
+    def nearest(self, xyz, radius, *, tile=None, before_tile=None, overlaps=None, positive_dimension=None):
         """Nearest within radius; ties resolve by tile insertion/point order."""
         distances = np.full(len(xyz), np.inf)
         values = {name: np.zeros(len(xyz), dtype=dtype)
@@ -141,6 +141,10 @@ class PointIndex:
             pts = xyz[group]
             limit = distance_limit(pts, radius)
             for tile_id, data in self.candidates(pts, radius, tile=tile, before_tile=before_tile):
+                if positive_dimension is not None:
+                    data = select_data(data, data['values'][positive_dimension] > 0)
+                    if not len(data['xyz']):
+                        continue
                 query_allowed = np.ones(len(pts), dtype=bool)
                 if overlaps is not None:
                     if tile_id not in overlaps:

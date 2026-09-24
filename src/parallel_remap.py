@@ -2,6 +2,7 @@
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
+import numpy as np
 
 from bounded_point_index import PointIndex
 
@@ -15,7 +16,18 @@ def _query(xyz, indices, baselines, radius):
     results = []
     for index, baseline in zip(indices, baselines):
         base_distances, _, _ = baseline.nearest(xyz, radius)
-        distances, values, _ = index.nearest(xyz, radius)
+        if 'PredInstance_RCT' in index.dimensions:
+            # A retained/recovered tree wins over neighboring background. This
+            # affects original enrichment only; tile memberships stay intact.
+            distances, values, _ = index.nearest(xyz, radius, positive_dimension='PredInstance_RCT')
+            missing = ~np.isfinite(distances)
+            if np.any(missing):
+                background_distances, background_values, _ = index.nearest(xyz[missing], radius)
+                distances[missing] = background_distances
+                for name in values:
+                    values[name][missing] = background_values[name]
+        else:
+            distances, values, _ = index.nearest(xyz, radius)
         results.append((base_distances, distances, values))
     return results
 

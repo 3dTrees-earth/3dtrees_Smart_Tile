@@ -125,12 +125,14 @@ def target_header(target, model, *, ready):
     return header
 
 
-def index_file(index, file, tile, origin, model):
+def index_file(index, file, tile, origin, model, *, validate_record=None):
     offset = 0
     maximum = 0
     with laspy.open(file) as reader:
         for record in reader.chunk_iterator(MAX_BATCH_POINTS):
             validate_labels(model, record, file.name)
+            if validate_record is not None:
+                validate_record(record)
             if model.instance and len(record):
                 maximum = max(maximum, int(np.max(record[model.instance])))
             index.add(tile, coordinates(record, reader.header, origin),

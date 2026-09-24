@@ -63,6 +63,25 @@ def test_batch_queries_are_ordered_bounded_and_match_serial(tmp_path):
                         np.testing.assert_array_equal(x, y)
 
 
+def test_rct_tree_beats_closer_background_in_serial_and_workers(tmp_path):
+    dims = {'PredInstance_RCT': np.uint32, 'PredSemantic_RCT': np.uint8}
+    with PointIndex(tmp_path / 'rct.sqlite', dims) as index:
+        index.add(0, np.array([[0., 0., 0.], [1., 0., 0.]]),
+                  {'PredInstance_RCT': np.array([0, 0]), 'PredSemantic_RCT': np.array([2, 2])},
+                  np.array([0, 1]))
+        index.add(1, np.array([[.005, 0., 0.]]),
+                  {'PredInstance_RCT': np.array([200007]), 'PredSemantic_RCT': np.array([9])}, np.array([0]))
+        for workers in (1, 2):
+            xyz = np.array([[0., 0., 0.], [1., 0., 0.], [4., 0., 0.]])
+            with RemapBatchQueries([index], [index], workers=workers, radius=.01732) as queries:
+                _, _, results = next(queries.map([(None, xyz)]))
+            base, final, values = results[0]
+            assert values['PredInstance_RCT'].tolist() == [200007, 0, 0]
+            assert values['PredSemantic_RCT'].tolist() == [9, 2, 0]
+            np.testing.assert_allclose(final[:2], [.005, 0.])
+            assert np.isinf(base[-1]) and np.isinf(final[-1])
+
+
 def test_worker_failure_propagates_and_pool_closes(tmp_path):
     with PointIndex(tmp_path / "i.sqlite", {}) as index:
         index.add(0, np.zeros((1, 3)), {}, np.array([0]))

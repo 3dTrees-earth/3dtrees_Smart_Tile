@@ -7,15 +7,15 @@ disk, so selection does not grow with the number of dense points in memory.
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
 
 import laspy
 import numpy as np
 from scipy.spatial import cKDTree
 
-from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates, distance_limit, spatial_batches
+from bounded_point_index import MAX_BATCH_POINTS, coordinates, distance_limit, spatial_batches
 from dense_tile_merge import DUPLICATE_RADIUS, index_file
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
+from orphan_claims import select_claims
 
 
 def _positive_support(index, xyz, instance_dimension):
@@ -49,13 +49,15 @@ def _core_union_mask(xyz, tile, regions, overlaps, origin):
 
 def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
                                regions, overlaps, output_dir, recovered_index,
-                               origin, counts, report):
+                               origin, counts, report, *, admit_candidate=None):
     """Admit rejected whole instances with the most unsupported core samples.
 
     The provisional ownership decisions were calculated on complete dense
     instances by filter_owned_instances. Exact XYZ keys identify distinct dense
     source samples; the support check itself uses the pipeline's 1 cm spatial
     duplicate radius. Stable source order and local ID break equal-score ties.
+    An optional admission gate may reject a whole candidate before it supplies
+    coverage. Pass no recovered_index when a later output stage builds its own.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     decisions = report['instance_ownership']['tiles']
@@ -72,6 +74,7 @@ def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
     try:
         db.execute('PRAGMA journal_mode=OFF')
         db.execute('PRAGMA synchronous=OFF')
+        db.execute('PRAGMA temp_store=FILE')
         db.execute('CREATE TABLE claims (tile INTEGER, instance INTEGER, loc BLOB, '
                    'PRIMARY KEY(tile,instance,loc)) WITHOUT ROWID')
         db.execute('CREATE INDEX claims_loc ON claims(loc)')
@@ -102,49 +105,21 @@ def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
         metric['uncovered_locations'] = db.execute(
             'SELECT COUNT(DISTINCT loc) FROM claims').fetchone()[0]
         selected = []
-        # A second candidate may use different sampled XYZ coordinates within
-        # the duplicate radius of the first. Recheck support after every
-        # admission instead of treating byte-distinct coordinates as gaps.
-        with PointIndex(output_dir / 'selection.sqlite', {model.instance: np.uint8},
-                        query_workers=owned_index.query_workers) as selection_index:
-            while True:
-                best = db.execute('SELECT tile,instance,COUNT(*) AS score FROM claims '
-                    'WHERE loc NOT IN (SELECT loc FROM covered) '
-                    'GROUP BY tile,instance ORDER BY score DESC,tile,instance LIMIT 1').fetchone()
-                if best is None:
-                    break
-                tile, uid, score = map(int, best)
-                if score <= 0:
-                    break
-                selected.append((tile, uid))
-                cursor = db.execute('SELECT loc FROM claims WHERE tile=? AND instance=?', (tile, uid))
-                offset = 0
-                while rows := cursor.fetchmany(MAX_BATCH_POINTS):
-                    xyz = np.array([np.frombuffer(row[0], dtype='<f8') for row in rows])
-                    selection_index.add(tile, xyz, {model.instance: np.ones(len(xyz), dtype=np.uint8)},
-                                        np.arange(offset, offset + len(xyz), dtype=np.int64))
-                    offset += len(xyz)
-                selection_index.flush()
-                # Read claims in bounded batches. The claims table is immutable
-                # while covered grows; each subsequent score uses updated support.
-                cursor = db.execute('SELECT DISTINCT loc FROM claims '
-                                    'WHERE loc NOT IN (SELECT loc FROM covered)')
-                while rows := cursor.fetchmany(MAX_BATCH_POINTS):
-                    xyz = np.array([np.frombuffer(row[0], dtype='<f8') for row in rows])
-                    support = _positive_support(selection_index, xyz, model.instance)
-                    db.executemany('INSERT OR IGNORE INTO covered(loc) VALUES (?)',
-                                   (rows[pos] for pos in np.flatnonzero(support)))
-                metric['admitted'].append({'tile': tile, 'local_instance': uid,
-                                          'new_locations': score,
-                                          'source': report['tile_sources'][tile]['prediction']})
+        for tile, uid, score in select_claims(db, owned_index.query_tree, metric,
+                                            admit_candidate=admit_candidate):
+            selected.append((tile, uid))
+            metric['admitted'].append({'tile': tile, 'local_instance': uid,
+                                      'new_locations': score,
+                                      'source': report['tile_sources'][tile]['prediction']})
         db.commit()
         if not selected:
             metric['final_support'] = 'no recovery needed'
             return owned_files, counts, selected, db_path
         by_tile = {}
+        decisions_by_id = [{d['instance']: d for d in tile['instances']} for tile in decisions]
         for tile, uid in selected:
             by_tile.setdefault(tile, set()).add(uid)
-            decision = next(d for d in decisions[tile]['instances'] if d['instance'] == uid)
+            decision = decisions_by_id[tile][uid]
             decision['kept'] = True
             decision['disposition'] = 'recovered_orphan'
             decision['recovered'] = True
@@ -177,7 +152,8 @@ def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
                 decisions[tile]['removed_instances'] -= len(by_tile[tile])
                 decisions[tile]['recovered_instances'] = sorted(by_tile[tile])
             outputs.append(output)
-            index_file(recovered_index, output, tile, origin, model)
+            if recovered_index is not None:
+                index_file(recovered_index, output, tile, origin, model)
         metric['final_support'] = 'pending' if selected else 'no recovery needed'
         return outputs, counts, selected, db_path
     finally:

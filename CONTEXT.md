@@ -11,16 +11,28 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
   `bounded_point_index.py`. Older centroid/orphan merge modules are legacy
   helpers and must not be reintroduced into the supported task path.
 - RCT predictions (`PredInstance_RCT`) require paired `_trees.txt` and
-  `_trees_info.txt` per tile. The strict merge path transfers labels and filters
-  whole instances by core ownership, but preserves every retained tile-local
-  ID. It skips orphan recovery, cross-tile reconciliation, point deduplication,
-  and renumbering. Filter both tree tables to exactly the retained IDs, keeping
-  the original 1-based ID as a leading `predinstance` column. Require
-  `--skip-merged-file` because IDs may repeat across tiles.
+  `_trees_info.txt` per tile. Filter whole instances by core ownership and encode
+  retained IDs as `tile_id * 100000 + local_id`, with background 0. Tile IDs use
+  one-based positions in the declared layout; subsets retain their original
+  tile ID. Require local IDs below 100000 and reject uint32 overflow. Skip
+  reconciliation, point deduplication, and membership changes. Recover a rejected
+  whole RCT instance only when it supplies unsupported core geometry and none
+  of its points is within 1 cm XYZ of a retained or previously recovered tree.
+  Check its complete geometry, including buffer tails, before admitting it.
+  Report blocked candidates and their competing instance IDs in orphan_recovery.
+  Filter both tables to the retained IDs with the same encoded `predinstance`.
+  Read existing explicit IDs rather than row positions. Preserve the per-tile
+  namespace VLR on repeat filtering; never apply the offset twice. Record the
+  local/global mapping in `instance_metadata.csv` and the merge manifest.
+  Keep `--skip-merged-file` for the intermediate task. Standalone remap rejects
+  multiple legacy unencoded RCT tiles; regenerate them through merge/filter.
+  Validate collection namespaces from headers, then check labels during the
+  indexing read; do not decompress prediction files in a separate preflight.
   Shared points can belong to rejected instances in both tiles even when the
-  main neighboring counterparts survive. Preserve this filter-only decision;
-  final RCT remap fills only unmatched predictions with 0. See
-  `docs/raycloud-filter-only.md` for the illustrated 488/94 case and regression.
+  main neighboring counterparts survive; final RCT remap fills only unmatched
+  predictions with 0. During original enrichment, prefer a positive RCT tree
+  within the remap radius over background, preserving its attributes. See
+  `docs/raycloud-filter-only.md` for the illustrated case.
 - Transfer each model's unfiltered predictions to its own 1 cm target tiles
   first: 100% assignment within the separately configured 0.1732 m XYZ radius.
 - Remove whole instances whose selected dense anchor is outside their core;
@@ -64,6 +76,10 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
   and join workers before deleting scratch indexes. Tiny inputs stay serial.
   Keep coverage, stable ties, original fields and transactional publication
   identical to the serial path; report indexing/enrichment timings separately.
+- Non-RCT orphan recovery uses a disk-backed spatial claim index and incremental
+  candidate scores. Update coverage only near each newly admitted instance,
+  keeping the same greedy ranking and stable ties. Report selection work as
+  `orphan_recovery.selection_checked_locations`.
 - Dense searches use fixed-size disk-backed spatial batches. Exact production
   replays of 3110/3111 and resource benchmarking remain release obligations.
 
@@ -208,6 +224,12 @@ product.
 - Keep large runs memory bounded: prefer chunked COPC reads/writes, avoid one
   giant in-memory point cloud, and stream batches into final products whenever
   practical.
+
+## Workflow Reference
+
+See `docs/task-workflow.md` for flow diagrams of all five tasks, their input/output
+contracts, model-specific recovery rules and matching distances. Keep these diagrams
+aligned with `src/run.py` and the strict pipeline when task behavior changes.
 
 ## Module Map
 
