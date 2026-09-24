@@ -10,9 +10,7 @@ import sqlite3
 
 import laspy
 import numpy as np
-from scipy.spatial import cKDTree
-
-from bounded_point_index import MAX_BATCH_POINTS, coordinates, distance_limit, spatial_batches
+from bounded_point_index import MAX_BATCH_POINTS, coordinates
 from dense_tile_merge import DUPLICATE_RADIUS, index_file
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
 from orphan_claims import select_claims
@@ -20,19 +18,7 @@ from orphan_claims import select_claims
 
 def _positive_support(index, xyz, instance_dimension):
     """A nearby background record never counts as a tree claimant."""
-    found = np.zeros(len(xyz), dtype=bool)
-    for group in spatial_batches(xyz):
-        points = xyz[group]
-        limit = distance_limit(points, DUPLICATE_RADIUS)
-        for _, data in index.candidates(points, DUPLICATE_RADIUS):
-            positive = np.asarray(data['values'][instance_dimension]) > 0
-            if not np.any(positive):
-                continue
-            distances, _ = index.query_tree(cKDTree(data['xyz'][positive]), points)
-            found[group] |= distances <= limit
-            if np.all(found[group]):
-                break
-    return found
+    return index.covered(xyz, DUPLICATE_RADIUS, positive_dimension=instance_dimension)
 
 
 def _core_union_mask(xyz, tile, regions, overlaps, origin):

@@ -1,6 +1,7 @@
 """Disk-backed spatial batches for dense prediction geometry.
 
-Only one query batch and one stored batch are resident during a search. SQLite's
+A bounded shared cache accelerates immutable regions; oversized regions fall
+back to one query batch and one stored batch at a time. SQLite's
 RTree indexes batch bounds, never individual points; XYZ/attributes stay in
 bounded binary blobs. All coordinates use a common local origin.
 """
@@ -54,7 +55,12 @@ def spatial_batches(xyz):
 
 class PointIndex:
     def __init__(self, path: Path, dimensions: dict[str, np.dtype], *, query_workers: int = 1,
-                 read_only: bool = False):
+                 read_only: bool = False, query_cache=None):
+        from spatial_query_cache import shared_cache
+        self.query_cache = shared_cache() if query_cache is None else query_cache
+        self._cache_owner = object()
+        self._cache_ready = read_only
+        self._cache_tiles = set()
         self.query_workers = spatial_query_worker_count(query_workers)
         self.dimensions = dimensions
         self.path = Path(path).resolve()
@@ -64,6 +70,7 @@ class PointIndex:
         self.db.execute("PRAGMA temp_store=FILE")
         if read_only:
             self.db.execute("PRAGMA query_only=ON")
+            self._cache_tiles = {row[0] for row in self.db.execute("SELECT DISTINCT tile FROM batches")}
         else:
             self.db.execute("CREATE TABLE batches (id INTEGER PRIMARY KEY, tile INTEGER, data BLOB)")
             self.db.execute("CREATE VIRTUAL TABLE bounds USING rtree(id,x0,x1,y0,y1,z0,z1)")
@@ -74,6 +81,7 @@ class PointIndex:
         return tree.query(xyz, workers=workers, **kwargs)
 
     def close(self):
+        self.query_cache.discard(self._cache_owner)
         self.db.close()
 
     def __enter__(self):
@@ -93,6 +101,10 @@ class PointIndex:
     def add(self, tile, xyz, values, point_indices):
         if len(xyz) > MAX_BATCH_POINTS:
             raise ValueError("Spatial index batch exceeds the fixed memory bound")
+        if self._cache_ready:
+            self.query_cache.discard(self._cache_owner)
+        self._cache_ready = False
+        self._cache_tiles.add(int(tile))
         for group in spatial_batches(xyz):
             pts = xyz[group]
             payload = np.empty(len(group), dtype=self._storage_dtype())
@@ -108,6 +120,7 @@ class PointIndex:
 
     def flush(self):
         self.db.commit()
+        self._cache_ready = True
 
     def candidates(self, xyz, radius, *, tile=None, before_tile=None):
         if not len(xyz):
@@ -131,7 +144,62 @@ class PointIndex:
             yield tile_id, {"xyz": arrays["xyz"], "indices": arrays["indices"],
                             "values": {name: arrays[f"value_{i}"] for i, name in enumerate(self.dimensions)}}
 
+    def covered(self, xyz, radius, *, positive_dimension):
+        """Whether any positive tree lies within radius of each query point.
+
+        Coverage needs neither winning attributes nor nearest-point tie breaks.
+        Preserve each original XY group's inclusive numerical distance bound,
+        including when previously supported queries are skipped.
+        """
+        from spatial_query_cache import covered_region
+        found = np.zeros(len(xyz), dtype=bool)
+        for group in spatial_batches(xyz):
+            points = xyz[group]
+            result = None
+            if self._cache_ready and self.query_cache.max_bytes:
+                result = covered_region(self, points, radius, positive_dimension)
+            if result is None:
+                result = self._covered_batch(points, radius, positive_dimension)
+            found[group] = result
+        return found
+
+    def _covered_batch(self, xyz, radius, positive_dimension):
+        """Bounded fallback for one XY group; skip already supported queries."""
+        found = np.zeros(len(xyz), dtype=bool)
+        limit = distance_limit(xyz, radius)
+        for _, data in self.candidates(xyz, radius):
+            positive = data['values'][positive_dimension] > 0
+            if not np.any(positive):
+                continue
+            remaining = np.flatnonzero(~found)
+            distances, _ = self.query_tree(
+                cKDTree(data['xyz'][positive]), xyz[remaining],
+                distance_upper_bound=np.nextafter(limit, np.inf))
+            found[remaining] = distances <= limit
+            if np.all(found):
+                break
+        return found
+
     def nearest(self, xyz, radius, *, tile=None, before_tile=None, overlaps=None, positive_dimension=None):
+        from spatial_query_cache import nearest_region
+        options = dict(tile=tile, before_tile=before_tile, overlaps=overlaps,
+                       positive_dimension=positive_dimension)
+        if not self._cache_ready or not self.query_cache.max_bytes:
+            return self._nearest_batches(xyz, radius, **options)
+        distances = np.full(len(xyz), np.inf)
+        values = {name: np.zeros(len(xyz), dtype=dtype) for name, dtype in self.dimensions.items()}
+        refs = np.full((len(xyz), 2), -1, dtype=np.int64)
+        # Preserve the original query grouping and numerical boundary allowance.
+        for group in spatial_batches(xyz):
+            result = nearest_region(self, xyz[group], radius, **options)
+            if result is None:
+                result = self._nearest_batches(xyz[group], radius, **options)
+            distances[group], found_values, refs[group] = result
+            for name in values:
+                values[name][group] = found_values[name]
+        return distances, values, refs
+
+    def _nearest_batches(self, xyz, radius, *, tile=None, before_tile=None, overlaps=None, positive_dimension=None):
         """Nearest within radius; ties resolve by tile insertion/point order."""
         distances = np.full(len(xyz), np.inf)
         values = {name: np.zeros(len(xyz), dtype=dtype)
