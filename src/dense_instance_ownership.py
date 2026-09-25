@@ -1,6 +1,10 @@
 """Streaming core ownership on dense predictions, before cross-tile matching."""
 from collections import Counter
 import json
+import tempfile
+from contextlib import closing
+from pathlib import Path
+from time import perf_counter
 
 import laspy
 import numpy as np
@@ -8,7 +12,7 @@ from scipy.spatial import cKDTree
 
 from bounded_point_index import (MAX_BATCH_POINTS, coordinates, distance_limit,
                                  spatial_batches, inside_xy)
-from dense_tile_merge import DUPLICATE_RADIUS, index_file, mapped_values
+from dense_tile_merge import DUPLICATE_RADIUS, index_file, index_written_record, mapped_values
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
 
 
@@ -243,6 +247,48 @@ def retain_instance_owners(model, files, mapping, owners, output_dir, index, ori
     return outputs
 
 
+def ownership_candidates(index, pts, tile, competitors, regions, origin, model,
+                         mapping, *, background_only, occupancy=None, block_limit=None):
+    """Reuse bounded trees containing only eligible competitor source points.
+
+    Eligibility is fixed for a source tile/current tile pair. Query-point core
+    ranking is still checked by the caller. Oversized or mutable indexes retain
+    the bounded batch fallback.
+    """
+    from spatial_query_cache import REGION_SIZE, region_entry
+    cell = tuple(np.floor(pts[0, :2] / REGION_SIZE).astype(np.int64))
+    limit = distance_limit(pts, DUPLICATE_RADIUS)
+    for other, bounds in sorted(competitors.items()):
+        allowed = inside_xy(pts, bounds)
+        if not background_only:
+            allowed &= preferred_core(pts, other, tile, regions, origin)
+        if not np.any(allowed):
+            continue
+        if occupancy is not None and not occupancy.may_contain(other, pts[allowed], limit):
+            continue
+        select = None if background_only else lambda xyz: preferred_core(
+            xyz, other, tile, regions, origin)
+        selection_key = None if background_only else (
+            'ownership', tile, other, tuple(np.asarray(regions[tile]['core']).ravel()),
+            tuple(np.asarray(regions[other]['core']).ravel()), tuple(origin))
+        entry = None
+        if index._cache_ready and index.query_cache.max_bytes:
+            entry = region_entry(index, other, cell, limit if block_limit is None else block_limit, model.instance, bounds,
+                                 selection_key=selection_key, select_points=select)
+        if entry is not None:
+            tree, payload = entry
+            if tree is not None:
+                yield other, {'indices': payload['indices']}, tree
+            continue
+        for _, data in index.candidates(pts, DUPLICATE_RADIUS, tile=other):
+            selected = (mapped_values(model, data['values'], other, mapping)[model.instance] > 0)
+            selected &= inside_xy(data['xyz'], bounds)
+            if select is not None:
+                selected &= select(data['xyz'])
+            if np.any(selected):
+                yield other, {'indices': data['indices'][selected]}, cKDTree(data['xyz'][selected])
+
+
 def assign_shared_points(model, files, source_index, regions, mapping, output_dir,
                          index, origin, report, *, overlaps, background_only=False):
     """Resolve shared points against retained source records.
@@ -258,10 +304,14 @@ def assign_shared_points(model, files, source_index, regions, mapping, output_di
     stats = report["tree_background_ownership" if background_only else "shared_point_ownership"] = {
         "radius_m": DUPLICATE_RADIUS,
         "policy": ("retained tree wins over background, preserving its attributes" if background_only
-                   else "distinct positive instances: nearest retained claimant core in XY"),
+                   else "all retained tree claims, including merged members: nearest claimant core in XY"),
         "tie_break": "stable source tile filename order",
         "boundary": "closed tree cores; preserve unshared buffer points",
         "tiles": []}
+    from ownership_spatial_blocks import OwnershipQuerySpool, TreeOccupancy
+    started = perf_counter()
+    occupancy = TreeOccupancy(source_index, model.instance)
+    stats['occupancy_build_seconds'] = perf_counter() - started
     outputs = []
     for tile, file in enumerate(files):
         metric = {"tile": tile, "removed": 0, "removal_examples": []}
@@ -270,87 +320,88 @@ def assign_shared_points(model, files, source_index, regions, mapping, output_di
         competitors = {other: bounds for other, bounds in competitors.items() if bounds is not None}
         stats["tiles"].append(metric)
         output = output_dir / file.name
-        offset = 0
-        with laspy.open(file) as reader:
-            header = copy_single_source_header(reader.header)
-            with laspy.open(output, mode="w", header=header) as writer:
-                for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-                    xyz = coordinates(record, reader.header, origin)
-                    values = {model.instance: np.asarray(record[model.instance])}
-                    labels = mapped_values(model, values, tile, mapping)[model.instance]
-                    eligible = (labels == 0) if background_only else (labels > 0)
-                    if not background_only:
-                        # Interior core points cannot lose. Restrict expensive
-                        # index searches to points a neighboring core could win.
-                        could_lose = np.zeros(len(record), dtype=bool)
-                        for other, bounds in competitors.items():
-                            could_lose |= (inside_xy(xyz, bounds) &
-                                           preferred_core(xyz, other, tile, regions, origin))
-                        eligible &= could_lose
-                    keep = np.ones(len(record), dtype=bool)
-                    eligible_positions = np.flatnonzero(eligible)
-                    for group in spatial_batches(xyz[eligible_positions]):
-                        positions = eligible_positions[group]
-                        pts = xyz[positions]
-                        limit = distance_limit(pts, DUPLICATE_RADIUS)
-                        best_core = core_distance(pts, regions[tile], origin)
-                        best_tile = np.full(len(pts), tile, dtype=np.int64)
-                        examples = {}
-                        for other, data in source_index.candidates(pts, DUPLICATE_RADIUS):
-                            if other == tile:
-                                continue
-                            # The pipeline stores each overlap once, under the later tile.
-                            bounds = competitors.get(other)
-                            if bounds is None:
-                                continue
-                            other_labels = mapped_values(model, data['values'], other, mapping)[model.instance]
-                            selected = (other_labels > 0) & inside_xy(data['xyz'], bounds)
-                            query_allowed = inside_xy(pts, bounds)
-                            if not background_only:
-                                # Compare at both records' coordinates. Nearby
-                                # points across a core bisector keep their own
-                                # owners instead of deleting each other.
-                                selected &= preferred_core(data['xyz'], other, tile, regions, origin)
-                                other_core = core_distance(pts, regions[other], origin)
-                                query_allowed &= ((other_core < best_core) |
-                                                  ((other_core == best_core) & (other < best_tile)))
-                            if not np.any(query_allowed) or not np.any(selected):
-                                continue
-                            # Every retained tree label outranks background; one
-                            # tree query per batch suffices for that pass.
-                            groups = ((selected,) if background_only else
-                                      (selected & (other_labels == label)
-                                       for label in np.unique(other_labels[selected])))
-                            for selected_group in groups:
-                                subset = np.flatnonzero(selected_group)
-                                if not len(subset):
-                                    continue
-                                d, nearest = source_index.query_tree(cKDTree(data['xyz'][subset]), pts)
-                                remove = ((d <= limit) & query_allowed &
-                                          (labels[positions] != other_labels[subset[nearest]]))
-                                if not background_only:
-                                    remove &= ((other_core < best_core) |
-                                               ((other_core == best_core) & (other < best_tile)))
-                                    best_core[remove] = other_core[remove]
-                                    best_tile[remove] = other
-                                else:
-                                    remove &= keep[positions]
-                                example_positions = set(np.flatnonzero(remove)[:5])
-                                example_positions.update(pos for pos in examples if remove[pos])
-                                for pos in sorted(example_positions):
-                                    ref = subset[nearest[pos]]
-                                    if pos in examples or len(examples) < 5:
-                                        examples[pos] = {
-                                            "point": int(offset + positions[pos]),
-                                            "owner": [int(other), int(data['indices'][ref])],
-                                            "distance_m": float(d[pos])}
-                                keep[positions[remove]] = False
-                        metric['removal_examples'].extend(
-                            list(examples.values())[:5 - len(metric['removal_examples'])])
-                    writer.write_points(record[keep])
-                    metric['removed'] += int(np.count_nonzero(~keep))
-                    offset += len(record)
-                write_retained_evlrs(writer, header)
-        index_file(index, output, tile, origin, model)
+        started = perf_counter()
+        with tempfile.TemporaryDirectory(prefix='.ownership-blocks-', dir=output_dir.parent) as scratch:
+            with closing(OwnershipQuerySpool(Path(scratch) / 'queries.sqlite')) as spool:
+                with laspy.open(file) as reader:
+                    header = copy_single_source_header(reader.header)
+                    point_count = reader.header.point_count
+                    offset = 0
+                    for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+                        xyz = coordinates(record, reader.header, origin)
+                        labels = mapped_values(model, {model.instance: np.asarray(record[model.instance])},
+                                               tile, mapping)[model.instance]
+                        eligible = (labels == 0) if background_only else (labels > 0)
+                        if not background_only:
+                            could_lose = np.zeros(len(record), dtype=bool)
+                            for other, bounds in competitors.items():
+                                could_lose |= (inside_xy(xyz, bounds) &
+                                               preferred_core(xyz, other, tile, regions, origin))
+                            eligible &= could_lose
+                        positions = np.flatnonzero(eligible)
+                        for group in spatial_batches(xyz[positions]):
+                            rows = positions[group]
+                            spool.add(xyz[rows], rows + offset, DUPLICATE_RADIUS)
+                        offset += len(record)
+                metric['query_staging_seconds'] = perf_counter() - started
+                removed = (np.memmap(Path(scratch) / 'removed.bin', mode='w+', dtype=bool,
+                                     shape=(point_count,)) if point_count else np.empty(0, dtype=bool))
+                removed[:] = False
+                started = perf_counter()
+                for positions, pts, block_limit in spool.groups():
+                    limit = distance_limit(pts, DUPLICATE_RADIUS)
+                    best_core = core_distance(pts, regions[tile], origin)
+                    best_tile = np.full(len(pts), tile, dtype=np.int64)
+                    examples = {}
+                    for other, data, tree in ownership_candidates(
+                            source_index, pts, tile, competitors, regions, origin,
+                            model, mapping, background_only=background_only,
+                            occupancy=occupancy, block_limit=block_limit):
+                        query_allowed = inside_xy(pts, competitors[other])
+                        if not background_only:
+                            other_core = core_distance(pts, regions[other], origin)
+                            query_allowed &= ((other_core < best_core) |
+                                              ((other_core == best_core) & (other < best_tile)))
+                        if not np.any(query_allowed):
+                            continue
+                        d, nearest = source_index.query_tree(
+                            tree, pts, distance_upper_bound=np.nextafter(limit, np.inf))
+                        remove = (d <= limit) & query_allowed
+                        if not background_only:
+                            best_core[remove] = other_core[remove]
+                            best_tile[remove] = other
+                        else:
+                            remove &= ~removed[positions]
+                        example_positions = set(np.flatnonzero(remove)[:5])
+                        example_positions.update(pos for pos in examples if remove[pos])
+                        for pos in sorted(example_positions):
+                            if pos in examples or len(examples) < 5:
+                                examples[pos] = {
+                                    'point': int(positions[pos]),
+                                    'owner': [int(other), int(data['indices'][nearest[pos]])],
+                                    'distance_m': float(d[pos])}
+                        removed[positions[remove]] = True
+                    # Diagnostics remain bounded and deterministic in source row order.
+                    metric['removal_examples'] = sorted(
+                        metric['removal_examples'] + list(examples.values()),
+                        key=lambda value: value['point'])[:5]
+                metric.update(query_seconds=perf_counter() - started,
+                              query_points=spool.points, query_blocks=spool.blocks)
+                started = perf_counter()
+                offset = indexed_offset = 0
+                with laspy.open(file) as reader, laspy.open(output, mode='w', header=header) as writer:
+                    for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+                        keep = ~removed[offset:offset + len(record)]
+                        retained = record[keep]
+                        writer.write_points(retained)
+                        indexed_offset = index_written_record(index, retained, tile, header, origin, model, indexed_offset)
+                        metric['removed'] += len(record) - len(retained)
+                        offset += len(record)
+                    write_retained_evlrs(writer, header)
+                metric['write_and_index_seconds'] = perf_counter() - started
+                if isinstance(removed, np.memmap):
+                    removed._mmap.close()
+        index.flush()
         outputs.append(output)
+    stats['spatial_occupancy'] = occupancy.report()
     return outputs

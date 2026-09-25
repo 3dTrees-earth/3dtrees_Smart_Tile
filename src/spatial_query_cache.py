@@ -93,10 +93,11 @@ def shared_cache():
     return _shared_cache
 
 
-def region_entry(index, tile, cell, radius, positive_dimension, bounds):
+def region_entry(index, tile, cell, radius, positive_dimension, bounds, *,
+                 selection_key=None, select_points=None):
     bound_key = None if bounds is None else tuple(np.asarray(bounds).ravel())
     key = (index._cache_owner, tile, *cell, radius, positive_dimension, bound_key,
-           repr(index._storage_dtype().descr))
+           repr(index._storage_dtype().descr), selection_key)
     cached = index.query_cache.get(key)
     if cached is not None:
         return cached
@@ -123,6 +124,8 @@ def region_entry(index, tile, cell, radius, positive_dimension, bounds):
             mask &= data[f'value_{names.index(positive_dimension)}'] > 0
         if bounds is not None:
             mask &= np.all((data['xyz'][:, :2] >= bounds[0]) & (data['xyz'][:, :2] <= bounds[1]), axis=1)
+        if select_points is not None:
+            mask &= select_points(data['xyz'])
         selected = data[mask]
         payload[offset:offset + len(selected)] = selected
         offset += len(selected)

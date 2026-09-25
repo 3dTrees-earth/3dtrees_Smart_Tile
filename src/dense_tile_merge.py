@@ -143,6 +143,15 @@ def index_file(index, file, tile, origin, model, *, validate_record=None):
     return maximum
 
 
+def index_written_record(index, record, tile, header, origin, model, offset):
+    """Index exactly the emitted records without reopening the compressed output."""
+    validate_labels(model, record, 'written tile')
+    index.add(tile, coordinates(record, header, origin),
+              prediction_values(record, model.dimensions),
+              np.arange(offset, offset + len(record), dtype=np.int64))
+    return offset + len(record)
+
+
 def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, report, *, ready=False):
     """Transfer each tile's own predictions, requiring assignment of every target."""
     output_dir.mkdir(parents=True)
