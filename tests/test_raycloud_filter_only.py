@@ -48,6 +48,11 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             self.assertEqual((root / "output_tiles" / "instance_metadata.csv").read_text().splitlines(),
                              ["tile,tile_id,local_instance_id,PredInstance_RCT,has_added_clusters",
                               "0,1,1,100001,0", "1,2,1,200001,0"])
+            summary = json.loads((root / "output_tiles" / "PredInstance_RCT_summary.json").read_text())
+            self.assertEqual(summary["id_encoding"], "tile_id * 100000 + local_id")
+            self.assertEqual([(i["id"], i["points"]) for i in summary["instances"]], [(100001, 2), (200001, 2)])
+            self.assertEqual(json.loads((root / "output_tiles" / "smarttile_merge.json").read_text())
+                             ["instance_summary"], "PredInstance_RCT_summary.json")
             for tile in range(2):
                 output = laspy.read(root / "output_tiles" / f"tile_{tile:05d}.laz")
                 self.assertEqual(output.PredInstance_RCT.tolist(), [(tile + 1) * 100000 + 1] * 2)

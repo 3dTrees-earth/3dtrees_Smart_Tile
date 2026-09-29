@@ -393,6 +393,14 @@ def run_tile_task(params: Parameters):
         sys.exit(1)
 
 
+def _small_instance_policy(params: Parameters):
+    if not params.reassign_small_instances:
+        return None
+    from small_instance_reassignment import SmallInstancePolicy
+    return SmallInstancePolicy(max_cluster_size=params.max_cluster_size,
+                               max_volume_m3=params.max_volume_for_merge)
+
+
 def run_merge_task(params: Parameters):
     """Transfer to dense geometry, filter ownership, reconcile and deduplicate."""
     from strict_prediction_pipeline import merge_collections
@@ -438,6 +446,7 @@ def run_merge_task(params: Parameters):
             overlap_threshold=params.overlap_threshold, matching=not params.disable_matching,
             ready=ready, instance_dimension=params.instance_dimension, filter_anchor=params.filter_anchor,
             target_dims=set(_parse_csv(params.remap_dims)) if params.remap_dims else None,
+            small_instances=_small_instance_policy(params),
         )
         if originals and params.transfer_original_dims_to_merged:
             _create_prod_merged_outputs(original_output, output_tiles.parent, params)
@@ -559,7 +568,8 @@ def run_filter_task(params: Parameters):
                           output_tiles=Path(params.output_dir), tile_bounds_json=tile_bounds,
                           ready=True, matching=not params.disable_matching, workers=params.workers,
                           instance_dimension=params.instance_dimension,
-                          overlap_threshold=params.overlap_threshold, filter_anchor=params.filter_anchor)
+                          overlap_threshold=params.overlap_threshold, filter_anchor=params.filter_anchor,
+                          small_instances=_small_instance_policy(params))
     except Exception as exc:
         print(f"Error: {exc}")
         sys.exit(1)
@@ -574,6 +584,7 @@ def preprocess_boolean_flags(args_list):
         '--show-params', '--show_params',
         '--disable-matching', '--disable_matching',
         '--disable-volume-merge', '--disable_volume_merge',
+        '--reassign-small-instances', '--reassign_small_instances',
         '--pre-remap-reassign-instances', '--pre_remap_reassign_instances',
         '--output-copc-res1', '--output_copc_res1',
         '--output-copc-res2', '--output_copc_res2',
@@ -730,6 +741,8 @@ def _print_cli_help() -> None:
                 "overlap_threshold",
                 "max_centroid_distance",
                 "max_volume_for_merge",
+                "reassign_small_instances",
+                "max_cluster_size",
                 "min_cluster_size",
                 "disable_matching",
                 "disable_volume_merge",

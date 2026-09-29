@@ -39,6 +39,13 @@ from raycloud_instance_ids import (
     namespace_rct_tiles, validate_rct_remap_sources, validate_namespaced_labels, RCT_ID_STRIDE,
 )
 from worker_budget import spatial_query_worker_count
+from small_instance_reassignment import (
+    InstanceStatistics, instance_summary, plan_reassignment, relabel_tiles,
+)
+
+
+def instance_summary_name(model):
+    return f"{model.instance}_summary.json"
 
 
 def write_report(path, report):
@@ -274,8 +281,12 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                       transfer_radius=.1732, overlap_threshold=.3, correspondence_radius=.05,
                       ready=False, matching=True, report_path=None, target_dims=None,
                       instance_dimension="PredInstance", filter_anchor="centroid", workers=1,
-                      resolution_1=0.01, remap_tolerance=None):
-    """The sole remap-first merge path for one or more independent models."""
+                      resolution_1=0.01, remap_tolerance=None, small_instances=None):
+    """The sole remap-first merge path for one or more independent models.
+
+    ``small_instances`` (a SmallInstancePolicy) reassigns small final instances
+    after deduplication; it is rejected for RayCloudTools tree IDs.
+    """
     from main_remap import find_matching_files
     if filter_anchor not in ANCHORS:
         raise ValueError(f"Unknown filter anchor: {filter_anchor}")
@@ -287,6 +298,8 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
         raise ValueError("RayCloudTools tree files require one prediction collection")
     if tree_mode and merged_output:
         raise ValueError("RayCloudTools intermediate merged output is unsupported; use encoded tiles for original remap")
+    if tree_mode and small_instances is not None:
+        raise ValueError("Small-instance reassignment would change RayCloudTools tree identity; disable it for PredInstance_RCT")
     if not (np.isfinite(transfer_radius) and transfer_radius > 0 and
             np.isfinite(correspondence_radius) and correspondence_radius > 0 and
             0 < overlap_threshold <= 1):
@@ -331,6 +344,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
             origin = origin_for(source_files)
             report["origin"] = origin.tolist()
             final_files = []
+            final_files_by_model = []
             for i, collection in enumerate(collections):
                 model = describe_model(collection, instance_dimension)
                 if model.instance == "PredInstance_RCT" and not tree_mode:
@@ -381,9 +395,11 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                         "policy": "whole RCT instances only; no point shared with retained or recovered trees",
                         "conflict_radius_m": DUPLICATE_RADIUS, "blocked": gate.blocked})
                     final_tile_dir = final_dir / suffix
+                    statistics = InstanceStatistics()
                     final_files, mapping, namespace = namespace_rct_tiles(
                         model, owned_files, pairs, regions, model_report["instance_ownership"],
-                        survivors, origin, final_tile_dir)
+                        survivors, origin, final_tile_dir, instance_statistics=statistics)
+                    reassigned = {}
                     model_report["rct_instance_ids"] = namespace
                     validate_recovered_geometry(survivors, model, admitted, claims_path, model_report, origin)
                     model_report["reconciliation"] = {
@@ -432,21 +448,43 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                                 model, owned_files, owned, regions, mapping, work / "tree_priority" / suffix,
                                 tree_priority, origin, model_report, overlaps=overlaps, background_only=True)
                             owned = tree_priority
+                    statistics = InstanceStatistics() if model.instance else None
                     final_files = timed_stage(model_report, 'deduplication', deduplicate, model, owned_files, owned, survivors, origin, mapping,
                                               final_dir / suffix, model_report, overlaps=overlaps,
                                               background_semantics_owned=True,
                                               core_preferred=lambda first, second, pts: preferred_core(
-                                                  pts, first, second, regions, origin))
+                                                  pts, first, second, regions, origin),
+                                              instance_statistics=statistics)
                     validate_recovered_geometry(survivors, model, admitted, claims_path, model_report, origin)
+                    reassigned = {}
+                    if statistics is not None and small_instances is not None:
+                        reassigned, model_report["small_instance_reassignment"] = plan_reassignment(statistics, small_instances)
+                        if reassigned:
+                            relabeled = timed_stage(model_report, 'small_instance_reassignment', relabel_tiles,
+                                                    final_files, model.instance, reassigned)
+                            model_report["small_instance_reassignment"]["relabeled_points_per_tile"] = relabeled
+                            mapping = {key: reassigned.get(value, value) for key, value in mapping.items()}
                     with (final_dir / suffix / "instance_metadata.csv").open("w", newline="", encoding="utf-8") as stream:
                         writer = csv.writer(stream)
                         writer.writerow([model.instance, "has_added_clusters"])
-                        writer.writerows((value, 0) for value in sorted(set(mapping.values())))
-                    indices.append(survivors)
+                        targets = set(reassigned.values())
+                        writer.writerows((value, int(value in targets)) for value in sorted(set(mapping.values())))
+                    # Relabeled tiles invalidate the survivor labels; build the final
+                    # index once, at the end, and only if a later step reads it.
+                    indices.append(None if reassigned else survivors)
+                final_files_by_model.append(final_files)
                 baselines.append(dense)
                 manifest = {"contract": report["contract"], "model": model.name,
                             "resolution_1_m": resolution_1,
                             "baseline": os.path.relpath(baseline_output / suffix, output_tiles / suffix)}
+                if statistics is not None:
+                    manifest["instance_summary"] = instance_summary_name(model)
+                    write_report(final_dir / suffix / manifest["instance_summary"], {
+                        "model": model.name, "instance_dimension": model.instance,
+                        "resolution_1_m": resolution_1, "coordinates": "source CRS",
+                        "id_encoding": "tile_id * 100000 + local_id" if tree_mode else "reconciled dataset ID",
+                        "small_instance_reassignment": small_instances is not None,
+                        "instances": instance_summary(statistics, reassigned, origin=origin)})
                 if tree_mode:
                     manifest["rct_instance_ids"] = namespace
                     manifest["rct_tree_sidecars"] = os.path.relpath(tree_output, output_tiles / suffix)
@@ -468,6 +506,13 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
             if tree_mode:
                 products.append((work / "tree_files", tree_output))
             if originals:
+                for i, index in enumerate(indices):
+                    if index is None:
+                        index = stack.enter_context(PointIndex(work / f"final_{i}.sqlite",
+                            {n: p.type for n, p in models[i].dimensions.items()}, query_workers=query_workers))
+                        for tile, file in enumerate(final_files_by_model[i]):
+                            index_file(index, file, tile, origin, models[i])
+                        indices[i] = index
                 final_ids = enrich_originals(models, indices, baselines, originals, work / "originals", origin, report,
                                           target_dims=target_dims)
                 rct_ids = final_ids.get("PredInstance_RCT", {})

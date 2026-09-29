@@ -8,7 +8,7 @@ import laspy
 import numpy as np
 from laspy.vlrs.vlr import VLR
 
-from bounded_point_index import MAX_BATCH_POINTS
+from bounded_point_index import MAX_BATCH_POINTS, coordinates
 from dense_tile_merge import copy_record, index_file, mapped_values, prediction_values
 from point_cloud_metadata import copy_single_source_header, update_extra_dimensions, write_retained_evlrs
 
@@ -60,8 +60,12 @@ def validate_namespaced_labels(labels, info):
         raise ValueError("RCT instance IDs disagree with their tile namespace")
 
 
-def namespace_rct_tiles(model, files, pairs, regions, ownership, index, origin, output_dir):
-    """Publish one consistent ID mapping to points, table callers and manifests."""
+def namespace_rct_tiles(model, files, pairs, regions, ownership, index, origin, output_dir, *,
+                        instance_statistics=None):
+    """Publish one consistent ID mapping to points, table callers and manifests.
+
+    ``instance_statistics`` optionally collects per-tree summaries while writing.
+    """
     mapping, identities = {}, []
     seen_tiles = set()
     for tile, ((source, _, _), region) in enumerate(zip(pairs, regions)):
@@ -110,6 +114,8 @@ def namespace_rct_tiles(model, files, pairs, regions, ownership, index, origin, 
                     values = mapped_values(model, prediction_values(record, model.dimensions), tile, mapping)
                     out[model.instance] = values[model.instance]
                     writer.write_points(out)
+                    if instance_statistics is not None:
+                        instance_statistics.add(values[model.instance], coordinates(record, reader.header, origin))
                 write_retained_evlrs(writer, header)
         index_file(index, output, tile, origin, model)
         outputs.append(output)

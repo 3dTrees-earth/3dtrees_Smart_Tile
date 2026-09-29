@@ -508,8 +508,22 @@ class Parameters(BaseSettings):
 
     max_volume_for_merge: Optional[float] = Field(
         4.0,
-        description="Max convex hull volume for small instance merging in m³",
+        description="Small-instance reassignment: maximum axis-aligned bounding-box volume in m³",
         validation_alias=AliasChoices("max-volume-for-merge", "max_volume_for_merge"),
+    )
+
+    reassign_small_instances: bool = Field(
+        False,
+        description=("Merge/filter: after deduplication, give instances with fewer than --max-cluster-size "
+                     "points and a bounding box below --max-volume-for-merge the ID of the nearest "
+                     "remaining instance centroid within 5 m. Not supported for PredInstance_RCT."),
+        validation_alias=AliasChoices("reassign-small-instances", "reassign_small_instances"),
+    )
+
+    max_cluster_size: int = Field(
+        3000, ge=1,
+        description="Small-instance reassignment: instances with fewer points are checked against --max-volume-for-merge",
+        validation_alias=AliasChoices("max-cluster-size", "max_cluster_size"),
     )
 
     border_zone_width: Optional[float] = Field(

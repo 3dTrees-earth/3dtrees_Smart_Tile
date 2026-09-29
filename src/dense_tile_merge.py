@@ -340,8 +340,13 @@ def label_matrix(model, values):
 
 
 def deduplicate(model, files, dense_index, survivor_index, origin, mapping, output_dir, report, *,
-                overlaps=None, background_semantics_owned=False, core_preferred=None):
-    """Keep stable tile/point order and compare only with final earlier survivors."""
+                overlaps=None, background_semantics_owned=False, core_preferred=None,
+                instance_statistics=None):
+    """Keep stable tile/point order and compare only with final earlier survivors.
+
+    ``instance_statistics`` optionally collects final per-instance summaries
+    from the surviving records, avoiding another pass over the written tiles.
+    """
     output_dir.mkdir(parents=True)
     survivor_index.dimensions = {n: p.type for n, p in model.dimensions.items()}
     stats = report["deduplication"] = {"radius_m": DUPLICATE_RADIUS, "tiles": [], "conflicts": []}
@@ -392,6 +397,8 @@ def deduplicate(model, files, dense_index, survivor_index, origin, mapping, outp
                 writer.write_points(out)
                 survivor_index.add(tile, xyz[keep], {n: v[keep] for n, v in values.items()},
                                    np.flatnonzero(keep) + offset)
+                if instance_statistics is not None:
+                    instance_statistics.add(values[model.instance][keep], xyz[keep])
                 metric["input"] += len(record)
                 metric["surviving"] += int(np.count_nonzero(keep))
                 metric["removed"] += int(np.count_nonzero(~keep))
