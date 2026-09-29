@@ -228,9 +228,19 @@ def append_source_geotiff_projection_evlrs(source_file: Path, copc_file: Path) -
             if str(output_header.version) != "1.4":
                 return (False, "GeoTIFF EVLR preservation requires LAS 1.4 output")
 
+        # Match projection_records(): the last source record for an identity
+        # is authoritative (EVLRs follow VLRs). A staged COPC can carry the
+        # writer's normalized WKT in a VLR and the original WKT in an EVLR.
+        # Appending the shadowed VLR alone would replace the effective source
+        # WKT when the output already carries the original, and repeated calls
+        # would alternate between the two serializations (3DT-2200).
+        effective_source_records = {
+            (user_id, record_id): (user_id, record_id, description, data)
+            for user_id, record_id, description, data in source_records
+        }
         missing = [
             (user_id, record_id, description, data)
-            for user_id, record_id, description, data in source_records
+            for user_id, record_id, description, data in effective_source_records.values()
             if output_records.get((user_id, record_id)) != data
         ]
         if not missing:
