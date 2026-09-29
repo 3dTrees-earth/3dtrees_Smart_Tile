@@ -316,7 +316,9 @@ python src/run.py --task filter \
 The filter task writes regular LAZ tiles in deterministic order, preserves all
 kept-point dimensions, and includes ownership decisions and an ID/source mapping
 in the report. `--filter-anchor centroid` (default), `highest_point`, or
-`lowest_point` selects instance ownership for both merge and filter. Non-owned
+`lowest_point` selects instance ownership for both merge and filter. Ownership
+is horizontal: the anchor's XY position must lie in the tile core, so `centroid`
+acts as the instance's XY centroid (recorded as `anchor_xy`). Non-owned
 instances are removed entirely; retained instances keep their full crowns,
 including unshared buffer points. Shared points claimed by distinct retained trees use the nearest claimant core’s instance and attributes; equal distances use stable source filename order. Background ID 0 uses point-wise core ownership and retains the owning tile’s semantics. Legacy output naming
 options remain unused.
@@ -725,10 +727,22 @@ retained/removed IDs, source and point counts are recorded in
 `instance_ownership`; admissions and post-dedup support are recorded in
 `orphan_recovery`. The final original coverage gate remains 100% within the
 first-stage voxel diagonal for non-RCT models; unmatched RCT final points
-become background 0 and are counted in the report. Small-cluster reassignment remains disabled;
-`--pre-remap-reassign-instances` is rejected because it would change the
-reconciled-label contract. Tree-instance ID changes are recorded in
-the reconciliation map; auxiliary tree text tables are not rewritten.
+become background 0 and are counted in the report. Tree-instance ID changes
+are recorded in the reconciliation map; auxiliary tree text tables are not rewritten.
+
+Optional small-instance reassignment (`--reassign-small-instances`, off by
+default) runs after deduplication on the final 1 cm tiles, so every instance
+is counted once across tiles. An instance with fewer than `--max-cluster-size`
+points (default 3000) and an axis-aligned bounding box below
+`--max-volume-for-merge` (default 4 m3) takes the ID of the remaining instance with the
+nearest XY centroid (horizontal distance, height ignored) within 5 m; otherwise it keeps its ID. Only instance IDs
+change. The statistics are collected during deduplication, the tiles are
+relabelled in one pass when anything changes, and the final label index is
+built once at the end, only if original enrichment in the same task needs it.
+Decisions are recorded under `small_instance_reassignment` in the report and
+targets are flagged in `instance_metadata.csv` (`has_added_clusters`). It is
+rejected for `PredInstance_RCT`. `--pre-remap-reassign-instances` stays rejected
+in `remap`, because it would relabel after the reconciled merge contract.
 
 ### Single-file tiling bypass metadata
 

@@ -268,6 +268,22 @@ Source: [`reconcile_instances`, `deduplicate`](../src/dense_tile_merge.py),
 [`assign_shared_points`](../src/dense_instance_ownership.py),
 [`PointIndex.conflicting_match`](../src/bounded_point_index.py).
 
+### 5c. Optional small-instance reassignment
+
+Enabled only with `--reassign-small-instances`; never for RCT.
+
+- Deduplication streams each final instance's point count, XYZ bounds and
+  centroid sums from the surviving records.
+- Small: fewer than `--max-cluster-size` points (default 3000) **and** a
+  bounding box below `--max-volume-for-merge` (default 4 m3).
+- A small instance takes the ID of the non-small instance with the nearest
+  XY centroid (horizontal distance; height is ignored) within 5 m, or keeps its ID. Small instances never receive other small ones.
+- Tiles are relabelled in one pass only when something changes; geometry,
+  semantics and scores are untouched. The final label index is built once at
+  the end, only if in-task original enrichment reads it.
+
+Source: [`small_instance_reassignment`](../src/small_instance_reassignment.py).
+
 ## 6. Publication and downstream boundary
 
 ```mermaid
