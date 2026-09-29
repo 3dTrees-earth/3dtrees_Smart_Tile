@@ -63,13 +63,36 @@ an offset is never added twice. Co-locate the tree tables with the LAZ inputs
 for another merge/filter pass. Unfiltered baseline files retain source labels;
 they supply geometry for coverage validation, not final output IDs.
 
-Standalone remap accepts the encoded tiles and transfers their IDs unchanged.
+Standalone remap accepts the encoded tiles and uses those IDs to resolve trees.
 It checks collection namespace headers first and validates labels during the
 indexing read, avoiding a second decompression pass over the prediction files.
 A legacy collection of multiple unencoded RCT tiles is rejected with a request
 to rerun merge/filter with its tree files. The intermediate merge task still
 requires `--skip-merged-file`; original enrichment is the supported path to put
 predictions from multiple RCT tiles into one original cloud.
+
+### Final compact IDs and per-original tables
+
+After remapping, collect the positive IDs represented in all enriched originals,
+sort them and map them to `1..N` once for the dataset. Keep background `0`.
+Apply the mapping to each original LAZ and both accompanying tree tables. A
+shared tree retains its compact ID in every original; each table includes only
+the trees present in its paired original. Empty originals have empty tables.
+Intermediate encoded tiles and their tables remain unchanged and reusable.
+
+`rct_instance_mapping.json` preserves source identity and per-original counts
+and filenames; final LAZ VLR 24003 declares dataset-wide compact IDs. Per-file
+counts use distinct positive IDs, since global IDs can have gaps within a file.
+The finalization performs one additional bounded read/write pass over enriched
+clouds. The ID census is collected during remap, and QSM payloads are held in a
+temporary SQLite catalogue instead of loading all models into memory.
+
+Standalone remap requires both tree tables, either alongside its predictions or
+at the merge manifest's `rct_tree_sidecars` location. Legacy manifests fall back
+to the sibling `segmented_filtered/` folder. Missing rows, inconsistent table
+IDs/columns and ambiguous original stems prevent publication. All final products
+are staged together. A retained QSM is copied intact into each relevant original's
+table; renumbering does not assess QSM quality or reconstruct clipped geometry.
 
 ## Why both tiles can remove the same points
 

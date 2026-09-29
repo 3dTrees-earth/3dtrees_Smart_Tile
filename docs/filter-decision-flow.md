@@ -184,7 +184,7 @@ Source: [`namespace_rct_tiles`](../src/raycloud_instance_ids.py),
 
 ## 5. Non-RCT reconciliation and point filtering
 
-### 5a. Matching instances and selecting one source owner
+### 5a. Matching instances and retaining combined geometry
 
 ```mermaid
 flowchart TD
@@ -204,9 +204,8 @@ flowchart TD
     UNION --> IDS["Assign deterministic positive global group IDs; 0 stays background"]
     SINGLE --> IDS
     DISTINCT -. "After all pairs and edges" .-> IDS
-    IDS --> OWNER["Pick one source instance per group: highest recovery admission score, then tile/local order"]
-    OWNER --> DROP["Drop other member copies; keep owner's full geometry and attributes"]
-    DROP --> NEXT["Continue to point-level processing"]
+    IDS --> GEOMETRY["Keep every member's geometry under the shared group ID, including recovered unique tails"]
+    GEOMETRY --> NEXT["Resolve shared records per point; never drop whole merged members"]
 ```
 
 The default overlap threshold is **0.3** (`--overlap-threshold`). The 5 cm
@@ -218,15 +217,16 @@ descending correspondence count after normal/normal edges, with stable ties.
 
 `--disable-matching` disables cross-tile unions. It does **not** disable recovery,
 global ID allocation, shared-point ownership or deduplication for non-RCT.
-Species and other semantics follow the selected owner; there is no majority
-vote or automatic preference for the largest tree.
+Every accepted transitive group has one ID and the union of its members’ geometry.
+Unique points keep their source attributes. At shared points, the owning tile
+supplies the surviving record and its semantics; there is no majority vote.
 
 ### 5b. Resolving shared points and removing duplicates
 
 ```mermaid
 flowchart TD
-    A["Selected source instances"] --> B{"More than one tile?"}
-    B -->|Yes| C["Tree/tree pass: compare distinct positive claims within 1 cm in declared overlaps"]
+    A["All retained and recovered group members"] --> B{"More than one tile?"}
+    B -->|Yes| C["Tree/tree pass: compare positive claims, including the same group, within 1 cm in declared overlaps"]
     C --> D{"Another retained claimant wins by XY distance to its closed core, then tile order?"}
     D -->|Yes, valid at both nearby records| E["Remove the losing source point; winner keeps its attributes"]
     D -->|No| F["Keep point, including unshared buffer tails"]
@@ -265,7 +265,7 @@ flowchart TD
   required claim sample, not necessarily the candidate's original local ID.
 
 Source: [`reconcile_instances`, `deduplicate`](../src/dense_tile_merge.py),
-[`instance_owners`, `assign_shared_points`](../src/dense_instance_ownership.py),
+[`assign_shared_points`](../src/dense_instance_ownership.py),
 [`PointIndex.conflicting_match`](../src/bounded_point_index.py).
 
 ## 6. Publication and downstream boundary

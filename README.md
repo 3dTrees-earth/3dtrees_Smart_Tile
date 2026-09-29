@@ -96,7 +96,7 @@ when no retained or recovered tree claims any candidate point within 1 cm.
 - **Point-level buffer deduplication** - retains points of owned instances without a final, label-consistent survivor within 1 cm
 - **Overlap ratio matching** - identifies same trees across tile boundaries using point correspondence
 - **Union-Find algorithm** - efficiently groups matched instances into unified trees
-- **Species ID preservation** - keeps per-point semantics from the selected source owner
+- **Species ID preservation** - keeps per-point semantics from the tile owning each point
 - **Whole-instance recovery** - restores rejected trees supplying unsupported core geometry; RCT additionally requires no ownership conflict anywhere in the candidate
 - **Original file remapping** - maps predictions back to original input files
 
@@ -251,7 +251,8 @@ Each filtered LAZ carries an RCT namespace VLR, also described in
 `smarttile_merge.json`. A later filter pass retains that namespace without
 adding the offset again. Co-locate its tree tables with the input LAZ files for
 that pass. Keep `--skip-merged-file` for the intermediate merge task; final
-original remap combines predictions using their encoded IDs. Older collections
+original remap combines predictions using their encoded IDs, then compacts final
+IDs as described below. Older collections
 of multiple unencoded RCT tiles must be regenerated with merge/filter and their
 tree files before standalone remap, to prevent publishing ambiguous IDs.
 
@@ -261,6 +262,31 @@ An RCT point with no surviving prediction inside
 the matching radius receives `PredInstance_RCT=0` (and zero for any other RCT
 prediction fields). The report records unmatched counts and example coordinates.
 Unfiltered 1 cm baseline coverage remains mandatory.
+
+Final RCT originals use **one compact ID mapping across the dataset**, sorted by
+the intermediate encoded IDs actually represented in those originals: `1..N`,
+with background `0`. A tree appearing in two originals has the same ID in both.
+This changes identifiers only; tree membership, semantics and QSM payloads remain
+unchanged. Intermediate tiles and their tables keep their encoded namespaces.
+
+Each enriched original has matching `<original-stem>_trees.txt` and
+`<original-stem>_trees_info.txt` beside it, containing exactly its represented
+positive IDs. Even an original with no trees gets valid empty tables. Original
+filenames must have distinct stems. Both sidecars are required for final remap;
+keep them co-located with the prediction tiles or preserve the merge manifest's
+`rct_tree_sidecars` relative path to `segmented_filtered/`.
+
+`rct_instance_mapping.json` records final IDs, source IDs/tile/local IDs, source
+filenames, per-file table paths and distinct-tree counts. Final LAZ files carry
+a compact-ID VLR (`3DTrees`, record 24003) referring to this mapping. Count
+**distinct positive IDs**, never the maximum: one original may contain only IDs
+7 and 12 even though IDs are compact across the full dataset.
+
+Trees shared across originals appear in each relevant table with their full
+retained source QSM. An original-file split does not itself imply poor QSM
+quality. Geometry near source model boundaries may be incomplete; QSM quality
+is not assessed by this renumbering step. All final LAZ files, tables and the
+mapping are staged and validated together before publication.
 
 Overlapping tiles can assign the same point to different trees, each rejected
 by its own tile's core-ownership check. The neighboring tiles may still retain
@@ -618,22 +644,25 @@ Use model-specific prediction dimension names before the final original remap.
    source filename and local ID order. Background never counts as tree support.
    Other rejected instances do not participate in matching or conflicts.
    `orphan_recovery` reports candidates, admissions and the final support check.
-3. **Reconcile retained IDs and select their owners.** Within declared tile overlaps,
+3. **Reconcile retained IDs and preserve combined geometry (without tree files).** Within declared tile overlaps,
    use 0.05 m correspondences and mutual-best instance pairs meeting the configured
    overlap threshold (default 30% of the smaller instance). Group matches
    deterministically; a group cannot contain different instances from one tile.
    Ambiguous pairs stay distinct. Recovery cannot bridge two groups that were
    distinct among normally retained instances; rejected bridges are reported.
-   For a group with recovered members, select
-   the member that supplies the most newly covered core samples; otherwise
-   select the first retained tile in stable source-filename order. Remove
-   secondary copies. If this loses required recovered geometry, fail explicitly.
-   Preserve the owner’s
-   per-point semantic values and other attributes without voting or blending.
-   Record owners and removals in `semantic_ownership`. Labels use uint16,
-   promoted to uint32 when needed.
+   Supplying paired tree/tree-info files selects the separate membership-preserving
+   RCT path: no group merging, point reassignment or deduplication, even when
+   matching is enabled. The rules below apply only without these files.
+   Assign **one shared ID to every member of each accepted group**, including
+   transitive groups: A–B and B–C produce one A+B+C ID. Keep every member's
+   unique geometry, including recovered tails. Never remove an entire member
+   because another member was selected as a source. Shared points use the tile
+   ownership rule below to select the surviving record and all its attributes;
+   semantics are per point, without voting or blending. `semantic_ownership`
+   records this policy. Labels use uint16, promoted to uint32 when needed.
 4. **Assign shared points, then deduplicate.** Within declared buffered tile
-   overlaps, resolve points claimed by distinct positive instances using the
+   overlaps, resolve points claimed by positive instances, including members of the same
+   merged group, using the
    nearest claimant core: among retained tree claims within **0.01 m XYZ**,
    choose the tile with the smallest XY distance to its closed core rectangle.
    Break equal-distance ties by stable source filename order, including shared
@@ -673,7 +702,9 @@ Use model-specific prediction dimension names before the final original remap.
 Distance comparisons are inclusive and use an explicit eight-ULP float64
 roundoff guard after removing the common coordinate offset. This numerical guard
 is shared by transfer, deduplication and coverage; it is not a configurable
-spatial relaxation. Nearest ties choose the earlier tile and then source point.
+spatial relaxation. Nearest ties within that numerical allowance of the true
+minimum distance choose the earlier tile and then source point. This prevents
+header-offset roundoff from changing attributes at coincident tile points.
 
 The dense implementation is sequential and disk-backed. A fixed 32,768-point
 limit applies to stored/query batches, while small instance correspondence maps
@@ -688,7 +719,7 @@ per-original/per-model coverage and distance histograms, checksums, and CPU/wall
 time. `output_tiles_unfiltered_1cm/` preserves baseline geometry.
 `smarttile_merge.json` points to that baseline for a later strict remap.
 
-Strict merge uses contract `3DT-2183/v7-orphan-recovery` (the standalone
+Strict merge uses contract `3DT-2183/v8-group-geometry` (the standalone
 filter still uses normal core ownership). Full-instance anchor positions,
 retained/removed IDs, source and point counts are recorded in
 `instance_ownership`; admissions and post-dedup support are recorded in
@@ -1224,3 +1255,53 @@ If you use this pipeline in your research, please cite:
 COPC subsampling window bounds clamp the last grid edge to the actual LAS maximum.
 A non-advancing floating-point step raises an error rather than repeatedly appending
 windows (the dataset 3083 memory failure).
+
+### v2.4a final instance IDs and integration validation
+
+Final original remap compacts positive instance IDs independently for **every
+model** across the complete original collection. Background remains 0; the same
+instance keeps the same ID across original-file boundaries. Compaction changes
+labels only, preserving point membership, semantics and species attributes.
+`instance_mapping.json` links final IDs to intermediate IDs. RCT also exports
+aligned per-original tree/treeinfo tables and its source-tile mapping.
+Intermediate filtered tiles keep their existing IDs for traceability.
+
+An explicit `--grid-origin-x` / `--grid-origin-y` pair can position the tile grid;
+its southwest origin must cover the source minimum. The default remains a grid
+starting at the source minimum.
+
+See [the GFZ integration suite](tests/integration/gfz/README.md) for the real-file
+four-tile, three-model filter → DetailView → original-remap validation.
+
+### Spatial-query cache
+
+Immutable nearest-neighbor queries can reuse trees for 4 m XY regions. The cache
+is shared across active indexes within each process; its default accounting cap
+is 512 MiB, reduced according to the cgroup memory limit and maximum remap worker
+count. Oversized regions use the disk-backed query path. Insertions invalidate
+cached geometry. Set `SMARTTILE_SPATIAL_CACHE_MB=0` to disable caching for
+differential validation, or a nonnegative MiB value to request a different cap
+(the allocation-derived ceiling still applies). This is a cache budget, not a
+limit on total application memory.
+
+Merge reports include per-model `phase_seconds` for transfer/indexing, core
+filtering, recovery, reconciliation, shared-point ownership and deduplication.
+Dense and retained outputs are indexed as they are written, avoiding an extra
+LAZ decompression pass. Model namespaces, merge criteria and tree-file protection
+are unchanged.
+
+### Parallel original enrichment
+
+`--workers` also caps original-remap processes when originals are supplied to
+`merge` or `filter`, using the same implementation as standalone `remap`.
+Each worker opens immutable indexes read-only and uses one spatial-query thread;
+only the parent writes outputs, in original point order. At most two batches per
+worker may be pending. Inputs too small for a full batch per worker use fewer
+processes. The report records `parallelism.enrichment_processes`,
+`enrichment_query_workers`, and `max_pending_batches`.
+
+The GFZ real-data subset used about 0.78 / 1.12 / 1.51 GiB peak container memory
+with 1 / 2 / 4 remap processes; remap time was 28.9 / 15.3 / 9.1 seconds.
+Four workers gave the fastest measured run; two used less memory. These are
+subset measurements, not a full-cloud speedup guarantee. See
+[validation details](docs/validation/gfz-remap-worker-optimization.md).

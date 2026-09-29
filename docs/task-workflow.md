@@ -61,8 +61,8 @@ flowchart TD
     OWN --> BG["Background points use half-open core ownership"]
     BG --> MODEL{"RCT with paired tree files?"}
     MODEL -->|"No"| RECOVER["Recover rejected whole trees supplying unsupported core samples"]
-    RECOVER --> MATCH["Reconcile matching instances across tile overlaps; select one source owner"]
-    MATCH --> CLAIMS["Distinct retained tree claims: nearest core wins; stable tile order breaks ties"]
+    RECOVER --> MATCH["Reconcile accepted groups to one ID; retain all member geometry"]
+    MATCH --> CLAIMS["Shared tree points, including one group: nearest core wins; stable tile order breaks ties"]
     CLAIMS --> TREEBG["Retained trees override neighboring background"]
     TREEBG --> DEDUP["Remove label-consistent cross-tile duplicates within 1 cm"]
     DEDUP --> CHECK["Verify recovered geometry still has tree support"]

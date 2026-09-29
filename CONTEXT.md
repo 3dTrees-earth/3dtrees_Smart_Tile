@@ -37,14 +37,19 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
   first: 100% assignment within the separately configured 0.1732 m XYZ radius.
 - Remove whole instances whose selected dense anchor is outside their core;
   background uses half-open spatial cores. Reconcile IDs independently per
-  model, selecting one core-owning source per reconciled instance and keeping
-  its semantic values and other attributes.
-- For distinct retained positive instances sharing points within 0.01 m,
+  model without tree sidecars: each accepted transitive group gets one ID and retains every member's
+  unique geometry. Resolve shared points by tile ownership, retaining all
+  attributes of the winning point; never discard a whole merged member.
+- For retained positive instances (including the same merged group) sharing points within 0.01 m,
   assign disputed points to the retained claimant nearest its closed XY core
   rectangle; break equal-distance ties by stable source filename order. A tile
   predicting background or a removed instance cannot win a tree claim. Preserve
   the winner's instance ID and per-point attributes, and retain unshared buffer
   tails. Record these decisions in shared_point_ownership.
+- Declared buffered overlap membership uses the same inclusive eight-ULP
+  per-axis bound allowance for cached sources, disk sources and query points.
+  Derive it from local XY bounds only, independent of batch composition or Z;
+  preserve the geometric matching radius and core ownership boundaries.
 - After tree/tree resolution, retained trees override neighboring background
   within 0.01 m, preserving the tree owner's semantic values and attributes.
   Query actual surviving trees; removed instances cannot override background.
@@ -70,7 +75,8 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
   bounded by scheduler slots, affinity and detected cgroup CPU quotas. Small
   queries stay serial; index writes and model/tile ordering stay deterministic.
   Record the requested and effective query budget in `parallelism`.
-- Standalone strict remap uses CPU-capped batch processes after serial indexing.
+- Standalone strict remap and original enrichment during merge/filter share
+  CPU-capped batch processes after serial indexing.
   Each process opens completed indexes read-only and uses one query thread.
   Admit at most two batches per process, preserve input order with one writer,
   and join workers before deleting scratch indexes. Tiny inputs stay serial.
@@ -80,7 +86,25 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
   candidate scores. Update coverage only near each newly admitted instance,
   keeping the same greedy ranking and stable ties. Report selection work as
   `orphan_recovery.selection_checked_locations`.
-- Dense searches use fixed-size disk-backed spatial batches. Exact production
+- Dense searches keep fixed-size disk-backed batches as the fallback. Immutable
+  nearest queries reuse 4 m XY-region trees in a process-wide LRU cache. The
+  default 512 MiB cache charge is capped by cgroup memory and the maximum remap
+  process count; `SMARTTILE_SPATIAL_CACHE_MB=0` disables it. Inserts invalidate
+  cached regions. Keep source references, overlap masks, positive-label filters,
+  numerical distance bounds and stable ties identical to disk queries.
+- Shared-point ownership reuses bounded region trees filtered by positive labels,
+  overlap and source-side core eligibility; the cache key includes both cores and
+  the origin. Query-side nearest-core ranking is unchanged. Numerical nearest
+  ties use the existing eight-ULP allowance relative to the true minimum distance,
+  with stable tile/point order independent of cache or disk batch partitioning.
+  Original baseline coverage needs only minimum distances, not source identity.
+- Index dense/filtered/shared-owner output records during their write pass;
+  do not reread compressed outputs only to construct an equivalent index.
+- CRS preservation resolves duplicate projection identities with the same
+  last-record precedence as the reader (source EVLRs follow VLRs). Never append
+  a shadowed normalized WKT over an already-preserved original WKT; repeated
+  product conversion must be idempotent. Keep strict CRS validation enabled.
+- Exact production
   replays of 3110/3111 and resource benchmarking remain release obligations.
 
 ## Historical Handoff State (2026-07-08)
@@ -124,11 +148,16 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 - COM/processed merged files are intermediate or diagnostic products. Do not use
   center-of-mass geometry as the authoritative merged product for further
   analysis.
+- Final original enrichment compacts surviving IDs independently per model
+  across the original collection into uint32 1..N, background 0. Preserve
+  memberships and all non-ID fields; publish `instance_mapping.json`. RCT
+  tree/treeinfo tables use the same final mapping, while intermediate tile
+  namespaces remain reusable.
 - Instance labels use the simple contract: `0` is background/no tree, positive
   values are tree instances, and negative labels are invalid.
 - Keep prediction dimension names exactly as supplied. Multi-collection remap
   must fail on duplicate output dimension names instead of auto-renaming.
-- Use `uint16` for prediction labels unless a positive instance value exceeds
+- For intermediate prediction labels, use `uint16` unless a positive instance value exceeds
   `65535`; then use `uint32`.
 
 ## Task Modes
@@ -211,6 +240,14 @@ product.
 - SmartTile assumes upstream tools ensure CRS consistency across input files.
   SmartTile should preserve CRS, not perform semantic CRS reconciliation.
 
+## Tiling process safety
+
+- Core occupancy decodes compressed sources in the parent before tile creation.
+  Both source distribution and COPC finalization must use explicit `spawn`
+  process contexts: Linux `fork` inherits lazrs/Rayon locks without their threads
+  and can deadlock on the first worker read. Keep the compressed multi-chunk
+  occupancy-to-COPC regression; uncompressed or single-chunk fixtures miss this.
+
 ## Subsampling Contract
 
 - `center-of-mass` is the default subsampling method. It averages only XYZ inside
@@ -271,6 +308,12 @@ Before changing product behavior, check:
 - Are README user examples and this context file still aligned?
 
 ## Validation
+
+For optimization work, always validate the candidate image on the full GFZ
+dataset: all four buffered tiles for SAT and ForestMamba, then original remap.
+Small probes supplement this gate; they do not replace it. Record phase wall
+time, container CPU time/peak memory, and exact output equality against the
+saved baseline. Keep inputs read-only and each run isolated.
 
 Fast local validation:
 
