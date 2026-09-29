@@ -15,7 +15,7 @@ _worker_radius = None
 def _query(xyz, indices, baselines, radius):
     results = []
     for index, baseline in zip(indices, baselines):
-        base_distances, _, _ = baseline.nearest(xyz, radius)
+        base_distances = baseline.nearest_distances(xyz, radius)
         if 'PredInstance_RCT' in index.dimensions:
             # A retained/recovered tree wins over neighboring background. This
             # affects original enrichment only; tile memberships stay intact.

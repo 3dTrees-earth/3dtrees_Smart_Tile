@@ -32,14 +32,19 @@ def coordinates(points, header, origin):
     ])
 
 
+def distance_roundoff(xyz):
+    """Float64 coordinate error budget shared by boundaries and nearest ties."""
+    magnitude = max(1.0, float(np.max(np.abs(xyz))) if len(xyz) else 1.0)
+    return 8 * np.spacing(magnitude)
+
+
 def distance_limit(xyz, radius):
     """Inclusive boundary with an explicit float64 roundoff allowance (8 ULPs).
 
     This is a numerical guard in local coordinates, not a spatial tolerance
     setting. It is recorded in the pipeline report and shared by every check.
     """
-    magnitude = max(1.0, float(np.max(np.abs(xyz))) if len(xyz) else 1.0)
-    return radius + 8 * np.spacing(magnitude)
+    return radius + distance_roundoff(xyz)
 
 
 def spatial_batches(xyz):
@@ -79,6 +84,31 @@ class PointIndex:
         """Parallelize large native queries; avoid thread overhead on tiny cells."""
         workers = min(self.query_workers, max(1, len(xyz) // 1024))
         return tree.query(xyz, workers=workers, **kwargs)
+
+    def nearest_in_tree(self, tree, xyz, indices, limit):
+        """Resolve numerical nearest ties by stable source point order.
+
+        Header offsets can change float64 distances by a few ULPs. Use the
+        existing coordinate error budget, while retaining the radius bound.
+        """
+        ds, ns = self.query_tree(tree, xyz, k=2,
+                                 distance_upper_bound=np.nextafter(limit, np.inf))
+        d, nearest = ds[:, 0].copy(), ns[:, 0].copy()
+        roundoff = distance_roundoff(xyz)
+        ambiguous = np.isfinite(ds[:, 1]) & (ds[:, 1] <= d + roundoff)
+        for pos in np.flatnonzero(ambiguous):
+            choices = np.asarray(tree.query_ball_point(
+                xyz[pos], np.nextafter(min(limit, d[pos] + roundoff), np.inf)), dtype=np.int64)
+            exact = np.linalg.norm(tree.data[choices] - xyz[pos], axis=1)
+            eligible = (exact <= limit) & (exact <= exact.min() + roundoff)
+            choices = choices[eligible]
+            if len(choices):
+                nearest[pos] = choices[np.argmin(indices[choices])]
+                d[pos] = np.linalg.norm(tree.data[nearest[pos]] - xyz[pos])
+        numerical = (np.isfinite(ds[:, 1]) & (ds[:, 1] > ds[:, 0])
+                     & (ds[:, 1] <= ds[:, 0] + roundoff))
+        numerical |= np.isfinite(d) & (d != ds[:, 0])
+        return d, nearest, numerical
 
     def close(self):
         self.query_cache.discard(self._cache_owner)
@@ -144,6 +174,34 @@ class PointIndex:
             yield tile_id, {"xyz": arrays["xyz"], "indices": arrays["indices"],
                             "values": {name: arrays[f"value_{i}"] for i, name in enumerate(self.dimensions)}}
 
+    def nearest_distances(self, xyz, radius):
+        """Minimum distances for baseline coverage, without ownership or attributes.
+
+        Baseline validation needs only geometric coverage. Avoid resolving source
+        identity for coincident unfiltered copies from neighboring tiles.
+        """
+        from spatial_query_cache import REGION_SIZE, region_entry
+        distances = np.full(len(xyz), np.inf)
+        for group in spatial_batches(xyz):
+            points = xyz[group]
+            limit = distance_limit(points, radius)
+            cell = tuple(np.floor(points[0, :2] / REGION_SIZE).astype(np.int64))
+            best = np.full(len(points), np.inf)
+            for tile in sorted(self._cache_tiles):
+                entry = None
+                if self._cache_ready and self.query_cache.max_bytes:
+                    entry = region_entry(self, tile, cell, limit, None, None)
+                if entry is not None:
+                    tree, _ = entry
+                    trees = () if tree is None else (tree,)
+                else:
+                    trees = (cKDTree(data['xyz']) for _, data in self.candidates(points, radius, tile=tile))
+                for tree in trees:
+                    d, _ = self.query_tree(tree, points, distance_upper_bound=np.nextafter(limit, np.inf))
+                    best = np.minimum(best, np.where(d <= limit, d, np.inf))
+            distances[group] = best
+        return distances
+
     def covered(self, xyz, radius, *, positive_dimension):
         """Whether any positive tree lies within radius of each query point.
 
@@ -205,6 +263,7 @@ class PointIndex:
         values = {name: np.zeros(len(xyz), dtype=dtype)
                   for name, dtype in self.dimensions.items()}
         refs = np.full((len(xyz), 2), -1, dtype=np.int64)
+        numerical_ties = np.zeros(len(xyz), dtype=bool)
         for group in spatial_batches(xyz):
             pts = xyz[group]
             limit = distance_limit(pts, radius)
@@ -223,32 +282,104 @@ class PointIndex:
                     if not np.any(query_allowed) or not len(data["xyz"]):
                         continue
                 tree = cKDTree(data["xyz"])
-                ds, ns = self.query_tree(tree, pts, k=2, distance_upper_bound=np.nextafter(limit, np.inf))
-                d, nearest = ds[:, 0], ns[:, 0]
+                d, nearest, numerical = self.nearest_in_tree(tree, pts, data['indices'], limit)
                 found = np.isfinite(d) & (d <= limit) & query_allowed
-                # cKDTree does not specify equal-distance tie ordering. Resolve
-                # only ambiguous nearest ties, one point at a time (bounded).
-                for pos in np.flatnonzero(found & (ds[:, 0] == ds[:, 1])):
-                    choices = tree.query_ball_point(pts[pos], np.nextafter(d[pos], np.inf))
-                    if len(choices) > 1:
-                        exact = np.linalg.norm(data["xyz"][choices] - pts[pos], axis=1)
-                        best = np.min(exact)
-                        choices = np.asarray(choices)[exact == best]
-                        nearest[pos] = choices[np.argmin(data["indices"][choices])]
-                        d[pos] = best
                 old = distances[group]
                 old_refs = refs[group]
                 better_ref = ((old_refs[:, 0] < 0) | (tile_id < old_refs[:, 0]) |
                               ((tile_id == old_refs[:, 0]) &
                                (data["indices"][np.minimum(nearest, len(data["indices"]) - 1)] < old_refs[:, 1])))
-                better = found & ((d < old) | ((d == old) & better_ref))
+                roundoff = distance_roundoff(pts)
+                tied = np.abs(np.subtract(d, old, out=np.full_like(d, np.inf), where=np.isfinite(d) & np.isfinite(old))) <= roundoff
+                numerical_ties[group] |= numerical | (tied & (d != old))
+                better = found & ((d < old - roundoff) | (tied & better_ref))
                 chosen = group[better]
                 distances[chosen] = d[better]
                 refs[chosen, 0] = tile_id
                 refs[chosen, 1] = data["indices"][nearest[better]]
                 for name in values:
                     values[name][chosen] = data["values"][name][nearest[better]]
+        self.resolve_numerical_ties(xyz, radius, numerical_ties, distances, values, refs,
+                                    tile=tile, before_tile=before_tile, overlaps=overlaps,
+                                    positive_dimension=positive_dimension)
         return distances, values, refs
+
+    def resolve_numerical_ties(self, xyz, radius, ambiguous, distances, values, refs,
+                               *, tile=None, before_tile=None, overlaps=None,
+                               positive_dimension=None):
+        """Resolve rare non-exact ties against the global minimum in two passes.
+
+        A chain of pairwise-close distances is not an equivalence relation.
+        Anchor the tie set to the true minimum, independently of cache regions
+        and SQLite batch boundaries. Both passes hold one stored batch at a time.
+        """
+        if not np.any(ambiguous):
+            return
+        for group in spatial_batches(xyz):
+            positions = group[ambiguous[group]]
+            if not len(positions):
+                continue
+            points = xyz[positions]
+            limit = distance_limit(xyz[group], radius)
+            roundoff = distance_roundoff(xyz[group])
+
+            def candidates():
+                from spatial_query_cache import REGION_SIZE, region_entry
+                cell = tuple(np.floor(points[0, :2] / REGION_SIZE).astype(np.int64))
+                sources = [tile] if tile is not None else sorted(self._cache_tiles)
+                for source in sources:
+                    if before_tile is not None and source >= before_tile:
+                        continue
+                    if overlaps is not None and source not in overlaps:
+                        continue
+                    bounds = None if overlaps is None else overlaps[source]
+                    allowed = np.ones(len(points), dtype=bool) if bounds is None else inside_xy(points, bounds)
+                    if not np.any(allowed):
+                        continue
+                    entry = None
+                    if self._cache_ready and self.query_cache.max_bytes:
+                        entry = region_entry(self, source, cell, limit, positive_dimension, bounds)
+                    if entry is not None:
+                        tree, payload = entry
+                        if tree is not None:
+                            data = {'xyz': payload['xyz'], 'indices': payload['indices'],
+                                    'values': {name: payload[f'value_{i}'] for i, name in enumerate(self.dimensions)}}
+                            yield source, data, allowed, tree
+                        continue
+                    for _, data in self.candidates(points, radius, tile=source):
+                        selected = np.ones(len(data['xyz']), dtype=bool)
+                        if positive_dimension is not None:
+                            selected &= data['values'][positive_dimension] > 0
+                        if bounds is not None:
+                            selected &= inside_xy(data['xyz'], bounds)
+                        if np.any(selected):
+                            data = select_data(data, selected)
+                            yield source, data, allowed, cKDTree(data['xyz'])
+
+            minimum = np.full(len(points), np.inf)
+            for _, data, allowed, tree in candidates():
+                d, _ = self.query_tree(tree, points,
+                                       distance_upper_bound=np.nextafter(limit, np.inf))
+                minimum[allowed] = np.minimum(minimum[allowed], d[allowed])
+            refs[positions] = -1
+            for source, data, allowed, tree in candidates():
+                for i in np.flatnonzero(allowed & np.isfinite(minimum)):
+                    ceiling = min(limit, minimum[i] + roundoff)
+                    choices = np.asarray(tree.query_ball_point(points[i], np.nextafter(ceiling, np.inf)), dtype=np.int64)
+                    if not len(choices):
+                        continue
+                    exact = np.linalg.norm(data['xyz'][choices] - points[i], axis=1)
+                    choices = choices[exact <= ceiling]
+                    if not len(choices):
+                        continue
+                    chosen = choices[np.argmin(data['indices'][choices])]
+                    ref = (source, int(data['indices'][chosen]))
+                    pos = positions[i]
+                    if refs[pos, 0] < 0 or ref < tuple(refs[pos]):
+                        refs[pos] = ref
+                        distances[pos] = np.linalg.norm(data['xyz'][chosen] - points[i])
+                        for name in values:
+                            values[name][pos] = data['values'][name][chosen]
 
     def conflicting_match(self, xyz, labels, radius, *, before_tile, map_labels, overlaps=None,
                           background_semantics_owned=False, core_preferred=None):
@@ -284,8 +415,9 @@ class PointIndex:
                         other_pts = data["xyz"][subset[nearest]]
                         separate_owners = (core_preferred(None, tile, pts) &
                                            core_preferred(tile, None, other_pts))
-                        disagrees &= ~((labels[group, 0] > 0) & (label[0] > 0) &
-                                       (labels[group, 0] != label[0]) & separate_owners)
+                        # Adjacent records can keep different per-point semantics
+                        # even within one merged tree when each owns its location.
+                        disagrees &= ~((labels[group, 0] > 0) & (label[0] > 0) & separate_owners)
                     conflict = (d <= limit) & query_allowed & disagrees
                     if np.any(conflict):
                         pos = int(np.flatnonzero(conflict)[0])
@@ -297,8 +429,18 @@ class PointIndex:
 
 
 def inside_xy(xyz, bounds):
-    lo, hi = bounds
-    return np.all((xyz[:, :2] >= lo) & (xyz[:, :2] <= hi), axis=1)
+    """Inclusive overlap membership with a fixed per-axis roundoff allowance.
+
+    Equivalent LAS coordinates can straddle a declared bound by a few ULPs
+    after offset conversion. Derive the allowance only from the local bounds,
+    so cache contents, query batch composition and Z cannot change membership.
+    This numerical guard does not change the point-matching radius or cores.
+    """
+    lo, hi = np.asarray(bounds, dtype=np.float64)
+    magnitude = np.maximum(1., np.maximum(np.abs(lo), np.abs(hi)))
+    allowance = 8 * np.spacing(magnitude)
+    return np.all((xyz[:, :2] >= lo - allowance) &
+                  (xyz[:, :2] <= hi + allowance), axis=1)
 
 
 def select_data(data, mask):

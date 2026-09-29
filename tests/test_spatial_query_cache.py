@@ -50,6 +50,31 @@ class QueryCacheTests(unittest.TestCase):
                 q=np.array([[8.,0,0]])
                 np.testing.assert_array_equal(idx.nearest(q,.01)[2],idx._nearest_batches(q,.01)[2])
 
+    def test_two_collections_keep_separate_ids_with_identical_cached_output(self):
+        from unittest.mock import patch
+        from strict_prediction_pipeline import merge_collections
+        from test_dense_tile_merge import write_cloud
+        from test_strict_prediction_pipeline import layout
+        import laspy
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);collections=[root/'SAT',root/'FM'];originals=root/'originals';originals.mkdir()
+            write_cloud(originals/'a.las',[0,.5,1,1.5,2])
+            for model,folder in zip(('SAT','FM'),collections):
+                folder.mkdir()
+                write_cloud(folder/'a.las',[0,.5,1],[7,7,7],instance='PredInstance_'+model)
+                write_cloud(folder/'b.las',[1,1.5,2],[12,12,12],instance='PredInstance_'+model)
+            for label,pool in [('disk',SpatialQueryCache(0)),('cache',SpatialQueryCache(16*1024**2))]:
+                with patch('spatial_query_cache.shared_cache',return_value=pool):
+                    report=merge_collections(collections=collections,target_dir=None,output_tiles=root/label/'tiles',
+                        tile_bounds_json=layout(root,2),originals=originals,ready=True)
+                self.assertEqual(report['state'],'validated')
+            for rel in ('tiles/model_000/tile_00000.laz','tiles/model_001/tile_00001.laz','original_with_predictions/a.las'):
+                a,b=laspy.read(root/'disk'/rel),laspy.read(root/'cache'/rel)
+                np.testing.assert_array_equal(a.points.array,b.points.array)
+            cloud=laspy.read(root/'cache/original_with_predictions/a.las')
+            self.assertIn('PredInstance_SAT',cloud.point_format.dimension_names)
+            self.assertIn('PredInstance_FM',cloud.point_format.dimension_names)
+
     def test_eviction_and_randomized_queries_match_disk(self):
         rng=np.random.default_rng(2183)
         with tempfile.TemporaryDirectory() as tmp:

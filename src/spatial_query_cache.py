@@ -123,7 +123,8 @@ def region_entry(index, tile, cell, radius, positive_dimension, bounds, *,
         if positive_dimension is not None:
             mask &= data[f'value_{names.index(positive_dimension)}'] > 0
         if bounds is not None:
-            mask &= np.all((data['xyz'][:, :2] >= bounds[0]) & (data['xyz'][:, :2] <= bounds[1]), axis=1)
+            from bounded_point_index import inside_xy
+            mask &= inside_xy(data['xyz'], bounds)
         if select_points is not None:
             mask &= select_points(data['xyz'])
         selected = data[mask]
@@ -163,12 +164,13 @@ def covered_region(index, xyz, radius, positive_dimension):
 
 def nearest_region(index, xyz, radius, *, tile=None, before_tile=None, overlaps=None, positive_dimension=None):
     """Return exact nearest results for one XY region, or request disk fallback."""
-    from bounded_point_index import distance_limit, inside_xy
+    from bounded_point_index import distance_limit, distance_roundoff, inside_xy
     cell = tuple(np.floor(xyz[0, :2] / REGION_SIZE).astype(np.int64))
     limit = distance_limit(xyz, radius)
     dists = np.full(len(xyz), np.inf)
     refs = np.full((len(xyz), 2), -1, dtype=np.int64)
     values = {name: np.zeros(len(xyz), dtype=dtype) for name, dtype in index.dimensions.items()}
+    numerical_ties = np.zeros(len(xyz), dtype=bool)
     tiles = [tile] if tile is not None else sorted(index._cache_tiles)
     for source in tiles:
         if before_tile is not None and source >= before_tile:
@@ -185,22 +187,21 @@ def nearest_region(index, xyz, radius, *, tile=None, before_tile=None, overlaps=
         tree, data = entry
         if tree is None:
             continue
-        ds, ns = index.query_tree(tree, xyz, k=2, distance_upper_bound=np.nextafter(limit, np.inf))
-        d, nearest = ds[:, 0], ns[:, 0]
+        d, nearest, numerical = index.nearest_in_tree(tree, xyz, data['indices'], limit)
         found = np.isfinite(d) & (d <= limit) & allowed
-        for pos in np.flatnonzero(found & (ds[:, 0] == ds[:, 1])):
-            choices = np.asarray(tree.query_ball_point(xyz[pos], np.nextafter(d[pos], np.inf)))
-            exact = np.linalg.norm(data['xyz'][choices] - xyz[pos], axis=1)
-            choices = choices[exact == exact.min()]
-            nearest[pos] = choices[np.argmin(data['indices'][choices])]
-            d[pos] = exact.min()
         safe = np.minimum(nearest, len(data) - 1)
         better_ref = ((refs[:, 0] < 0) | (source < refs[:, 0]) |
                       ((source == refs[:, 0]) & (data['indices'][safe] < refs[:, 1])))
-        take = found & ((d < dists) | ((d == dists) & better_ref))
+        roundoff = distance_roundoff(xyz)
+        tied = np.abs(np.subtract(d, dists, out=np.full_like(d, np.inf), where=np.isfinite(d) & np.isfinite(dists))) <= roundoff
+        numerical_ties |= numerical | (tied & (d != dists))
+        take = found & ((d < dists - roundoff) | (tied & better_ref))
         dists[take] = d[take]
         refs[take, 0] = source
         refs[take, 1] = data['indices'][nearest[take]]
         for i, name in enumerate(values):
             values[name][take] = data[f'value_{i}'][nearest[take]]
+    index.resolve_numerical_ties(xyz, radius, numerical_ties, dists, values, refs,
+                                 tile=tile, before_tile=before_tile, overlaps=overlaps,
+                                 positive_dimension=positive_dimension)
     return dists, values, refs
