@@ -167,7 +167,9 @@ def filter_owned_instances(model, files, regions, output_dir, index, origin, rep
         for uid, (size, value, lower, upper) in sorted(aggregates.items()):
             point = (value / size if anchor == "centroid" else value) + origin
             keep = owned_anchor(point[:2], region)
-            decisions.append({"instance": uid, "points": size, "anchor_xyz": point.tolist(),
+            # Ownership is horizontal: a centroid anchor acts as the XY centroid.
+            decisions.append({"instance": uid, "points": size, "anchor_xy": point[:2].tolist(),
+                              "anchor_xyz": point.tolist(),
                               "bbox_xyz": [(lower + origin).tolist(), (upper + origin).tolist()],
                               "source_prediction": report["tile_sources"][tile]["prediction"],
                               "normal_kept": keep, "kept": keep,
