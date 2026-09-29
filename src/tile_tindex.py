@@ -159,6 +159,7 @@ def calculate_tile_bounds(
     tile_buffer: float,
     output_dir: Path,
     grid_offset: float = 1.0,
+    grid_origin=None,
 ) -> Tuple[Path, Path, dict]:
     """Calculate tile jobs and bounds JSON from a tindex."""
     print()
@@ -179,6 +180,9 @@ def calculate_tile_bounds(
         f"--bounds-out={bounds_json}",
         f"--grid-offset={grid_offset}",
     ]
+
+    if grid_origin is not None:
+        cmd += ["--grid-origin", *map(str, grid_origin)]
 
     print(f"  Tile length: {tile_length}m")
     print(f"  Tile buffer: {tile_buffer}m")

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import multiprocessing
 import os
 import shutil
 import sys
@@ -534,7 +535,11 @@ def create_tiles(
     print()
 
     tile_point_counts: Dict[str, int] = {}
-    with ProcessPoolExecutor(max_workers=source_parallel) as executor:
+    # Core occupancy already decoded LAZ in this process. Forking would inherit
+    # Rayon locks without their threads; start fresh workers for both phases.
+    with ProcessPoolExecutor(
+        max_workers=source_parallel, mp_context=multiprocessing.get_context("spawn")
+    ) as executor:
         futures = {
             executor.submit(_distribute_source_file, task): Path(task[1]).name
             for task in distribute_tasks
@@ -569,7 +574,9 @@ def create_tiles(
     failed = 0
     skipped = 0
 
-    with ProcessPoolExecutor(max_workers=tile_parallel) as executor:
+    with ProcessPoolExecutor(
+        max_workers=tile_parallel, mp_context=multiprocessing.get_context("spawn")
+    ) as executor:
         futures = {
             executor.submit(_finalize_tile_to_copc, task): task[0]
             for task in finalize_tasks
@@ -607,6 +614,7 @@ def run_tiling_pipeline(
     dimension_reduction: bool = True,  # Ignored (kept for API compatibility)
     tiling_threshold: float = None,
     chunk_size: int = 2_000_000,
+    grid_origin=None,
 ) -> Path:
     """
     Run the complete tiling pipeline.
@@ -678,7 +686,7 @@ def run_tiling_pipeline(
 
     # Step 2: Calculate tile bounds
     jobs_file, bounds_json, env = calculate_tile_bounds(
-        tindex_file, tile_length, tile_buffer, output_dir, grid_offset
+        tindex_file, tile_length, tile_buffer, output_dir, grid_offset, grid_origin
     )
 
     # Symlink tindex for Galaxy if needed

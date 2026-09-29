@@ -69,6 +69,13 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("tile-length", "tile_length"),
     )
 
+    grid_origin_x: Optional[float] = Field(None, allow_inf_nan=False,
+        description="Optional explicit tile-grid southwest X; supply with grid-origin-y",
+        validation_alias=AliasChoices("grid-origin-x", "grid_origin_x"))
+    grid_origin_y: Optional[float] = Field(None, allow_inf_nan=False,
+        description="Optional explicit tile-grid southwest Y; supply with grid-origin-x",
+        validation_alias=AliasChoices("grid-origin-y", "grid_origin_y"))
+
     tile_buffer: Optional[int] = Field(
         20,
         description="Buffer overlap in meters (only for 'tile' task)",

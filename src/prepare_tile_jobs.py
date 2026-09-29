@@ -33,7 +33,7 @@ def _transformer_from_crs(srs: str):
     return Transformer.from_crs(srs, "EPSG:4326", always_xy=True)
 
 
-def run_get_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, bounds_json_path: Path) -> dict:
+def run_get_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, bounds_json_path: Path, grid_origin=None) -> dict:
     cmd = [
         sys.executable,
         str(Path(__file__).with_name("get_bounds_from_tindex.py")),
@@ -42,6 +42,8 @@ def run_get_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, bo
         f"--tile-buffer={tile_buffer}",
         f"--out={bounds_json_path}",
     ]
+    if grid_origin is not None:
+        cmd += ["--grid-origin", *map(str, grid_origin)]
     print(f"[prepare_tile_jobs] running: {' '.join(cmd)}", file=sys.stderr)
     completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
@@ -132,9 +134,10 @@ def main():
         default=DEFAULT_BOUNDS_JSON,
         help="Path to write the tile bounds JSON file",
     )
+    parser.add_argument("--grid-origin", type=float, nargs=2)
     args = parser.parse_args()
 
-    env = run_get_bounds(args.tindex_path, args.tile_length, args.tile_buffer, args.bounds_out)
+    env = run_get_bounds(args.tindex_path, args.tile_length, args.tile_buffer, args.bounds_out, args.grid_origin)
     bounds_json = args.bounds_out
     write_job_list(bounds_json, args.jobs_out)
 

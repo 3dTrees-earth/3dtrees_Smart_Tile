@@ -73,7 +73,7 @@ def load_extent_from_tindex(tindex_path: Path):
         return (minx, miny, maxx, maxy), srs_info
 
 
-def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False):
+def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, grid_origin=None):
     """Build tile grid.
 
     Args:
@@ -89,7 +89,17 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False):
             f"minx={minx}, miny={miny}, maxx={maxx}, maxy={maxy}."
         )
 
-    if align_to_grid:
+    if length <= 0 or not math.isfinite(length) or buffer < 0 or not math.isfinite(buffer):
+        raise ValueError("Tile length must be positive and buffer nonnegative")
+    if grid_origin is not None:
+        if len(grid_origin) != 2 or not all(math.isfinite(v) for v in grid_origin):
+            raise ValueError("Grid origin must have two finite coordinates")
+        start_x, start_y = grid_origin
+        if start_x > minx or start_y > miny:
+            raise ValueError("Grid origin must not exclude source minimum bounds")
+        end_x = start_x + math.ceil((maxx - start_x) / length) * length
+        end_y = start_y + math.ceil((maxy - start_y) / length) * length
+    elif align_to_grid:
         start_x = math.floor(minx / length) * length
         start_y = math.floor(miny / length) * length
         end_x = math.ceil(maxx / length) * length
@@ -185,6 +195,7 @@ def main():
         default=Path("tile_bounds_tindex.json"),
         help="Where to write the tile bounds JSON summary",
     )
+    parser.add_argument("--grid-origin", type=float, nargs=2)
     args = parser.parse_args()
 
     (minx, miny, maxx, maxy), srs = load_extent_from_tindex(args.tindex_path)
@@ -200,7 +211,7 @@ def main():
     tiles, grid_bounds = build_tiles(
         proj_minx, proj_miny, proj_maxx, proj_maxy,
         args.tile_length, args.tile_buffer,
-        align_to_grid=False,
+        align_to_grid=False, grid_origin=args.grid_origin,
     )
 
     summary = {

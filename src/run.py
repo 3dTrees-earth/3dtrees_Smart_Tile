@@ -289,6 +289,9 @@ def run_tile_task(params: Parameters):
     print()
 
     try:
+        if (params.grid_origin_x is None) != (params.grid_origin_y is None):
+            raise ValueError("Both grid-origin-x and grid-origin-y are required")
+        grid_origin = None if params.grid_origin_x is None else (params.grid_origin_x, params.grid_origin_y)
         # Step 1-4: Tiling pipeline
         tiles_dir = run_tiling_pipeline(
             input_dir=input_dir,
@@ -299,6 +302,7 @@ def run_tile_task(params: Parameters):
             threads=threads,
             max_tile_procs=tile_writer_workers,
             source_file_workers=tile_source_workers,
+            grid_origin=grid_origin,
             dimension_reduction=dimension_reduction,
             tiling_threshold=tiling_threshold,
             chunk_size=chunk_size,
