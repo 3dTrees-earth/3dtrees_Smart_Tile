@@ -134,7 +134,7 @@ class CoreOwnershipTests(unittest.TestCase):
             self.assertEqual([t['surviving'] for t in ownership], [0, 4])
             self.assertAlmostEqual(ownership[0]['instances'][0]['anchor_xyz'][0], 1.025)
 
-    def test_recovered_alias_with_extra_geometry_becomes_owner(self):
+    def test_recovered_alias_keeps_extra_geometry_in_merged_group(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source, originals = root / 'source', root / 'originals'
@@ -146,7 +146,6 @@ class CoreOwnershipTests(unittest.TestCase):
                 tile_bounds_json=core_layout(root), ready=True, originals=originals)
             self.assertEqual(report['state'], 'validated')
             self.assertEqual(report['models'][0]['orphan_recovery']['admitted'][0]['local_instance'], 2)
-            self.assertEqual(report['models'][0]['semantic_ownership']['instances'][0]['tile'], 1)
             enriched = laspy.read(root / 'original_with_predictions/raw.las')
             self.assertGreater(enriched.PredInstance[0], 0)
 
@@ -333,26 +332,24 @@ class CoreOwnershipTests(unittest.TestCase):
             np.testing.assert_array_equal(enriched.PredSemantic, [1, 0, 0])
             self.assertEqual(sum(t['background_removed'] for t in report['models'][0]['instance_ownership']['tiles']), 5)
 
-    def test_reconciled_instance_keeps_one_core_owners_semantics(self):
-        for include_tail in [False, True]:
-            with self.subTest(include_tail=include_tail), tempfile.TemporaryDirectory() as tmp:
+    def test_reconciled_instance_keeps_member_tails_and_point_owner_semantics(self):
+        for shared in [1., 1.1]:
+            with self.subTest(shared=shared), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp); source = root / 'source'; source.mkdir()
                 originals = root / 'originals'; originals.mkdir()
-                write_cloud(source / 'a.las', [.5, 1], [1, 1], [2, 3])
-                write_cloud(source / 'b.las', [1, 1.5], [7, 7], [9, 9])
-                write_cloud(originals / 'raw.las', [.5, 1, 1.5] if include_tail else [.5, 1])
-                kwargs = dict(collections=[source], target_dir=None, output_tiles=root / 'out',
-                              tile_bounds_json=core_layout(root), ready=True, originals=originals)
-                if include_tail:
-                    with self.assertRaisesRegex(ValueError, '100% original coverage'):
-                        merge_collections(**kwargs)
-                    self.assertFalse((root / 'out').exists())
-                else:
-                    report = merge_collections(**kwargs)
-                    enriched = laspy.read(root / 'original_with_predictions/raw.las')
-                    np.testing.assert_array_equal(enriched.PredSemantic, [2, 3])
-                    self.assertEqual(len(laspy.read(root / 'out/tile_00001.laz').points), 0)
-                    self.assertEqual(report['models'][0]['semantic_ownership']['instances'][0]['tile'], 0)
+                write_cloud(source / 'a.las', [.5, shared], [1, 1], [2, 3])
+                write_cloud(source / 'b.las', [shared, 1.5], [7, 7], [9, 9])
+                write_cloud(originals / 'raw.las', [.5, shared, 1.5])
+                report = merge_collections(collections=[source], target_dir=None, output_tiles=root / 'out',
+                    tile_bounds_json=core_layout(root), ready=True, originals=originals)
+                self.assertEqual(report['state'], 'validated')
+                enriched = laspy.read(root / 'original_with_predictions/raw.las')
+                np.testing.assert_array_equal(enriched.PredInstance, [1, 1, 1])
+                np.testing.assert_array_equal(enriched.PredSemantic, [2, 3 if shared == 1. else 9, 9])
+                clouds = [laspy.read(p) for p in sorted((root/'out').glob('*.laz'))]
+                self.assertEqual(sum(len(c.points) for c in clouds), 3)
+                winner = next(c for c in clouds if np.any(np.isclose(c.x, shared)))
+                self.assertEqual(winner.intensity[np.isclose(winner.x, shared)][0], 6 if shared == 1. else 5)
 
     def test_background_subset_does_not_take_missing_neighbors_semantics(self):
         with tempfile.TemporaryDirectory() as tmp:

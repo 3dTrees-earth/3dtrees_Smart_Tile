@@ -74,6 +74,7 @@ def test_strict_remap_enriches_legacy_original_and_preserves_point_fields(tmp_pa
     np.testing.assert_array_equal(before.header.offsets, after.header.offsets)
     for name in before.points.array.dtype.names:
         np.testing.assert_array_equal(before.points.array[name], after.points.array[name])
-    np.testing.assert_array_equal(after.PredInstance, [7, 7])
+    np.testing.assert_array_equal(after.PredInstance, [1, 1])
+    assert report["instance_finalization"]["counts"]["PredInstance"] == 1
     np.testing.assert_array_equal(after.PredSemantic, [3, 3])
     assert any(v.record_data_bytes() == b"keep" for v in after.header.vlrs)

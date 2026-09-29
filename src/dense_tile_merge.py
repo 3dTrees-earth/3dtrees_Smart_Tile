@@ -8,7 +8,7 @@ from pathlib import Path
 import laspy
 import numpy as np
 
-from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates
+from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates, inside_xy, spatial_batches
 from point_cloud_metadata import (
     copy_single_source_header, extra_bytes_params_from_dimension_info, extra_bytes_attribute_equal,
     update_extra_dimensions, write_retained_evlrs,
@@ -168,6 +168,7 @@ def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, repo
                       "total": 0, "matched": 0, "missing_examples": [],
                       "radius_m": None if ready else transfer_radius}
             report.setdefault("transfer", []).append(metric)
+            indexed_offset = 0
             with laspy.open(target) as reader:
                 header = target_header(reader.header, model, ready=ready)
                 with laspy.open(output, mode="w", header=header) as writer:
@@ -188,6 +189,7 @@ def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, repo
                         for name, data in values.items():
                             out.array[name] = data
                         writer.write_points(out)
+                        indexed_offset = index_written_record(index, out, tile, header, origin, model, indexed_offset)
                         ids, sizes = np.unique(values[model.instance], return_counts=True)
                         counts.update({(tile, int(i)): int(n) for i, n in zip(ids, sizes) if i > 0})
                     write_retained_evlrs(writer, header)
@@ -196,8 +198,49 @@ def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, repo
                                  f"{metric['matched']}/{metric['total']} within {transfer_radius} m")
         source_index_path.unlink()
         files.append(output)
-        index_file(index, output, tile, origin, model)
+        index.flush()
     return files, counts
+
+
+def _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics):
+    """Read a query tile once and accumulate all earlier-neighbor matches.
+
+    Prune whole XY query groups only. Retaining every point in a selected group
+    preserves its numerical distance allowance, even when background/high-Z
+    points set that allowance. Source background remains a nearest candidate.
+    """
+    neighbors = [other for other in range(tile)
+                 if overlaps is None or other in overlaps[tile]]
+    counters = {other: Counter() for other in neighbors}
+    if not neighbors:
+        return counters
+    metrics['files_read'] += 1
+    with laspy.open(file) as reader:
+        for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+            xyz = coordinates(record, reader.header, origin)
+            left = np.asarray(record[model.instance])
+            groups = list(spatial_batches(xyz))
+            metrics['points_read'] += len(record)
+            for other in neighbors:
+                eligible = left > 0
+                if overlaps is not None:
+                    eligible &= inside_xy(xyz, overlaps[tile][other])
+                selected = [group for group in groups if np.any(eligible[group])]
+                positions = np.concatenate(selected) if selected else np.empty(0, dtype=np.int64)
+                metrics['query_points'] += len(positions)
+                metrics['skipped_query_points'] += len(record) - len(positions)
+                if not len(positions):
+                    continue
+                d, values, _ = index.nearest(xyz[positions], radius, tile=other,
+                                             overlaps=None if overlaps is None else overlaps[tile])
+                right = values[model.instance]
+                labels = left[positions]
+                matched = np.isfinite(d) & (labels > 0) & (right > 0)
+                if np.any(matched):
+                    ids, sizes = np.unique(np.column_stack((labels[matched], right[matched])),
+                                           axis=0, return_counts=True)
+                    counters[other].update({tuple(map(int, pair)): int(n) for pair, n in zip(ids, sizes)})
+    return counters
 
 
 def reconcile_instances(model, files, index, origin, counts, overlap_threshold, radius, report, *,
@@ -209,7 +252,8 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
     ambiguous matches remain distinct for point ownership and conflict checks.
     Geometry is never removed during reconciliation. With recovered candidates,
     establish normal groups first and forbid a recovered path from joining two
-    groups that were distinct before recovery.
+    groups that were distinct before recovery. Accepted groups retain every
+    member's geometry; shared-point ownership chooses only duplicate records.
     """
     parent = {key: key for key in sorted(counts)}
     members = {key: {key[0]: key[1]} for key in parent}
@@ -222,22 +266,11 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
         return key
 
     edges = []
+    metrics = dict(files_read=0, points_read=0, query_points=0, skipped_query_points=0)
     if enabled:
         for tile, file in enumerate(files):
-            for other in range(tile):
-                if overlaps is not None and other not in overlaps[tile]:
-                    continue
-                pairs = Counter()
-                with laspy.open(file) as reader:
-                    for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-                        xyz = coordinates(record, reader.header, origin)
-                        d, values, _ = index.nearest(xyz, radius, tile=other,
-                                                     overlaps=None if overlaps is None else overlaps[tile])
-                        left, right = np.asarray(record[model.instance]), values[model.instance]
-                        mask = np.isfinite(d) & (left > 0) & (right > 0)
-                        if np.any(mask):
-                            ids, sizes = np.unique(np.column_stack((left[mask], right[mask])), axis=0, return_counts=True)
-                            pairs.update({tuple(map(int, pair)): int(n) for pair, n in zip(ids, sizes)})
+            counters = _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics)
+            for other, pairs in counters.items():
                 by_left, by_right = defaultdict(list), defaultdict(list)
                 for (a, b), n in pairs.items():
                     by_left[a].append((n, b))
@@ -288,6 +321,7 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
                                 "rejected_recovery_bridge_count": rejected_bridge_count,
                                 "rejected_recovery_bridges": rejected_bridges,
                                 "ids": [[tile, local, final] for (tile, local), final in mapping.items()]}
+    report["reconciliation"].update(metrics)
     return mapping
 
 

@@ -57,7 +57,7 @@ class StrictPipelineTests(unittest.TestCase):
                                   originals=originals, output=root / "enriched")
             self.assertAlmostEqual(report["original_radius_m"], np.sqrt(3) * .01)
             self.assertEqual(report["state"], "validated")
-            self.assertEqual(laspy.read(root / "enriched/a.las").PredInstance.tolist(), [7])
+            self.assertEqual(laspy.read(root / "enriched/a.las").PredInstance.tolist(), [1])
             with self.assertRaisesRegex(ValueError, "100% original coverage"):
                 strict_remap(collections=[predictions], baseline_collections=[predictions],
                              originals=originals, output=root / "finer", resolution_1=.005)

@@ -12,7 +12,7 @@ from scipy.spatial import cKDTree
 
 from bounded_point_index import (MAX_BATCH_POINTS, coordinates, distance_limit,
                                  spatial_batches, inside_xy)
-from dense_tile_merge import DUPLICATE_RADIUS, index_file, index_written_record, mapped_values
+from dense_tile_merge import DUPLICATE_RADIUS, index_written_record, mapped_values
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
 
 
@@ -182,6 +182,7 @@ def filter_owned_instances(model, files, regions, output_dir, index, origin, rep
                       instances=decisions)
         stats["tiles"].append(metric)
         output = output_dir / file.name
+        indexed_offset = 0
         with laspy.open(file) as reader, laspy.open(output, mode="w", header=header) as writer:
             for record in reader.chunk_iterator(MAX_BATCH_POINTS):
                 labels = np.asarray(record[model.instance])
@@ -192,59 +193,16 @@ def filter_owned_instances(model, files, regions, output_dir, index, origin, rep
                     keep[background] = owned_background(xyz[background, :2], region)
                 metric["background_input"] += int(np.count_nonzero(background))
                 metric["background_removed"] += int(np.count_nonzero(background & ~keep))
-                writer.write_points(record[keep])
+                retained = record[keep]
+                writer.write_points(retained)
+                indexed_offset = index_written_record(index, retained, tile, header, origin, model, indexed_offset)
                 metric["input"] += len(record)
                 metric["surviving"] += int(np.count_nonzero(keep))
             write_retained_evlrs(writer, header)
         metric["removed"] = metric["input"] - metric["surviving"]
         outputs.append(output)
-        index_file(index, output, tile, origin, model)
+        index.flush()
     return outputs, counts
-
-
-def instance_owners(mapping, report, admitted=()):
-    """Choose one eligible core owner per reconciled instance, deterministically.
-
-    Recovered members that supply unsupported core samples take precedence
-    within their reconciled group. Otherwise use stable source filename order.
-    """
-    recovery_scores = {(row['tile'], row['local_instance']): row['new_locations']
-                       for row in admitted}
-    grouped = {}
-    for key, reconciled in mapping.items():
-        grouped.setdefault(reconciled, []).append(key)
-    owners = {reconciled: min(keys, key=lambda key: (-recovery_scores.get(key, 0), key))
-              for reconciled, keys in grouped.items()}
-    report["semantic_ownership"] = {
-        "policy": "retain all per-point attributes from the instance owner",
-        "tie_break": "recovered member with most uncovered core samples, then source filename/local ID; otherwise first retained core owner",
-        "instances": [{"instance": key, "tile": tile, "local_instance": local}
-                      for key, (tile, local) in sorted(owners.items())],
-        "tiles": []}
-    return owners
-
-
-def retain_instance_owners(model, files, mapping, owners, output_dir, index, origin, report):
-    """Drop secondary copies rather than blending or inventing their semantics."""
-    output_dir.mkdir(parents=True)
-    outputs = []
-    for tile, file in enumerate(files):
-        removed = [local for (t, local), final in mapping.items()
-                   if t == tile and owners[final] != (t, local)]
-        metric = {"tile": tile, "removed_instances": removed, "removed_points": 0}
-        report["semantic_ownership"]["tiles"].append(metric)
-        output = output_dir / file.name
-        with laspy.open(file) as reader:
-            header = copy_single_source_header(reader.header)
-            with laspy.open(output, mode="w", header=header) as writer:
-                for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-                    keep = ~np.isin(np.asarray(record[model.instance]), removed)
-                    writer.write_points(record[keep])
-                    metric["removed_points"] += int(np.count_nonzero(~keep))
-                write_retained_evlrs(writer, header)
-        index_file(index, output, tile, origin, model)
-        outputs.append(output)
-    return outputs
 
 
 def ownership_candidates(index, pts, tile, competitors, regions, origin, model,

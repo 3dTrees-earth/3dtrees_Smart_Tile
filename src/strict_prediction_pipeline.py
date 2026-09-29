@@ -25,13 +25,15 @@ from point_cloud_metadata import (
     update_extra_dimensions, write_retained_evlrs,
 )
 from dense_instance_ownership import (
-    ANCHORS, filter_owned_instances, ownership_regions, instance_owners, retain_instance_owners,
+    ANCHORS, filter_owned_instances, ownership_regions,
     assign_shared_points, preferred_core,
 )
 from prediction_collection_remap import prediction_collection_files, _assign_prediction_values
 from instance_labels import instance_extra_bytes_params
 from orphan_instance_recovery import recover_orphaned_instances, validate_recovered_geometry
 from raycloud_tree_files import filter_tree_sidecars, tree_sidecars
+from raycloud_finalization import finalize_rct_originals, remap_tree_sidecars
+from instance_finalization import compact_originals
 from raycloud_recovery import RayCloudRecoveryGate
 from raycloud_instance_ids import (
     namespace_rct_tiles, validate_rct_remap_sources, validate_namespaced_labels, RCT_ID_STRIDE,
@@ -100,6 +102,7 @@ def new_report(resolution_1=0.01, remap_tolerance=None):
             "required_match_fraction": 1.0, "batch_point_limit": MAX_BATCH_POINTS,
             "distance_boundary": "inclusive Euclidean XYZ; 8 float64 ULP guard in local coordinates",
             "survivor_order": "source tile filename, then original point order",
+            "nearest_ties": "within 8 local-coordinate float64 ULPs of the minimum distance; stable tile/point order",
             "original_coverage": "pending: originals not supplied"}
 
 
@@ -126,12 +129,27 @@ def _record_coverage(metric, xyz, distances, origin):
 
 
 def enrich_originals(models, indices, baseline_indices, originals, output_dir, origin, report, *,
-                     target_dims=None, process_workers=1):
+                     target_dims=None, process_workers=None):
     """Stage all originals and measure every model independently before failing."""
     files = raw_point_cloud_files(originals)
     if not files:
         raise ValueError(f"No raw LAS/LAZ originals found in {originals}")
+    query_workers = report['parallelism']['query_workers']
+    if process_workers is None:
+        source_point_count = 0
+        for file in files:
+            with laspy.open(file, read_evlrs=False) as reader:
+                source_point_count += reader.header.point_count
+        # Share the same budget for combined merge/remap and standalone remap.
+        # Avoid spawning processes without at least a full batch for each one.
+        process_workers = min(query_workers, max(1, source_point_count // MAX_BATCH_POINTS))
+    report['parallelism'].update(
+        enrichment_processes=process_workers,
+        enrichment_query_workers=1 if process_workers > 1 else query_workers,
+        max_pending_batches=2 * process_workers,
+        enrichment_scope='bounded process-parallel original remap; ordered writer')
     selected = []
+    ids_by_dimension = {}
     used = set()
     for model in models:
         dims = {n: p for n, p in model.dimensions.items() if target_dims is None or n in target_dims}
@@ -152,6 +170,8 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
     with RemapBatchQueries(indices, baseline_indices, workers=process_workers,
                           radius=radius) as queries:
         for file in files:
+            file_ids = {model.instance: set() for model, dims in zip(models, selected)
+                        if model.instance and model.instance in dims}
             with laspy.open(file) as reader:
                 header = copy_single_source_header(reader.header)
                 existing = set(header.point_format.dimension_names)
@@ -182,8 +202,13 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                                         data[missing] = 0
                             for name in selected[i]:
                                 _assign_prediction_values(out, name, values[name], raw=True)
+                            instance = models[i].instance
+                            if instance in file_ids:
+                                file_ids[instance].update(int(uid) for uid in np.unique(values[instance]) if uid > 0)
                         writer.write_points(out)
                     write_retained_evlrs(writer, header)
+                for dimension, ids in file_ids.items():
+                    ids_by_dimension.setdefault(dimension, {})[file.name] = ids
     report.setdefault("timings", {})["enrichment_seconds"] = time.monotonic() - enrichment_start
     report["background_assigned_points"] = sum(m.get("background_assigned", 0) for m in metrics)
     failures = [m for m in metrics if m["matched"] != m["total"]
@@ -195,6 +220,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
         ]
         raise ValueError(f"100% original coverage within {radius:.8g} m is required; " + "; ".join(
             f"{m['file']}/{m['model']}/{m['stage']}: {m['matched']}/{m['total']}" for m in failures))
+    return ids_by_dimension
 
 
 def tile_overlaps(pairs, tile_bounds_json, origin):
@@ -233,6 +259,16 @@ def merge_file(files, output):
         write_retained_evlrs(writer, header)
 
 
+def timed_stage(report, name, function, *args, **kwargs):
+    start = time.monotonic()
+    try:
+        return function(*args, **kwargs)
+    finally:
+        elapsed = time.monotonic() - start
+        report.setdefault('phase_seconds', {})[name] = elapsed
+        print(f"{report['model']}: {name} finished in {elapsed:.3f}s", flush=True)
+
+
 def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json,
                       originals=None, original_output=None, merged_output=None,
                       transfer_radius=.1732, overlap_threshold=.3, correspondence_radius=.05,
@@ -260,9 +296,9 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
     baseline_output = output_tiles.with_name(output_tiles.name + "_unfiltered_1cm")
     report_path = Path(report_path or output_tiles.parent / "remap_first_report.json")
     report = new_report(resolution_1, remap_tolerance)
-    report["contract"] = "3DT-2101/rct-filter-only-v3-safe-recovery" if tree_mode else "3DT-2183/v7-orphan-recovery"
+    report["contract"] = "3DT-2101/rct-filter-only-v3-safe-recovery" if tree_mode else "3DT-2183/v8-group-geometry"
     report["instance_policy"] = ("RCT tile_id * 100000 + local_id; whole-instance filtering and conflict-free recovery"
-                                 if tree_mode else "reconcile model instances")
+                                 if tree_mode else "one ID per accepted group; union member geometry; shared-point tile ownership")
     tree_output = output_tiles.parent / "segmented_filtered" if tree_mode else None
     query_workers = spatial_query_worker_count(workers)
     report["parallelism"] = {"requested_workers": workers, "query_workers": query_workers,
@@ -327,9 +363,9 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                 owned = stack.enter_context(PointIndex(work / f"owned_{i}.sqlite", dimensions, query_workers=query_workers))
                 survivors = stack.enter_context(PointIndex(work / f"survivors_{i}.sqlite", dimensions, query_workers=query_workers))
                 suffix = Path(f"model_{i:03d}") if len(collections) > 1 else Path()
-                dense_files, counts = prepare_dense(model, pairs, dense_dir / suffix, dense, origin,
+                dense_files, counts = timed_stage(model_report, 'dense_transfer_and_index', prepare_dense, model, pairs, dense_dir / suffix, dense, origin,
                                                     transfer_radius, model_report, ready=ready)
-                owned_files, counts = filter_owned_instances(
+                owned_files, counts = timed_stage(model_report, 'core_filter_and_index', filter_owned_instances,
                     model, dense_files, regions, work / "owned" / suffix, owned, origin, model_report,
                     anchor=filter_anchor)
                 if tree_mode:
@@ -337,7 +373,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                         {model.instance: np.uint32}, query_workers=query_workers))
                     gate = RayCloudRecoveryGate(model, dense, owned, admitted_index,
                                                 model_report["instance_ownership"], origin)
-                    owned_files, counts, admitted, claims_path = recover_orphaned_instances(
+                    owned_files, counts, admitted, claims_path = timed_stage(model_report, 'orphan_recovery', recover_orphaned_instances,
                         model, dense_files, owned_files, owned, regions, overlaps,
                         work / "recovered" / suffix, None, origin, counts, model_report,
                         admit_candidate=gate)
@@ -368,35 +404,35 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                     normal_keys = set(counts)
                     recovered = stack.enter_context(PointIndex(work / f"recovered_{i}.sqlite", dimensions,
                                                                query_workers=query_workers))
-                    owned_files, counts, admitted, claims_path = recover_orphaned_instances(
+                    owned_files, counts, admitted, claims_path = timed_stage(model_report, 'orphan_recovery', recover_orphaned_instances,
                         model, dense_files, owned_files, owned, regions, overlaps,
                         work / "recovered" / suffix, recovered, origin, counts, model_report)
                     if admitted:
                         owned = recovered
-                    mapping = reconcile_instances(model, owned_files, owned, origin, counts, overlap_threshold,
+                    mapping = timed_stage(model_report, 'reconciliation', reconcile_instances, model, owned_files, owned, origin, counts, overlap_threshold,
                                                   correspondence_radius, model_report, enabled=matching,
                                                   overlaps=overlaps, normal_keys=normal_keys if admitted else None)
-                    owners = instance_owners(mapping, model_report, model_report["orphan_recovery"]["admitted"])
-                    if len(owners) < len(mapping):
-                        authoritative = stack.enter_context(PointIndex(work / f"authoritative_{i}.sqlite", dimensions, query_workers=query_workers))
-                        owned_files = retain_instance_owners(
-                            model, owned_files, mapping, owners, work / "authoritative" / suffix,
-                            authoritative, origin, model_report)
-                        owned = authoritative
+                    # 3DT-2209: a reconciled ID does not imply identical geometry.
+                    # Keep every member here; selecting one whole-instance owner
+                    # discards recovered tips before shared-point ownership runs.
+                    model_report["semantic_ownership"] = {
+                        "policy": "preserve every member's unique points; shared points use nearest-core tile ownership",
+                        "scope": "per point, including members of the same reconciled instance",
+                        "tie_break": "stable source tile filename order"}
                     if len(owned_files) > 1:
                         resolved = stack.enter_context(PointIndex(work / f"resolved_{i}.sqlite", dimensions, query_workers=query_workers))
-                        owned_files = assign_shared_points(
+                        owned_files = timed_stage(model_report, 'shared_point_ownership', assign_shared_points,
                             model, owned_files, owned, regions, mapping, work / "resolved" / suffix,
                             resolved, origin, model_report, overlaps=overlaps)
                         owned = resolved
                         if any(t["background_input"] > t["background_removed"]
                                for t in model_report["instance_ownership"]["tiles"]):
                             tree_priority = stack.enter_context(PointIndex(work / f"tree_priority_{i}.sqlite", dimensions, query_workers=query_workers))
-                            owned_files = assign_shared_points(
+                            owned_files = timed_stage(model_report, 'tree_background_ownership', assign_shared_points,
                                 model, owned_files, owned, regions, mapping, work / "tree_priority" / suffix,
                                 tree_priority, origin, model_report, overlaps=overlaps, background_only=True)
                             owned = tree_priority
-                    final_files = deduplicate(model, owned_files, owned, survivors, origin, mapping,
+                    final_files = timed_stage(model_report, 'deduplication', deduplicate, model, owned_files, owned, survivors, origin, mapping,
                                               final_dir / suffix, model_report, overlaps=overlaps,
                                               background_semantics_owned=True,
                                               core_preferred=lambda first, second, pts: preferred_core(
@@ -413,6 +449,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                             "baseline": os.path.relpath(baseline_output / suffix, output_tiles / suffix)}
                 if tree_mode:
                     manifest["rct_instance_ids"] = namespace
+                    manifest["rct_tree_sidecars"] = os.path.relpath(tree_output, output_tiles / suffix)
                 # Publish the layout used for ownership beside the predictions.
                 # Keep the source immutable and bind the effective copy by checksum.
                 from tile_bounds_graph import single_cloud_layout
@@ -431,8 +468,13 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
             if tree_mode:
                 products.append((work / "tree_files", tree_output))
             if originals:
-                enrich_originals(models, indices, baselines, originals, work / "originals", origin, report,
-                                 target_dims=target_dims)
+                final_ids = enrich_originals(models, indices, baselines, originals, work / "originals", origin, report,
+                                          target_dims=target_dims)
+                rct_ids = final_ids.get("PredInstance_RCT", {})
+                if rct_ids:
+                    report["rct_finalization"] = finalize_rct_originals(
+                        work / "originals", rct_ids, final_files, tree_sidecars(work / "tree_files"), rewrite_clouds=False)
+                report["instance_finalization"] = compact_originals(work / "originals", final_ids)
                 products.append((work / "originals", original_output))
             if merged_output:
                 merge_file(final_files, work / "merged.laz")
@@ -503,12 +545,6 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
             if not source_files:
                 raise ValueError(f"No raw original files in {originals}")
             origin = origin_for(source_files)
-            source_point_count = 0
-            for file in source_files:
-                with laspy.open(file, read_evlrs=False) as reader:
-                    source_point_count += reader.header.point_count
-            # Avoid process startup for tiny inputs; require a full batch per worker.
-            process_workers = min(query_workers, max(1, source_point_count // MAX_BATCH_POINTS))
             indexing_start = time.monotonic()
             for i, (collection, baseline) in enumerate(zip(collections, baseline_collections)):
                 model = describe_model(collection, instance_dimension, require_instance=False)
@@ -541,11 +577,16 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
                 indices.append(index)
                 baselines.append(baseline_index)
             report.setdefault("timings", {})["indexing_seconds"] = time.monotonic() - indexing_start
-            report["parallelism"].update(enrichment_processes=process_workers,
-                enrichment_query_workers=1, max_pending_batches=2 * process_workers,
-                scope="serial indexing; bounded process-parallel final remap; ordered writer")
-            enrich_originals(models, indices, baselines, originals, work / "originals", origin, report,
-                             target_dims=target_dims, process_workers=process_workers)
+            final_ids = enrich_originals(models, indices, baselines, originals, work / "originals", origin, report,
+                                      target_dims=target_dims)
+            rct_ids = final_ids.get("PredInstance_RCT", {})
+            if rct_ids:
+                rct_collection = next(collection for collection, model in zip(collections, models)
+                                      if model.instance == "PredInstance_RCT")
+                report["rct_finalization"] = finalize_rct_originals(
+                    work / "originals", rct_ids, prediction_collection_files(rct_collection),
+                    remap_tree_sidecars(rct_collection), rewrite_clouds=False)
+            report["instance_finalization"] = compact_originals(work / "originals", final_ids)
             stack.close()
             report["checksums"] = {f.name: digest(f) for f in sorted((work / "originals").iterdir())}
             publish([(work / "originals", output)])

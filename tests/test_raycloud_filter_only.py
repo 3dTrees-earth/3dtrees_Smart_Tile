@@ -12,6 +12,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from strict_prediction_pipeline import merge_collections, strict_remap
 from test_dense_tile_merge import write_cloud
+from test_strict_prediction_pipeline import add_extended_metadata, assert_extended_metadata
 from raycloud_instance_ids import encode_instance_ids, read_tile_namespace
 from raycloud_tree_files import filter_tree_sidecars
 
@@ -56,6 +57,30 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                     self.assertEqual(sidecar.read_text(),
                                      f"# RCT tree table\npredinstance,header\n{(tile + 1) * 100000 + 1},tree-1\n")
 
+    def test_supplied_tree_files_bypass_merging_and_point_ownership(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); source, layout = self._fixture(root)
+            for tile in range(2):
+                write_cloud(source / f'c{tile:02d}_r00_segmented.las', [9.5, 10, 10.5],
+                    [1, 1, 1], [2 + tile] * 3, instance='PredInstance_RCT')
+            # Both centroids lie on the inclusive core boundary. Their geometry
+            # overlaps completely and would qualify for merging without sidecars.
+            with patch('strict_prediction_pipeline.reconcile_instances', side_effect=AssertionError('must not merge')), \
+                 patch('strict_prediction_pipeline.assign_shared_points', side_effect=AssertionError('must not reassign')), \
+                 patch('strict_prediction_pipeline.deduplicate', side_effect=AssertionError('must not thin')):
+                report = merge_collections(collections=[source], target_dir=None,
+                    output_tiles=root/'output', tile_bounds_json=layout, ready=True,
+                    instance_dimension='PredInstance_RCT', matching=True)
+            self.assertEqual(report['models'][0]['reconciliation']['accepted_pairs'], [])
+            for tile in range(2):
+                cloud = laspy.read(root/f'output/tile_{tile:05d}.laz')
+                np.testing.assert_allclose(cloud.x, [9.5, 10, 10.5])
+                np.testing.assert_array_equal(cloud.PredInstance_RCT, [(tile+1)*100000+1]*3)
+                np.testing.assert_array_equal(cloud.PredSemantic_RCT, [2+tile]*3)
+                for kind in ('trees', 'trees_info'):
+                    lines=(root/f'segmented_filtered/c{tile:02d}_r00_filtered_{kind}.txt').read_text().splitlines()
+                    self.assertEqual(lines[2:], [f'{(tile+1)*100000+1},tree-1'])
+
     def test_rejects_missing_tree_file_before_publishing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -95,12 +120,15 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                 table = root / f'segmented_filtered/c01_r00_filtered_{suffix}.txt'
                 self.assertEqual(table.read_text().splitlines()[2:], ['200001,tree-1', '200002,tree-2'])
             enriched = laspy.read(root / 'original_with_predictions/raw.las')
-            self.assertEqual(enriched.PredInstance_RCT.tolist(), [200002, 200002])
+            self.assertEqual(enriched.PredInstance_RCT.tolist(), [1, 1])
+            for suffix in ("trees", "trees_info"):
+                table = root / "original_with_predictions" / f"raw_{suffix}.txt"
+                self.assertEqual(table.read_text().splitlines()[2:], ["1,tree-2"])
             self.assertEqual(enriched.PredSemantic_RCT.tolist(), [9, 9])
             # Separate original remap must make the same ownership decision.
             strict_remap(collections=[root / 'output'], originals=originals, output=root / 'separate',
                          instance_dimension='PredInstance_RCT')
-            self.assertEqual(laspy.read(root / 'separate/raw.las').PredInstance_RCT.tolist(), [200002, 200002])
+            self.assertEqual(laspy.read(root / 'separate/raw.las').PredInstance_RCT.tolist(), [1, 1])
             # Re-filtering keeps the recovered ID and matching tree rows.
             for table in (root / 'segmented_filtered').glob('*.txt'):
                 shutil.copy2(table, root / 'output' / table.name)
@@ -248,7 +276,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             original = laspy.read(originals / "raw.las")
             self.assertEqual(output.X.tolist(), original.X.tolist())
             self.assertEqual(output.intensity.tolist(), original.intensity.tolist())
-            self.assertEqual(output.PredInstance_RCT.tolist(), [100001, 0, 200001])
+            self.assertEqual(output.PredInstance_RCT.tolist(), [1, 0, 2])
             self.assertEqual(output.PredSemantic_RCT.tolist(), [5, 0, 9])
             self.assertEqual(report["state"], "validated")
             self.assertEqual(report["background_assigned_points"], 1)
@@ -268,11 +296,13 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             write_cloud(filtered / "tile.las", [0, .04], [1, 3], [5, 7],
                         instance="PredInstance_RCT")
             write_cloud(originals / "raw.las", [0, .02, .04])
+            for suffix in ("trees", "trees_info"):
+                (filtered / f"tile_{suffix}.txt").write_text("# RCT\npredinstance,header\n1,first\n3,third\n")
             report = strict_remap(collections=[filtered], baseline_collections=[baseline],
                                   originals=originals, output=root / "enriched",
                                   instance_dimension="PredInstance_RCT")
             output = laspy.read(root / "enriched" / "raw.las")
-            self.assertEqual(output.PredInstance_RCT.tolist(), [1, 0, 3])
+            self.assertEqual(output.PredInstance_RCT.tolist(), [1, 0, 2])
             self.assertEqual(output.PredSemantic_RCT.tolist(), [5, 0, 7])
             self.assertEqual(report["state"], "validated")
             final = next(m for m in report["original_coverage"] if m["stage"] == "final_survivors")
@@ -304,7 +334,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             strict_remap(collections=[output], originals=originals, output=root / "enriched",
                          instance_dimension="PredInstance_RCT")
             self.assertEqual(laspy.read(root / "enriched/raw.las").PredInstance_RCT.tolist(),
-                             [100003, 200003, 0])
+                             [1, 2, 0])
             # Co-locate the published tables as required by the filter interface.
             for table in (output.parent / "segmented_filtered").glob("*.txt"):
                 shutil.copy2(table, output / table.name)
@@ -361,7 +391,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                              instance_dimension='PredInstance_RCT')
             self.assertEqual(list(reads.values()), [1, 1])
             self.assertEqual(laspy.read(root / 'enriched/raw.las').PredInstance_RCT.tolist(),
-                             [100001, 200001])
+                             [1, 2])
             file = output / 'tile_00000.laz'
             cloud = laspy.read(file)
             cloud.PredInstance_RCT = [200001] * len(cloud.points)
@@ -380,6 +410,123 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             merge_collections(collections=[source], target_dir=None, output_tiles=root / "output",
                               tile_bounds_json=layout, ready=True, instance_dimension="PredInstance_RCT")
             self.assertEqual(laspy.read(root / "output/tile_00000.laz").PredInstance_RCT.tolist(), [0, 100001])
+
+    def test_compact_ids_and_qsm_payloads_are_shared_across_originals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, layout = self._fixture(root)
+            for tile in ("c00_r00", "c01_r00"):
+                for suffix in ("trees", "trees_info"):
+                    (source / f"{tile}_{suffix}.txt").write_text(
+                        f"# RCT\nheader\n{tile}-{suffix},1,2,3;4,5,6\nremoved\n")
+            output = root / "output"
+            merge_collections(collections=[source], target_dir=None, output_tiles=output,
+                              tile_bounds_json=layout, ready=True, instance_dimension="PredInstance_RCT")
+            originals = root / "originals"
+            originals.mkdir()
+            write_cloud(originals / "a.las", [1, 11, 10.6])
+            add_extended_metadata(originals / "a.las")
+            write_cloud(originals / "b.laz", [11])
+            write_cloud(originals / "c.las", [10.6])
+            write_cloud(originals / "empty.las", [])
+            report = strict_remap(collections=[output], originals=originals, output=root / "final")
+            expected_ids = {"a.las": [1, 2, 0], "b.laz": [2], "c.las": [0], "empty.las": []}
+            assert_extended_metadata(self, root / "final/a.las")
+            for name, ids in expected_ids.items():
+                final = laspy.read(root / "final" / name)
+                original = laspy.read(originals / name)
+                self.assertEqual(final.PredInstance_RCT.tolist(), ids)
+                self.assertEqual(final.PredInstance_RCT.dtype, np.dtype("uint32"))
+                for dimension in original.point_format.dimension_names:
+                    np.testing.assert_array_equal(final[dimension], original[dimension])
+                for suffix in ("trees", "trees_info"):
+                    rows = (root / "final" / f"{Path(name).stem}_{suffix}.txt").read_text().splitlines()[2:]
+                    self.assertEqual(rows, [f"{uid},c{uid-1:02d}_r00-{suffix},1,2,3;4,5,6"
+                                            for uid in sorted(set(ids) - {0})])
+                self.assertIsNone(read_tile_namespace(root / "final" / name))
+                compact_vlr = [v for v in final.header.vlrs if v.user_id == "3DTrees" and v.record_id == 24003]
+                self.assertEqual(len(compact_vlr), 1)
+            metadata = json.loads((root / "final/rct_instance_mapping.json").read_text())
+            self.assertEqual(metadata["tree_count"], 2)
+            self.assertEqual([row["source_instance_id"] for row in metadata["instances"]], [100001, 200001])
+            self.assertEqual([row["source_tile_id"] for row in metadata["instances"]], [1, 2])
+            self.assertEqual([row["source_local_id"] for row in metadata["instances"]], [1, 1])
+            self.assertEqual([row["tree_count"] for row in metadata["files"]], [2, 1, 0, 0])
+            self.assertEqual(report["rct_finalization"]["tree_count"], 2)
+            # Subset originals omit tile 1 completely: IDs must still start at 1.
+            subset = root / "subset"
+            subset.mkdir()
+            shutil.copy2(originals / "b.laz", subset / "b.laz")
+            strict_remap(collections=[output], originals=subset, output=root / "subset_final")
+            self.assertEqual(laspy.read(root / "subset_final/b.laz").PredInstance_RCT.tolist(), [1])
+
+    def test_combined_and_standalone_finalization_agree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, layout = self._fixture(root)
+            originals = root / "originals"
+            originals.mkdir()
+            write_cloud(originals / "raw.las", [1, 11, 10.6])
+            output = root / "output"
+            merge_collections(collections=[source], target_dir=None, output_tiles=output,
+                              tile_bounds_json=layout, ready=True, instance_dimension="PredInstance_RCT",
+                              originals=originals)
+            strict_remap(collections=[output], originals=originals, output=root / "separate")
+            for name in ("raw.las", "raw_trees.txt", "raw_trees_info.txt", "rct_instance_mapping.json"):
+                self.assertEqual((root / "original_with_predictions" / name).read_bytes(),
+                                 (root / "separate" / name).read_bytes())
+
+    def test_compaction_preserves_other_models_in_three_collection_remap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            originals = root / "originals"
+            originals.mkdir()
+            write_cloud(originals / "raw.las", [0, 1, 2])
+            collections = []
+            for model, ids in [("RCT", [7, 0, 999]), ("A", [77, 78, 79]), ("B", [88, 89, 90])]:
+                folder = root / model
+                folder.mkdir()
+                write_cloud(folder / "tile.las", [0, 1, 2], ids, [5, 6, 7], instance=f"PredInstance_{model}")
+                collections.append(folder)
+            for suffix in ("trees", "trees_info"):
+                (collections[0] / f"tile_{suffix}.txt").write_text("# RCT\npredinstance,header\n7,first\n999,last\n")
+            strict_remap(collections=collections, baseline_collections=[collections[0]],
+                         originals=originals, output=root / "final")
+            final = laspy.read(root / "final/raw.las")
+            for model, ids in [("RCT", [1, 0, 2]), ("A", [1, 2, 3]), ("B", [1, 2, 3])]:
+                self.assertEqual(final[f"PredInstance_{model}"].tolist(), ids)
+                self.assertEqual(final[f"PredSemantic_{model}"].tolist(), [5, 6, 7])
+
+    def test_finalization_rejects_missing_or_inconsistent_tables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, layout = self._fixture(root)
+            output = root / "output"
+            merge_collections(collections=[source], target_dir=None, output_tiles=output,
+                              tile_bounds_json=layout, ready=True, instance_dimension="PredInstance_RCT")
+            originals = root / "originals"
+            originals.mkdir()
+            write_cloud(originals / "raw.las", [1, 11])
+            table = root / "segmented_filtered/c00_r00_filtered_trees_info.txt"
+            saved = table.read_text()
+            for content, error in [(None, "Missing RayCloudTools"),
+                                   ("# RCT\npredinstance,header\n", "instance IDs differ"),
+                                   (saved.replace("predinstance,header", "predinstance,incompatible"), "incompatible")]:
+                with self.subTest(error=error):
+                    if content is None:
+                        table.unlink()
+                    else:
+                        table.write_text(content)
+                    with self.assertRaisesRegex(ValueError, error):
+                        strict_remap(collections=[output], originals=originals, output=root / "invalid")
+                    self.assertFalse((root / "invalid").exists())
+            # Matching tables that both omit a represented instance also fail.
+            for suffix in ("trees", "trees_info"):
+                (root / f"segmented_filtered/c00_r00_filtered_{suffix}.txt").write_text(
+                    "# RCT\npredinstance,header\n")
+            with self.assertRaisesRegex(ValueError, "has no tree row"):
+                strict_remap(collections=[output], originals=originals, output=root / "invalid")
+            self.assertFalse((root / "invalid").exists())
 
     def test_unencoded_multiple_tiles_cannot_publish_ambiguous_originals(self):
         with tempfile.TemporaryDirectory() as tmp:

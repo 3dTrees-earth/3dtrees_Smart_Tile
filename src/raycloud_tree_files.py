@@ -68,6 +68,33 @@ def _prediction_key(path):
     return _tile_key(Path(info["source_name"]) if info else path)
 
 
+def read_tree_header(stream, source):
+    description, heading = stream.readline(), stream.readline()
+    if not description or not heading:
+        raise ValueError(f"{source.name}: expected two header lines followed by tree rows")
+    explicit = heading.split(",", 1)[0].strip().lower() == "predinstance"
+    return description, heading, explicit
+
+
+def tree_rows(stream, source, explicit):
+    """Yield validated IDs and unchanged payloads, including legacy row IDs."""
+    seen = set()
+    for row_count, line in enumerate(stream, start=1):
+        uid, payload = row_count, line
+        if explicit:
+            token, separator, payload = line.partition(",")
+            if not separator:
+                raise ValueError(f"{source.name}: missing explicit predinstance at row {row_count}")
+            try:
+                uid = int(token)
+            except ValueError:
+                raise ValueError(f"{source.name}: invalid predinstance at row {row_count}") from None
+        if uid <= 0 or uid > 2**32 - 1 or uid in seen:
+            raise ValueError(f"{source.name}: invalid or duplicate predinstance {uid}")
+        seen.add(uid)
+        yield uid, payload
+
+
 def filter_tree_sidecars(pairs, sidecars, ownership, output_dir: Path, *, id_mapping=None):
     """Filter implicit or explicit tree IDs and apply the LAZ's ID mapping."""
     sources = [Path(source) for source, _, _ in pairs]
@@ -85,27 +112,12 @@ def filter_tree_sidecars(pairs, sidecars, ownership, output_dir: Path, *, id_map
             stem = _prediction_key(sources[tile])
             output = output_dir / f"{stem}_filtered{suffix}"
             with source.open("r", encoding="utf-8") as input_stream, output.open("w", encoding="utf-8") as output_stream:
-                description = input_stream.readline()
-                heading = input_stream.readline()
-                if not description or not heading:
-                    raise ValueError(f"{source.name}: expected two header lines followed by tree rows")
+                description, heading, explicit_ids = read_tree_header(input_stream, source)
                 newline = "\r\n" if heading.endswith("\r\n") else "\n"
-                explicit_ids = heading.split(",", 1)[0].strip().lower() == "predinstance"
                 output_stream.write(description)
                 output_stream.write(("" if explicit_ids else "predinstance,") + heading.rstrip("\r\n") + newline)
                 seen = set()
-                for row_count, line in enumerate(input_stream, start=1):
-                    uid, payload = row_count, line
-                    if explicit_ids:
-                        token, separator, payload = line.partition(",")
-                        if not separator:
-                            raise ValueError(f"{source.name}: missing explicit predinstance at row {row_count}")
-                        try:
-                            uid = int(token)
-                        except ValueError:
-                            raise ValueError(f"{source.name}: invalid predinstance at row {row_count}") from None
-                    if uid <= 0 or uid > 2**32 - 1 or uid in seen:
-                        raise ValueError(f"{source.name}: invalid or duplicate predinstance {uid}")
+                for uid, payload in tree_rows(input_stream, source, explicit_ids):
                     seen.add(uid)
                     if uid in kept_ids:
                         output_id = id_mapping[(tile, uid)] if id_mapping is not None else uid
