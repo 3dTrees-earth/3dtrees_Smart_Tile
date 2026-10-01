@@ -148,14 +148,13 @@ class TileCopcDimensionPolicyTests(unittest.TestCase):
             with mock.patch("tile_copc.finalize_tile_to_copc_untwine", side_effect=first_untwine_then_pdal):
                 with mock.patch("tile_copc.finalize_tile_to_copc_pdal", side_effect=pdal_retry) as pdal:
                     with mock.patch("tile_copc.first_crs_source", return_value=part):
-                        with mock.patch("tile_copc.append_source_geotiff_projection_evlrs", return_value=(True, "ok")):
-                            with mock.patch(
-                                "tile_copc.copc_preserves_source_crs",
-                                side_effect=[(False, "bad crs"), (True, "ok")],
-                            ):
-                                label, success, message = tile_copc.finalize_tile_to_copc(
-                                    ("c0_r0", tiles_dir, log_dir, None)
-                                )
+                        with mock.patch(
+                            "tile_copc.validate_single_crs_record",
+                            side_effect=[(False, "bad crs"), (True, "ok")],
+                        ):
+                            label, success, message = tile_copc.finalize_tile_to_copc(
+                                ("c0_r0", tiles_dir, log_dir, None)
+                            )
 
             self.assertEqual(label, "c0_r0")
             self.assertTrue(success, message)
@@ -218,11 +217,10 @@ class TileCopcDimensionPolicyTests(unittest.TestCase):
 
             with mock.patch("tile_copc.shutil.which", return_value="/usr/bin/untwine"):
                 with mock.patch("tile_copc.srs_assignment_from_file", return_value="EPSG:32632"):
-                    with mock.patch("tile_copc.append_source_geotiff_projection_evlrs"):
-                        with mock.patch("tile_copc.copc_preserves_source_crs", return_value=(True, "ok")):
-                            with mock.patch("tile_copc._output_has_no_extra_dimensions", return_value=True):
-                                with mock.patch("tile_copc.subprocess.run", side_effect=run_untwine) as run:
-                                    self.assertTrue(tile_copc.convert_laz_to_copc(input_laz, output_copc))
+                    with mock.patch("tile_copc.validate_single_crs_record", return_value=(True, "ok")):
+                        with mock.patch("tile_copc._output_has_no_extra_dimensions", return_value=True):
+                            with mock.patch("tile_copc.subprocess.run", side_effect=run_untwine) as run:
+                                self.assertTrue(tile_copc.convert_laz_to_copc(input_laz, output_copc))
 
             command = run.call_args.args[0]
             self.assertNotIn("--dims", command)
@@ -237,9 +235,8 @@ class TileCopcDimensionPolicyTests(unittest.TestCase):
             with mock.patch("tile_copc.shutil.which", return_value="/usr/bin/untwine"):
                 with mock.patch("tile_copc._run_untwine", return_value=(False, "untwine failed")) as untwine:
                     with mock.patch("tile_copc.convert_laz_to_copc_pdal", return_value=True) as pdal:
-                        with mock.patch("tile_copc.append_source_geotiff_projection_evlrs", return_value=(True, "ok")):
-                            with mock.patch("tile_copc.copc_preserves_source_crs", return_value=(True, "ok")):
-                                self.assertTrue(tile_copc.convert_laz_to_copc(input_laz, output_copc))
+                        with mock.patch("tile_copc.validate_single_crs_record", return_value=(True, "ok")):
+                            self.assertTrue(tile_copc.convert_laz_to_copc(input_laz, output_copc))
 
             untwine.assert_called_once()
             self.assertTrue(untwine.call_args.kwargs["strip_extra_dims"])
@@ -256,9 +253,8 @@ class TileCopcDimensionPolicyTests(unittest.TestCase):
                 with mock.patch("tile_copc._run_untwine", return_value=(True, "untwine")) as untwine:
                     with mock.patch("tile_copc._output_has_no_extra_dimensions", return_value=False):
                         with mock.patch("tile_copc.convert_laz_to_copc_pdal", return_value=True) as pdal:
-                            with mock.patch("tile_copc.append_source_geotiff_projection_evlrs", return_value=(True, "ok")):
-                                with mock.patch("tile_copc.copc_preserves_source_crs", return_value=(True, "ok")):
-                                    self.assertTrue(tile_copc.convert_laz_to_copc(input_laz, output_copc))
+                            with mock.patch("tile_copc.validate_single_crs_record", return_value=(True, "ok")):
+                                self.assertTrue(tile_copc.convert_laz_to_copc(input_laz, output_copc))
 
             untwine.assert_called_once()
             self.assertTrue(untwine.call_args.kwargs["strip_extra_dims"])

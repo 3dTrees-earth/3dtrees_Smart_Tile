@@ -545,12 +545,11 @@ class CreateMergedFileTests(unittest.TestCase):
             temp_dir = tmp_path / "untwine_tmp"
             output.write_text("copc")
             fake_copc_metadata = mock.Mock(
-                append_source_geotiff_projection_evlrs=mock.Mock(return_value=(True, "ok")),
-                copc_preserves_source_crs=mock.Mock(return_value=(True, "ok")),
+                validate_single_crs_record=mock.Mock(return_value=(True, "ok")),
                 srs_assignment_from_file=mock.Mock(return_value="EPSG:32632"),
             )
             with mock.patch("main_create_merged_file.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata}):
+                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}):
                     with mock.patch("main_create_merged_file.subprocess.run") as run:
                         def run_untwine(*_, **__):
                             output.write_text("copc")
@@ -582,8 +581,7 @@ class CreateMergedFileTests(unittest.TestCase):
             tmp_path = Path(tmpdir)
             output = tmp_path / "out.copc.laz"
             fake_copc_metadata = mock.Mock(
-                append_source_geotiff_projection_evlrs=mock.Mock(return_value=(True, "ok")),
-                copc_preserves_source_crs=mock.Mock(return_value=(True, "ok")),
+                validate_single_crs_record=mock.Mock(return_value=(True, "ok")),
                 srs_assignment_from_file=mock.Mock(return_value="EPSG:32632"),
             )
 
@@ -592,7 +590,7 @@ class CreateMergedFileTests(unittest.TestCase):
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("main_create_merged_file.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata}):
+                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}):
                     with mock.patch("main_create_merged_file.subprocess.run", side_effect=run_untwine):
                         with mock.patch(
                             "main_create_merged_file._point_cloud_point_count",
@@ -613,8 +611,7 @@ class CreateMergedFileTests(unittest.TestCase):
             tmp_path = Path(tmpdir)
             output = tmp_path / "out.copc.laz"
             fake_copc_metadata = mock.Mock(
-                append_source_geotiff_projection_evlrs=mock.Mock(return_value=(True, "ok")),
-                copc_preserves_source_crs=mock.Mock(return_value=(True, "ok")),
+                validate_single_crs_record=mock.Mock(return_value=(True, "ok")),
                 srs_assignment_from_file=mock.Mock(return_value="EPSG:32632"),
             )
 
@@ -623,7 +620,7 @@ class CreateMergedFileTests(unittest.TestCase):
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("main_create_merged_file.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata}):
+                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}):
                     with mock.patch("main_create_merged_file.subprocess.run", side_effect=run_untwine):
                         with mock.patch(
                             "main_create_merged_file._point_cloud_point_count",

@@ -34,7 +34,9 @@ class SubsampleEvlrTests(unittest.TestCase):
         header = make_center_of_mass_header(source.header, True)
         self.assertEqual(str(header.version), "1.4")
         self.assertEqual(header.point_format.id, 0)
-        self.assertEqual([v.record_id for v in header.evlrs], [2112])
+        # The effective extended CRS becomes the single standardized WKT VLR.
+        self.assertEqual([v.record_id for v in header.vlrs if v.user_id == "LASF_Projection"], [2112])
+        self.assertFalse(any(v.user_id == "LASF_Projection" for v in header.evlrs))
         self.assertTrue(header.parse_crs().equals(source.header.parse_crs()))
 
     def test_plain_laz_subsampling_writes_extended_crs(self):

@@ -225,8 +225,7 @@ class SubsampleEncodingTests(unittest.TestCase):
             captured = {}
 
             fake_copc_metadata = types.SimpleNamespace(
-                append_source_geotiff_projection_evlrs=mock.Mock(return_value=(True, "ok")),
-                copc_preserves_source_crs=mock.Mock(return_value=(True, "ok")),
+                validate_single_crs_record=mock.Mock(return_value=(True, "ok")),
             )
             fake_main_tile = types.SimpleNamespace(
                 _convert_laz_to_copc=mock.Mock(side_effect=RuntimeError("force fallback")),
@@ -240,7 +239,7 @@ class SubsampleEncodingTests(unittest.TestCase):
 
             with mock.patch.dict(
                 sys.modules,
-                {"copc_metadata": fake_copc_metadata, "main_tile": fake_main_tile},
+                {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata, "main_tile": fake_main_tile},
             ):
                 with mock.patch("subsample_outputs.subprocess.run", side_effect=run):
                     ok = subsample_outputs.convert_laz_output_to_copc(

@@ -12,6 +12,8 @@ import laspy
 import numpy as np
 from laspy.vlrs.vlrlist import VLRList
 
+from crs_records import standardize_projection_records
+
 
 # R/lidR, LAS, and laspy names can all appear in standardization summaries.
 # Extra-byte names are preserved as-is via the .get() default.
@@ -206,7 +208,7 @@ def copy_single_source_header(
             and (preserve_extra_dimensions or not is_extra_bytes_vlr(vlr))
         ])
 
-    return header
+    return standardize_projection_records(header)
 
 
 def projection_metadata_vlrs(vlrs) -> VLRList:

@@ -19,6 +19,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
+from ply_crs import add_crs_comment_to_ply, crs_comment_from_file
+
 from point_cloud_metadata import (
     copc_files,
     load_standardization_dims,
@@ -626,20 +628,10 @@ def _validate_preserved_product_dims(
 
 
 def _preserve_and_validate_las_metadata(source_metadata_file: Path, output_file: Path) -> Tuple[bool, str]:
-    """Ensure a LAS/LAZ/COPC product carries source CRS/GeoTIFF projection metadata."""
-    from copc_metadata import (
-        append_source_geotiff_projection_evlrs,
-        copc_preserves_source_crs,
-    )
+    """Ensure a LAS/LAZ/COPC product carries the source CRS as one standardized record."""
+    from crs_records import validate_single_crs_record
 
-    preserved_geotiff, message = append_source_geotiff_projection_evlrs(
-        source_metadata_file,
-        output_file,
-    )
-    if not preserved_geotiff:
-        return (False, f"GeoTIFF projection preservation failed: {message}")
-
-    valid_crs, message = copc_preserves_source_crs(source_metadata_file, output_file)
+    valid_crs, message = validate_single_crs_record(source_metadata_file, output_file)
     if not valid_crs:
         return (False, f"CRS validation failed: {message}")
 
@@ -653,6 +645,19 @@ def _preserve_and_validate_las_metadata(source_metadata_file: Path, output_file:
         if not preserved_vectors:
             return (False, f"Vector ExtraBytes metadata preservation failed: {message}")
     return (True, "LAS metadata preserved")
+
+
+def _finalize_product(output_file: Path, output_format: str, dimension_sources: List[Path],
+                      metadata_source: Path) -> None:
+    """Validate a written LAS/COPC product, or record the CRS of a PLY product."""
+    if parse_merged_output_formats(output_format)[0] == "ply":
+        add_crs_comment_to_ply(output_file, crs_comment_from_file(metadata_source))
+        return
+    valid, message = _validate_preserved_product_dims(dimension_sources, output_file)
+    if valid:
+        valid, message = _preserve_and_validate_las_metadata(metadata_source, output_file)
+    if not valid:
+        raise RuntimeError(message)
 
 
 def _preserve_and_validate_copc_metadata(source_metadata_file: Path, output_file: Path) -> Tuple[bool, str]:
@@ -758,16 +763,7 @@ def _merge_prod_chunks(
     )
     result = _run_pdal_pipeline(pipeline, work_dir / f"_{output_file.stem}_merge_chunks.json")
     if result.returncode == 0 and output_file.exists() and output_file.stat().st_size > 0:
-        if normalized_format in {"laz", "copc.laz"}:
-            valid_dims, message = _validate_preserved_product_dims(chunk_files, output_file)
-            if not valid_dims:
-                raise RuntimeError(message)
-            valid_metadata, message = _preserve_and_validate_las_metadata(
-                source_metadata_file,
-                output_file,
-            )
-            if not valid_metadata:
-                raise RuntimeError(message)
+        _finalize_product(output_file, normalized_format, chunk_files, source_metadata_file)
         return
 
     if normalized_format != "copc.laz":
@@ -947,16 +943,7 @@ def create_prod_merged_file(
         raise RuntimeError(f"PDAL prod-merged pipeline failed: {_pdal_error(result, 500)}")
     if not output_file.exists() or output_file.stat().st_size == 0:
         raise RuntimeError(f"Prod-merged output was not created: {output_file}")
-    if parse_merged_output_formats(output_format)[0] in {"laz", "copc.laz"}:
-        valid_dims, message = _validate_preserved_product_dims(copc_input_files, output_file)
-        if not valid_dims:
-            raise RuntimeError(message)
-        valid_metadata, message = _preserve_and_validate_las_metadata(
-            copc_input_files[0],
-            output_file,
-        )
-        if not valid_metadata:
-            raise RuntimeError(message)
+    _finalize_product(output_file, output_format, copc_input_files, copc_input_files[0])
     return output_file
 
 

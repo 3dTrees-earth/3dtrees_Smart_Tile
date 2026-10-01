@@ -12,6 +12,8 @@ from typing import Iterable, List, Optional, Tuple
 import laspy
 import numpy as np
 
+from crs_records import standardize_projection_records
+
 
 COPC_COM_TARGET_WINDOW_CELLS = 500
 COPC_COM_MAX_WINDOW_SIZE = 20.0
@@ -67,7 +69,7 @@ def make_center_of_mass_header(source_header: laspy.LasHeader, dimension_reducti
     if source_evlrs is not None:
         header.evlrs = VLRList([vlr for vlr in source_evlrs if not _is_stale_copc_vlr(vlr)])
 
-    return header
+    return standardize_projection_records(header)
 
 
 def copy_non_xyz_dimensions(source_las: laspy.LasData, output_las: laspy.LasData, indices: np.ndarray) -> None:

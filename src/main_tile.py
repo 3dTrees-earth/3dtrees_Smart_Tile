@@ -27,11 +27,10 @@ from typing import Dict, List, Optional, Tuple
 import plot_tiles_and_copc
 
 from copc_metadata import (
-    append_source_geotiff_projection_evlrs as _append_source_geotiff_projection_evlrs,
-    copc_preserves_source_crs as _copc_preserves_source_crs,
     first_crs_source as _first_crs_source,
     laspy_laz_backend as _laspy_laz_backend,
 )
+from crs_records import validate_single_crs_record as _validate_single_crs_record
 from parameters import TILE_PARAMS
 from point_cloud_metadata import point_cloud_files
 from tile_copc import (
@@ -466,15 +465,7 @@ def create_tiles(
         if final_tile.exists() and final_tile.stat().st_size > 0:
             valid_existing_crs = True
             if crs_reference is not None:
-                preserved_geotiff, geotiff_message = _append_source_geotiff_projection_evlrs(
-                    crs_reference, final_tile
-                )
-                if not preserved_geotiff:
-                    print(f"  Existing tile {final_tile.name} GeoTIFF preservation failed: {geotiff_message}")
-                    valid_existing_crs = False
-                valid_existing_crs, crs_message = _copc_preserves_source_crs(
-                    crs_reference, final_tile
-                ) if valid_existing_crs else (False, geotiff_message)
+                valid_existing_crs, crs_message = _validate_single_crs_record(crs_reference, final_tile)
                 if not valid_existing_crs:
                     print(f"  Existing tile {final_tile.name} CRS validation failed: {crs_message}")
                     try:
@@ -742,13 +733,8 @@ def run_tiling_pipeline(
         out_copc = copc_single_dir / f"{source_file.stem}.copc.laz"
         rebuild_copc = not out_copc.exists() or out_copc.stat().st_size == 0
         if not rebuild_copc:
-            preserved_geotiff, geotiff_message = _append_source_geotiff_projection_evlrs(
-                source_file, out_copc
-            )
-            valid_crs, crs_message = _copc_preserves_source_crs(source_file, out_copc)
-            if not preserved_geotiff or not valid_crs:
-                if not preserved_geotiff:
-                    print(f"  Existing COPC GeoTIFF preservation failed: {geotiff_message}")
+            valid_crs, crs_message = _validate_single_crs_record(source_file, out_copc)
+            if not valid_crs:
                 print(f"  Existing COPC CRS validation failed: {crs_message}")
                 print("  Rebuilding COPC from source LAZ...")
                 try:

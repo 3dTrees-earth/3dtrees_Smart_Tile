@@ -10,13 +10,8 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from copc_metadata import (
-    append_source_geotiff_projection_evlrs,
-    copc_preserves_source_crs,
-    first_crs_source,
-    first_srs_assignment,
-    srs_assignment_from_file,
-)
+from copc_metadata import first_crs_source, first_srs_assignment, srs_assignment_from_file
+from crs_records import validate_single_crs_record
 
 
 def get_pdal_path() -> str:
@@ -135,13 +130,7 @@ def finalize_tile_to_copc(args: Tuple) -> Tuple[str, bool, str]:
 
         crs_source = first_crs_source(parts)
         if crs_source is not None:
-            preserved_geotiff, geotiff_message = append_source_geotiff_projection_evlrs(
-                crs_source,
-                final_tile,
-            )
-            if not preserved_geotiff:
-                return (label, False, geotiff_message)
-            valid_crs, crs_message = copc_preserves_source_crs(crs_source, final_tile)
+            valid_crs, crs_message = validate_single_crs_record(crs_source, final_tile)
             if not valid_crs and message.startswith("untwine"):
                 try:
                     final_tile.unlink(missing_ok=True)
@@ -156,13 +145,7 @@ def finalize_tile_to_copc(args: Tuple) -> Tuple[str, bool, str]:
                 )
                 if not success:
                     return (label, False, f"{message}; after untwine CRS validation failed: {crs_message}")
-                preserved_geotiff, geotiff_message = append_source_geotiff_projection_evlrs(
-                    crs_source,
-                    final_tile,
-                )
-                if not preserved_geotiff:
-                    return (label, False, geotiff_message)
-                valid_crs, crs_message = copc_preserves_source_crs(crs_source, final_tile)
+                valid_crs, crs_message = validate_single_crs_record(crs_source, final_tile)
             if not valid_crs:
                 return (label, False, f"COPC CRS validation failed: {crs_message}")
 
@@ -381,8 +364,7 @@ def _convert_laz_to_copc_impl(
             )
             if success:
                 if _output_has_no_extra_dimensions(output_copc):
-                    append_source_geotiff_projection_evlrs(input_laz, output_copc)
-                    valid_crs, message = copc_preserves_source_crs(input_laz, output_copc)
+                    valid_crs, message = validate_single_crs_record(input_laz, output_copc)
                     if valid_crs:
                         return True
                     print(f"  Warning: untwine COPC CRS validation failed for {output_copc.name}: {message}; retrying with PDAL")
@@ -394,11 +376,7 @@ def _convert_laz_to_copc_impl(
                     pass
         if not convert_laz_to_copc_pdal(input_laz, output_copc, preserve_extra_dims=False):
             return False
-        preserved_geotiff, message = append_source_geotiff_projection_evlrs(input_laz, output_copc)
-        if not preserved_geotiff:
-            print(f"  Warning: COPC GeoTIFF projection preservation failed for {output_copc.name}: {message}")
-            return False
-        valid_crs, message = copc_preserves_source_crs(input_laz, output_copc)
+        valid_crs, message = validate_single_crs_record(input_laz, output_copc)
         if not valid_crs:
             print(f"  Warning: COPC CRS validation failed for {output_copc.name}: {message}")
         return valid_crs
@@ -412,8 +390,7 @@ def _convert_laz_to_copc_impl(
             strip_extra_dims=False,
         )
         if success:
-            append_source_geotiff_projection_evlrs(input_laz, output_copc)
-            valid_crs, _ = copc_preserves_source_crs(input_laz, output_copc)
+            valid_crs, _ = validate_single_crs_record(input_laz, output_copc)
             if valid_crs:
                 return True
             try:
@@ -423,11 +400,7 @@ def _convert_laz_to_copc_impl(
 
     if not convert_laz_to_copc_pdal(input_laz, output_copc, preserve_extra_dims=True):
         return False
-    preserved_geotiff, message = append_source_geotiff_projection_evlrs(input_laz, output_copc)
-    if not preserved_geotiff:
-        print(f"  Warning: COPC GeoTIFF projection preservation failed for {output_copc.name}: {message}")
-        return False
-    valid_crs, message = copc_preserves_source_crs(input_laz, output_copc)
+    valid_crs, message = validate_single_crs_record(input_laz, output_copc)
     if not valid_crs:
         print(f"  Warning: COPC CRS validation failed for {output_copc.name}: {message}")
     return valid_crs
