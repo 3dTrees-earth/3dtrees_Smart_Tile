@@ -29,7 +29,7 @@ if str(_src_dir) not in sys.path:
 
 # Import Pydantic-based parameters
 try:
-    from parameters import Parameters, print_params, get_tile_params, get_merge_params, get_remap_params
+    from parameters import Parameters, print_params, get_tile_params, get_remap_params
     from merge_prediction_collections import comma_paths
 except ImportError as e:
     print(f"Error: Could not import parameters.py: {e}")
@@ -583,7 +583,6 @@ def preprocess_boolean_flags(args_list):
     boolean_flags = [
         '--show-params', '--show_params',
         '--disable-matching', '--disable_matching',
-        '--disable-volume-merge', '--disable_volume_merge',
         '--reassign-small-instances', '--reassign_small_instances',
         '--pre-remap-reassign-instances', '--pre_remap_reassign_instances',
         '--output-copc-res1', '--output_copc_res1',
@@ -743,10 +742,7 @@ def _print_cli_help() -> None:
                 "max_volume_for_merge",
                 "reassign_small_instances",
                 "max_cluster_size",
-                "min_cluster_size",
                 "disable_matching",
-                "disable_volume_merge",
-                "pre_remap_reassign_instances",
                 "verbose",
             ],
         ),

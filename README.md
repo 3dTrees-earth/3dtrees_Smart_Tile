@@ -276,6 +276,26 @@ filenames must have distinct stems. Both sidecars are required for final remap;
 keep them co-located with the prediction tiles or preserve the merge manifest's
 `rct_tree_sidecars` relative path to `segmented_filtered/`.
 
+**QSM tree meshes (3DT-2232).** When the RCT collection also holds each tile's
+`<stem>_trees_mesh.ply` from RayCloudTools >= 1.3.0 (per-face `uint tree_id`,
+the native tile-local tree ID), SmartTile carries them through with the same ID
+mapping as the LAZ and tables. Merge/filter writes
+`<tile>_filtered_trees_mesh.ply` beside the filtered tables: only faces of
+retained or recovered trees, `tree_id` rewritten to `tile_id * 100000 +
+local_id`, unused vertices dropped. Final remap writes
+`<original-stem>_trees_mesh.ply` with the complete retained model of exactly
+the trees in that original's tables, `tree_id` = the dataset-wide compact ID
+(a shared tree appears in each original with the same ID; models are not
+clipped to the original). Geometry, colours, topology and winding are copied
+unchanged in the native binary layout; header comments record
+`rct_tree_id_scope` (`native-rct-extraction` → `smarttile-rct-tile-namespace` →
+`smarttile-rct-dataset-compact`) and `rct_tree_count`. Meshes are optional, but
+if supplied every tile needs one; ID-less meshes, meshes without tables and
+mesh IDs without a tree row fail before publication. `rct_instance_mapping.json`
+lists each original's `trees_mesh` and its face/vertex counts. Terrain meshes
+carry no tree IDs and are not processed. These final meshes are the input for
+viewer GLB packing.
+
 `rct_instance_mapping.json` records final IDs, source IDs/tile/local IDs, source
 filenames, per-file table paths and distinct-tree counts. Final LAZ files carry
 a compact-ID VLR (`3DTrees`, record 24003) referring to this mapping. Count
@@ -445,6 +465,20 @@ semantically, but a LAZ -> COPC conversion may represent the same CRS as WKT VLR
 rather than the original GeoKey VLRs. Therefore SmartTile does not promise that a
 COPC-derived LAZ is byte-identical to enriching the raw uploaded LAZ directly.
 
+**One standardized CRS record per output.** Every LAS 1.4 / COPC output carries
+exactly one CRS record: a single OGC WKT VLR with the *standardized* CRS text.
+A CRS identified as an EPSG code (pyproj confidence >= 70) is written as that
+code's WKT1_GDAL definition, byte-identical to what PDAL/GDAL writers produce;
+an unidentified CRS (for example a compound CRS with a local height datum)
+keeps its original text. Writer-normalized and original serializations are no
+longer stored side by side: that made readers disagree (PDAL reads the first
+record, laspy the last) and caused false "CRS missing or changed" failures for
+uploads whose CRS text is valid but spelled differently (datasets 3433, 3147,
+3DT-2200 class). Validation is semantic: the output must hold exactly one CRS
+record describing the same CRS as the source (same authority code or equal
+definition); a genuinely different CRS or duplicate records fail. Headers older
+than LAS 1.4 (GeoTIFF keys only) are left unchanged.
+
 ### View Current Parameters
 
 ```bash
@@ -491,7 +525,7 @@ python src/run.py --task create_merged_file \
 The task stages LAZ/LAS inputs to COPC in preservation mode with untwine when available, falling back to PDAL `writers.copc`, before merging and product downsampling. Existing matching `.copc.laz` files are reused so one source is not merged twice.
 `--staged-copc-dir` points to a reusable cache of already converted Original-with-predictions COPCs. This is recommended for repeat validation runs and production reruns where the enriched originals have not changed.
 `--standardization-json` points to the standardization `collection_summary.json` and validates that expected non-constant source dimensions survived into the staged COPCs and final LAS/COPC prod-merged products.
-LAZ and COPC outputs use LAS/COPC metadata forwarding. PLY outputs carry point dimensions as PLY properties, but do not preserve LAS/COPC VLR metadata such as CRS records.
+LAZ and COPC outputs use LAS/COPC metadata forwarding. PLY outputs carry point dimensions as PLY properties, but do not preserve LAS/COPC VLR metadata. PLY has no CRS field, so every PLY SmartTile produces (prod-merged products and RCT tree meshes) records its CRS in the header as `comment crs: EPSG:<code>`, or as single-line standardized WKT when the CRS has no EPSG code. This is the convention QGIS (MDAL) reads; other readers ignore comments. PDAL's PLY writer cannot add comments, so product PLYs get the line in a header-only rewrite after writing; the binary payload is copied unchanged. PDAL's PLY reader ignores the comment: a PLY -> LAS conversion needs `readers.ply.default_srs`. Coordinates stay absolute float64; ASCII PLY written by PDAL without an explicit `precision` rounds to 6 significant digits (about 10 m for UTM northings), so SmartTile writes binary PLY.
 `--num-spatial-chunks` controls bounded COPC reads for prod-merged creation. For large UTM datasets, prefer setting it to the available CPU budget (for example `10`) instead of using a single global merge.
 For COPC output, SmartTile first writes bounded LAZ chunks and then prefers direct `untwine` chunk-to-COPC finalization. This keeps RAM bounded and avoids a giant merged temporary LAZ, but it still needs scratch disk for the chunk files and untwine hierarchy/output staging. Direct untwine output is accepted only when its point count exactly matches the source chunk total; otherwise SmartTile falls back to the PDAL merge/conversion path.
 When multiple product formats are selected for the same resolution, SmartTile generates one canonical set of nearest-to-centroid chunk LAZ files and writes all selected formats from those same chunks. This avoids repeated chunk computation and keeps LAZ, COPC LAZ, and PLY point counts aligned for a given resolution.
@@ -737,12 +771,18 @@ points (default 3000) and an axis-aligned bounding box below
 `--max-volume-for-merge` (default 4 m3) takes the ID of the remaining instance with the
 nearest XY centroid (horizontal distance, height ignored) within 5 m; otherwise it keeps its ID. Only instance IDs
 change. The statistics are collected during deduplication, the tiles are
-relabelled in one pass when anything changes, and the final label index is
-built once at the end, only if original enrichment in the same task needs it.
+relabelled in one pass when anything changes. No index is rebuilt: original
+enrichment in the same task uses the survivor index and the ID compaction
+folds each reassigned ID into its target (`reassigned_to` in
+`instance_mapping.json`).
 Decisions are recorded under `small_instance_reassignment` in the report and
 targets are flagged in `instance_metadata.csv` (`has_added_clusters`). It is
 rejected for `PredInstance_RCT`. `--pre-remap-reassign-instances` stays rejected
 in `remap`, because it would relabel after the reconciled merge contract.
+The inactive legacy options `--min-cluster-size`, `--enable-volume-merge`,
+`--disable-volume-merge`, and the old `--pre-remap-reassign-*` tuning/output
+options are no longer accepted by `run.py`. Use `--reassign-small-instances`
+with `--max-cluster-size` and `--max-volume-for-merge` during merge/filter.
 
 ### Single-file tiling bypass metadata
 

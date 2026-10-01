@@ -43,7 +43,7 @@ def _rewrite_cloud(file, mappings):
             with laspy.open(temporary, mode="w", header=header) as writer:
                 for record in reader.chunk_iterator(MAX_BATCH_POINTS):
                     out = copy_record(record, header)
-                    for name, source_ids in mappings.items():
+                    for name, (source_ids, compact_ids) in mappings.items():
                         values = np.asarray(record[name])
                         positive = values > 0
                         positions = np.searchsorted(source_ids, values[positive])
@@ -51,7 +51,7 @@ def _rewrite_cloud(file, mappings):
                                 np.any(source_ids[positions] != values[positive])):
                             raise ValueError(f"{file.name}: {name} IDs changed after remapping")
                         compact = np.zeros(len(record), dtype=np.uint32)
-                        compact[positive] = positions + 1
+                        compact[positive] = compact_ids[positions]
                         out[name] = compact
                     writer.write_points(out)
                 write_retained_evlrs(writer, header)
@@ -60,29 +60,37 @@ def _rewrite_cloud(file, mappings):
         temporary.unlink(missing_ok=True)
 
 
-def compact_originals(output_dir, ids_by_dimension):
+def compact_originals(output_dir, ids_by_dimension, aliases=None):
     """Compact a private staging collection before publication in one cloud pass.
 
     The census is collected during enrichment; no extra source scan is needed.
     The same source label gets the same final label across all original files.
+    ``aliases`` ({dimension: {source: target}}, e.g. small-instance
+    reassignment) give a source label its target's final label.
     """
     output_dir = Path(output_dir)
+    aliases = aliases or {}
     mappings, metadata = {}, {"version": 1, "background": 0, "models": {}}
     files = set()
     for name, ids_by_file in sorted(ids_by_dimension.items()):
-        ids = sorted({int(uid) for values in ids_by_file.values() for uid in values if uid > 0})
+        alias = {int(s): int(t) for s, t in aliases.get(name, {}).items()}
+        sources = sorted({int(uid) for values in ids_by_file.values() for uid in values if uid > 0})
+        ids = sorted({alias.get(uid, uid) for uid in sources})
         if len(ids) > np.iinfo(np.uint32).max:
             raise ValueError(f"{name}: compact IDs exceed uint32")
-        mappings[name] = np.asarray(ids, dtype=np.uint32)
+        final = {uid: i + 1 for i, uid in enumerate(ids)}
+        mappings[name] = (np.asarray(sources, dtype=np.uint32),
+                          np.asarray([final[alias.get(uid, uid)] for uid in sources], dtype=np.uint32))
         files.update(ids_by_file)
         metadata["models"][name] = {
             "scope": "dataset", "instance_count": len(ids),
-            "instances": [{"source_instance_id": uid, "instance_id": i + 1}
-                          for i, uid in enumerate(ids)],
+            "instances": [{"source_instance_id": uid, "instance_id": final[alias.get(uid, uid)],
+                           **({"reassigned_to": alias[uid]} if uid in alias else {})}
+                          for uid in sources],
         }
     if mappings:
         for name in sorted(files):
             _rewrite_cloud(output_dir / name, mappings)
         (output_dir / MAPPING_FILE).write_text(json.dumps(metadata, indent=2) + "\n")
     return {"mapping": MAPPING_FILE if mappings else None,
-            "counts": {name: len(ids) for name, ids in mappings.items()}}
+            "counts": {name: int(compact.max(initial=0)) for name, (_, compact) in mappings.items()}}

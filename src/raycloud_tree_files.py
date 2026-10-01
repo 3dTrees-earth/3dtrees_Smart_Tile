@@ -1,6 +1,7 @@
 """Keep RayCloudTools tree rows aligned with the output instance IDs."""
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -18,6 +19,26 @@ def tree_sidecars(collection: Path) -> list[Path]:
     folder = collection if collection.is_dir() else collection.parent
     return sorted((p for p in folder.glob("*.txt") if _TREE_FILE.fullmatch(p.name)),
                   key=lambda p: p.name.lower())
+
+
+def rct_sidecar_folder(collection: Path) -> Path:
+    """Folder holding a collection's RCT tables and meshes.
+
+    Co-located sidecars win; otherwise the merge manifest's ``rct_tree_sidecars``
+    link, or the sibling ``segmented_filtered/`` of manifests predating it.
+    """
+    collection = Path(collection)
+    folder = collection if collection.is_dir() else collection.parent
+    if tree_sidecars(folder):
+        return folder
+    manifest = folder / "smarttile_merge.json"
+    if manifest.is_file():
+        metadata = json.loads(manifest.read_text(encoding="utf-8"))
+        if metadata.get("rct_tree_sidecars"):
+            return folder / metadata["rct_tree_sidecars"]
+        if "rct_instance_ids" in metadata:
+            return folder.parent / "segmented_filtered"
+    return folder
 
 
 def _tile_key(path: Path) -> str:

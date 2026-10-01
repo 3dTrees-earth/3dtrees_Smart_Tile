@@ -438,38 +438,8 @@ class Parameters(BaseSettings):
 
     pre_remap_reassign_instances: bool = Field(
         False,
-        description="Before remapping to originals, reassign small instances in the segmented/merged point cloud.",
+        description="Unsupported legacy option: remap rejects label reassignment. Use --reassign-small-instances during merge/filter.",
         validation_alias=AliasChoices("pre-remap-reassign-instances", "pre_remap_reassign_instances"),
-    )
-
-    pre_remap_reassign_instance_dimension: Optional[str] = Field(
-        default=None,
-        description="Instance dimension to update during pre-remap reassignment. Defaults to the first transferred dimension containing 'Instance'.",
-        validation_alias=AliasChoices("pre-remap-reassign-instance-dimension", "pre_remap_reassign_instance_dimension"),
-    )
-
-    pre_remap_reassign_min_cluster_size: int = Field(
-        250,
-        description="Pre-remap reassignment: instances below this point count are reassigned to the nearest larger instance.",
-        validation_alias=AliasChoices("pre-remap-reassign-min-cluster-size", "pre_remap_reassign_min_cluster_size"),
-    )
-
-    pre_remap_reassign_hull_point_threshold: int = Field(
-        5000,
-        description="Pre-remap reassignment: compute convex hulls for instances below this point count.",
-        validation_alias=AliasChoices("pre-remap-reassign-hull-point-threshold", "pre_remap_reassign_hull_point_threshold"),
-    )
-
-    pre_remap_reassign_max_volume: float = Field(
-        5.0,
-        description="Pre-remap reassignment: instances below the hull point threshold and this hull volume in m3 are reassigned.",
-        validation_alias=AliasChoices("pre-remap-reassign-max-volume", "pre_remap_reassign_max_volume"),
-    )
-
-    pre_remap_reassigned_laz: Optional[Path] = Field(
-        default=None,
-        description="Optional path to save the segmented/merged point cloud after pre-remap reassignment.",
-        validation_alias=AliasChoices("pre-remap-reassigned-laz", "pre_remap_reassigned_laz"),
     )
 
     # ==========================================================================
@@ -515,8 +485,8 @@ class Parameters(BaseSettings):
     reassign_small_instances: bool = Field(
         False,
         description=("Merge/filter: after deduplication, give instances with fewer than --max-cluster-size "
-                     "points and a bounding box below --max-volume-for-merge the ID of the nearest "
-                     "remaining instance centroid within 5 m. Not supported for PredInstance_RCT."),
+                     "points and a bounding box below --max-volume-for-merge the ID of the remaining "
+                     "instance with the nearest XY centroid within 5 m. Not supported for PredInstance_RCT."),
         validation_alias=AliasChoices("reassign-small-instances", "reassign_small_instances"),
     )
 
@@ -532,18 +502,6 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("border-zone-width", "border_zone_width"),
     )
 
-    min_cluster_size: Optional[int] = Field(
-        300,
-        description="Minimum cluster size in points for reassignment",
-        validation_alias=AliasChoices("min-cluster-size", "min_cluster_size"),
-    )
-
-    enable_volume_merge: bool = Field(
-        True,
-        description="Enable small-instance volume reassignment in filter task.",
-        validation_alias=AliasChoices("enable-volume-merge", "enable_volume_merge"),
-    )
-
     remap_merge: bool = Field(
         False,
         description="After filter task, remap filtered dimensions to originals and/or subsampled targets.",
@@ -554,12 +512,6 @@ class Parameters(BaseSettings):
         False,
         description="Disable cross-tile instance matching",
         validation_alias=AliasChoices("disable-matching", "disable_matching"),
-    )
-
-    disable_volume_merge: bool = Field(
-        False,
-        description="Disable small volume instance merging",
-        validation_alias=AliasChoices("disable-volume-merge", "disable_volume_merge"),
     )
 
     skip_merged_file: bool = Field(
@@ -615,7 +567,6 @@ class Parameters(BaseSettings):
         "overlap_threshold",
         "max_centroid_distance",
         "max_volume_for_merge",
-        "pre_remap_reassign_max_volume",
     )
     @classmethod
     def validate_merge_params(cls, v, info):
@@ -637,9 +588,6 @@ class Parameters(BaseSettings):
         "num_spatial_chunks",
         "tile_source_workers",
         "tile_writer_workers",
-        "min_cluster_size",
-        "pre_remap_reassign_min_cluster_size",
-        "pre_remap_reassign_hull_point_threshold",
     )
     @classmethod
     def validate_positive_int(cls, v, info):
@@ -780,9 +728,9 @@ def print_params(params: Parameters):
     print(f"  overlap_threshold: {params.overlap_threshold}")
     print(f"  max_centroid_distance: {params.max_centroid_distance}")
     print(f"  max_volume_for_merge: {params.max_volume_for_merge}")
-    print(f"  min_cluster_size: {params.min_cluster_size}")
+    print(f"  max_cluster_size: {params.max_cluster_size}")
     print(f"  disable_matching: {params.disable_matching}")
-    print(f"  enable_volume_merge: {params.enable_volume_merge}")
+    print(f"  reassign_small_instances: {params.reassign_small_instances}")
     print(f"  remap_merge: {params.remap_merge}")
     print(f"  verbose: {params.verbose}")
 
@@ -825,19 +773,6 @@ def get_tile_params(params: Parameters) -> dict:
         'output_copc_res2': params.output_copc_res2,
         'subsampling_method': params.subsampling_method,
         'chunk_size': params.chunk_size,
-    }
-
-
-def get_merge_params(params: Parameters) -> dict:
-    """Get merge parameters as a dictionary for legacy compatibility."""
-    return {
-        'overlap_threshold': params.overlap_threshold,
-        'max_centroid_distance': params.max_centroid_distance,
-        'max_volume_for_merge': params.max_volume_for_merge,
-        'min_cluster_size': params.min_cluster_size,
-        'workers': params.workers,
-        'verbose': params.verbose,
-        'instance_dimension': params.instance_dimension,
     }
 
 

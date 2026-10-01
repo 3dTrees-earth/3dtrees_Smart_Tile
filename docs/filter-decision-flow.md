@@ -279,10 +279,12 @@ Enabled only with `--reassign-small-instances`; never for RCT.
 - A small instance takes the ID of the non-small instance with the nearest
   XY centroid (horizontal distance; height is ignored) within 5 m, or keeps its ID. Small instances never receive other small ones.
 - Tiles are relabelled in one pass only when something changes; geometry,
-  semantics and scores are untouched. The final label index is built once at
-  the end, only if in-task original enrichment reads it.
+  semantics and scores are untouched. No index is rebuilt: in-task original
+  enrichment reads the survivor index and ID compaction folds each reassigned
+  ID into its target.
 
-Source: [`small_instance_reassignment`](../src/small_instance_reassignment.py).
+Source: [`small_instance_reassignment`](../src/small_instance_reassignment.py),
+[`instance_statistics`](../src/instance_statistics.py), [`compact_originals`](../src/instance_finalization.py).
 
 ## 6. Publication and downstream boundary
 

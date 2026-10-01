@@ -124,6 +124,27 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
         self.assertEqual(run._unknown_cli_flags(["--task", "tile", "--tilng-threshold", "1"]), ["tilng-threshold"])
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
+    def test_inactive_reassignment_options_fail_instead_of_being_ignored(self):
+        import contextlib
+        import io
+
+        removed = (
+            "min_cluster_size", "enable_volume_merge", "disable_volume_merge",
+            "pre_remap_reassign_instance_dimension", "pre_remap_reassign_min_cluster_size",
+            "pre_remap_reassign_hull_point_threshold", "pre_remap_reassign_max_volume",
+            "pre_remap_reassigned_laz",
+        )
+        for name in removed:
+            for flag in (name, name.replace("_", "-")):
+                with self.subTest(flag=flag), contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        run._validate_known_cli_flags(["--task", "merge", "--" + flag, "1"])
+        run._validate_known_cli_flags([
+            "--task", "merge", "--reassign-small-instances",
+            "--max-cluster-size", "3000", "--max-volume-for-merge", "4",
+        ])
+
+    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_cli_known_alias_and_preprocessor_flags_are_accepted(self):
         self.assertEqual(
             run._unknown_cli_flags(

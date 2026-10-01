@@ -9,9 +9,8 @@ import laspy
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from small_instance_reassignment import (
-    InstanceStatistics, SEARCH_RADIUS_M, SmallInstancePolicy, plan_reassignment,
-)
+from instance_statistics import InstanceStatistics
+from small_instance_reassignment import SEARCH_RADIUS_M, SmallInstancePolicy, plan_reassignment
 from strict_prediction_pipeline import merge_collections
 from test_dense_tile_merge import write_cloud
 from test_strict_prediction_pipeline import layout
@@ -71,6 +70,7 @@ class PlanTests(unittest.TestCase):
                                             SmallInstancePolicy())
         self.assertEqual(mapping, {})
         self.assertEqual(len(report["kept"]), 2)
+        self.assertEqual((report["reassigned_count"], report["reassigned_points"]), (0, 0))
 
     def test_streamed_batches_match_one_batch(self):
         xyz = np.random.default_rng(0).random((500, 3))
@@ -122,6 +122,10 @@ class MergeTests(unittest.TestCase):
             self.assertEqual(set(np.unique(labels)), {1})
             original = laspy.read(root / "original_with_predictions/a.las")
             self.assertEqual(set(np.unique(original.PredInstance)), {1})
+            mapping = json.loads((root / "original_with_predictions/instance_mapping.json").read_text())
+            self.assertEqual({r["source_instance_id"]: r["instance_id"] for r in mapping["models"]["PredInstance"]["instances"]},
+                             {1: 1, 2: 1})
+            self.assertEqual([r.get("reassigned_to") for r in mapping["models"]["PredInstance"]["instances"]], [None, 1])
             with (root / "out/instance_metadata.csv").open() as stream:
                 self.assertEqual(list(csv.reader(stream))[1:], [["1", "1"]])
             summary = json.loads((root / "out/PredInstance_summary.json").read_text())

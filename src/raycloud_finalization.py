@@ -14,7 +14,9 @@ from bounded_point_index import MAX_BATCH_POINTS
 from dense_tile_merge import copy_record
 from point_cloud_metadata import copy_single_source_header, update_extra_dimensions, write_retained_evlrs
 from raycloud_instance_ids import RCT_ID_STRIDE, read_tile_namespace, validate_namespaced_labels
-from raycloud_tree_files import pair_tree_sidecars, read_tree_header, tree_rows, tree_sidecars
+from raycloud_tree_files import pair_tree_sidecars, rct_sidecar_folder, read_tree_header, tree_rows, tree_sidecars
+from raycloud_meshes import DATASET_SCOPE, TILE_SCOPE, TreeMesh, pair_tree_meshes, write_tree_mesh
+from ply_crs import crs_comment_from_file
 
 
 INSTANCE = "PredInstance_RCT"
@@ -23,21 +25,7 @@ MAPPING_FILE = "rct_instance_mapping.json"
 
 def remap_tree_sidecars(collection):
     """Resolve co-located tables or the tables published with a merge result."""
-    collection = Path(collection)
-    files = tree_sidecars(collection)
-    if files:
-        return files
-    folder = collection if collection.is_dir() else collection.parent
-    manifest = folder / "smarttile_merge.json"
-    if manifest.is_file():
-        metadata = json.loads(manifest.read_text(encoding="utf-8"))
-        location = metadata.get("rct_tree_sidecars")
-        if location:
-            return tree_sidecars(folder / location)
-        # Compatibility with merge manifests predating the explicit link.
-        if "rct_instance_ids" in metadata:
-            return tree_sidecars(folder.parent / "segmented_filtered")
-    return []
+    return tree_sidecars(rct_sidecar_folder(collection))
 
 
 def _catalogue_tables(db, predictions, sidecars):
@@ -108,11 +96,26 @@ def _rewrite_cloud(file, source_ids):
     os.replace(temporary, file)
 
 
-def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, rewrite_clouds=True):
+def _open_tile_meshes(predictions, meshes):
+    """Open the filtered tile meshes published by merge/filter."""
+    opened = []
+    for tile, path in sorted(pair_tree_meshes(predictions, meshes).items()):
+        mesh = TreeMesh.open(path)
+        if mesh.scope != TILE_SCOPE:
+            raise ValueError(f"{path.name}: expected SmartTile tile-namespace tree IDs, found scope {mesh.scope}; "
+                             "use the tree meshes published by merge/filter")
+        opened.append(mesh)
+    return opened
+
+
+def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, rewrite_clouds=True, meshes=()):
     """Finalize a private staging folder; callers publish it only on success.
 
     IDs are collected while remapping, avoiding a separate cloud census read.
     Intermediate tile namespaces and their sidecars remain reusable unchanged.
+    With ``meshes``, each original also gets ``<stem>_trees_mesh.ply`` holding
+    the complete retained QSM mesh of exactly its represented trees, with the
+    same compact IDs as its LAZ and tables.
     """
     output_dir = Path(output_dir)
     stems = [Path(name).stem.casefold() for name in ids_by_file]
@@ -135,6 +138,7 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, re
         if missing:
             raise ValueError(f"RCT instance ID {min(missing)} has no tree row")
         metadata["instances"] = [dict(predinstance=mapping[uid], **provenance[uid]) for uid in all_ids]
+        tile_meshes = _open_tile_meshes(predictions, list(meshes)) if meshes else []
         for name, ids in sorted(ids_by_file.items()):
             file = output_dir / name
             kept = sorted(uid for uid in ids if uid > 0)
@@ -150,6 +154,16 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, re
                         if not payload.endswith(("\n", "\r")):
                             stream.write("\n")
                 entry["sidecars"][kind] = table.name
+            if tile_meshes:
+                mesh_file = file.with_name(f"{file.stem}_trees_mesh.ply")
+                wanted = {uid: mapping[uid] for uid in kept}
+                vertices, faces, per_tree = write_tree_mesh(
+                    mesh_file, [(mesh, wanted) for mesh in tile_meshes], scope=DATASET_SCOPE,
+                    tree_count=len(kept), comments=[f"rct_instance_mapping {MAPPING_FILE}"],
+                    crs=crs_comment_from_file(file), allowed_ids=provenance.keys())
+                entry["sidecars"]["trees_mesh"] = mesh_file.name
+                entry["mesh"] = {"vertices": vertices, "faces": faces, "trees_with_faces": len(per_tree),
+                                 "trees_without_faces": sorted(set(wanted.values()) - per_tree.keys())}
             if rewrite_clouds:
                 _rewrite_cloud(file, source_ids)
             metadata["files"].append(entry)
@@ -158,4 +172,4 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, re
         db.close()
         database.unlink(missing_ok=True)
     return {"scope": "dataset", "tree_count": len(all_ids), "mapping": MAPPING_FILE,
-            "files": metadata["files"]}
+            "tree_meshes": bool(meshes), "files": metadata["files"]}
