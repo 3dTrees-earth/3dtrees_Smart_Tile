@@ -18,7 +18,7 @@ import numpy as np
 import psutil
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from strict_prediction_pipeline import merge_collections
+from remap_first_pipeline import merge_collections
 
 
 def cloud(path, x_values, y_values, instance=None):

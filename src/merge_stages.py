@@ -18,7 +18,7 @@ from point_cloud_metadata import (
 from prediction_collection_remap import prediction_collection_files, _promote_collection_extra_dim
 from instance_labels import instance_extra_bytes_params
 from parallel_index_queries import IndexQueries
-from tile_parallel import map_tiles
+from parallel_tiles import map_tiles
 
 
 DUPLICATE_RADIUS = 0.01

@@ -3,7 +3,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from bounded_point_index import distance_limit, spatial_batches
-from dense_tile_merge import DUPLICATE_RADIUS
+from merge_stages import DUPLICATE_RADIUS
 
 
 class RayCloudRecoveryGate:

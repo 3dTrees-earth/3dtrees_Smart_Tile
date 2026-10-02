@@ -12,7 +12,7 @@ from time import perf_counter
 import laspy
 import numpy as np
 from bounded_point_index import MAX_BATCH_POINTS, coordinates
-from dense_tile_merge import DUPLICATE_RADIUS, index_file
+from merge_stages import DUPLICATE_RADIUS, index_file
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
 from orphan_claims import select_claims
 from parallel_index_queries import IndexQueries

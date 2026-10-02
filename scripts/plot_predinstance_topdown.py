@@ -6,9 +6,7 @@ Usage
 -----
 From repo root:
 
-    python tools/tool_smart_tile/plot_predinstance_topdown.py \
-        /home/kg281/data/gfz/tiled_10m/merged/merged.laz \
-        /home/kg281/data/gfz/tiled_10m/merged/merged_predinstance_topdown.png
+    python scripts/plot_predinstance_topdown.py merged.laz merged_predinstance_topdown.png
 
 The script:
   - streams the input with laspy.chunk_iterator

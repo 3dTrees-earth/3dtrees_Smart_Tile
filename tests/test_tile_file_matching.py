@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from main_remap import _match_files_via_json, _remap_point_cloud_files, find_matching_files  # noqa: E402
+from tile_file_matching import _match_files_via_json, _point_cloud_files, find_matching_files  # noqa: E402
 
 
 class MainRemapFileDiscoveryTests(unittest.TestCase):
@@ -16,7 +16,7 @@ class MainRemapFileDiscoveryTests(unittest.TestCase):
             (root / "tile_a.laz").write_text("placeholder")
             (root / "tile_b.las").write_text("placeholder")
 
-            files = [path.name for path in _remap_point_cloud_files(root)]
+            files = [path.name for path in _point_cloud_files(root)]
 
         self.assertEqual(files, ["tile_a.laz", "tile_b.las"])
 
@@ -26,7 +26,7 @@ class MainRemapFileDiscoveryTests(unittest.TestCase):
             (root / "tile_a.laz").write_text("placeholder")
             (root / "tile_a.copc.laz").write_text("placeholder")
 
-            files = [path.name for path in _remap_point_cloud_files(root)]
+            files = [path.name for path in _point_cloud_files(root)]
 
         self.assertEqual(files, ["tile_a.copc.laz"])
 
@@ -51,14 +51,14 @@ class MainRemapFileDiscoveryTests(unittest.TestCase):
                 target_las: (20.0, 30.0, 0.0, 10.0),
             }
 
-            import main_remap
+            import tile_file_matching
 
-            original_get_file_bounds = main_remap.get_file_bounds
+            original_get_file_bounds = tile_file_matching.get_file_bounds
             try:
-                main_remap.get_file_bounds = bounds.__getitem__
+                tile_file_matching.get_file_bounds = bounds.__getitem__
                 matches = find_matching_files(source, target)
             finally:
-                main_remap.get_file_bounds = original_get_file_bounds
+                tile_file_matching.get_file_bounds = original_get_file_bounds
 
         self.assertEqual(
             [(src.name, tgt.name) for src, tgt, _ in matches],
@@ -89,13 +89,13 @@ class MainRemapFileDiscoveryTests(unittest.TestCase):
                 target_las: (20.0, 30.0, 0.0, 10.0),
             }
 
-            import main_remap
+            import tile_file_matching
 
-            original_get_file_bounds = main_remap.get_file_bounds
-            original_build = main_remap.build_neighbor_graph_from_bounds_json
+            original_get_file_bounds = tile_file_matching.get_file_bounds
+            original_build = tile_file_matching.build_neighbor_graph_from_bounds_json
             try:
-                main_remap.get_file_bounds = bounds.__getitem__
-                main_remap.build_neighbor_graph_from_bounds_json = lambda *_: (
+                tile_file_matching.get_file_bounds = bounds.__getitem__
+                tile_file_matching.build_neighbor_graph_from_bounds_json = lambda *_: (
                     [
                         (0.0, 10.0, 0.0, 10.0),
                         (20.0, 30.0, 0.0, 10.0),
@@ -105,8 +105,8 @@ class MainRemapFileDiscoveryTests(unittest.TestCase):
                 )
                 matches = _match_files_via_json(root / "tile_bounds_tindex.json", source, target)
             finally:
-                main_remap.get_file_bounds = original_get_file_bounds
-                main_remap.build_neighbor_graph_from_bounds_json = original_build
+                tile_file_matching.get_file_bounds = original_get_file_bounds
+                tile_file_matching.build_neighbor_graph_from_bounds_json = original_build
 
         self.assertEqual(
             [(src.name, tgt.name) for src, tgt, _ in matches],

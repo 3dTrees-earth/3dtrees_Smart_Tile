@@ -15,11 +15,11 @@ import laspy
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import dense_tile_merge  # noqa: E402
+import merge_stages  # noqa: E402
 from bounded_point_index import PointIndex  # noqa: E402
-from dense_tile_merge import describe_model, prepare_dense, query_process_shares  # noqa: E402
-from strict_prediction_pipeline import merge_collections  # noqa: E402
-from test_dense_tile_merge import write_cloud  # noqa: E402
+from merge_stages import describe_model, prepare_dense, query_process_shares  # noqa: E402
+from remap_first_pipeline import merge_collections  # noqa: E402
+from test_merge_stages import write_cloud  # noqa: E402
 
 TILE, BUFFER, TILES = 4.0, 0.5, 3
 
@@ -168,7 +168,7 @@ class ParallelDenseTransferTests(unittest.TestCase):
     def test_single_tile_query_processes_equal_one_process(self):
         # Small batches put many queries in flight at once (results must come back in order).
         with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b, \
-                mock.patch.object(dense_tile_merge, "MAX_BATCH_POINTS", 2048):
+                mock.patch.object(merge_stages, "MAX_BATCH_POINTS", 2048):
             files_1, counts_1, report_1, _ = transfer(Path(a), 1, count=1)
             files_4, counts_4, report_4, _ = transfer(Path(b), 4, count=1)
             self.assertEqual(report_4["parallelism"], {"dense_transfer_processes": 1, "dense_query_processes": [4]})
@@ -206,8 +206,8 @@ class ParallelDenseTransferTests(unittest.TestCase):
 
     def test_reconciliation_and_ownership_processes_equal_one_process(self):
         from dense_instance_ownership import assign_shared_points, filter_owned_instances, ownership_regions
-        from dense_tile_merge import reconcile_instances
-        from strict_prediction_pipeline import tile_overlaps
+        from merge_stages import reconcile_instances
+        from remap_first_pipeline import tile_overlaps
         runs = []
         for workers in (1, 3):
             tmp = tempfile.TemporaryDirectory()
@@ -277,8 +277,8 @@ class ParallelDenseTransferTests(unittest.TestCase):
 
     def test_dedup_removes_duplicates_identically_in_processes(self):
         from dense_instance_ownership import ownership_regions
-        from dense_tile_merge import deduplicate, reconcile_instances
-        from strict_prediction_pipeline import tile_overlaps
+        from merge_stages import deduplicate, reconcile_instances
+        from remap_first_pipeline import tile_overlaps
         runs = []
         for workers in (1, 4):
             tmp = tempfile.TemporaryDirectory()

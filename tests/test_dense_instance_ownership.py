@@ -9,10 +9,10 @@ import laspy
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from strict_prediction_pipeline import merge_collections
+from remap_first_pipeline import merge_collections
 from dense_instance_ownership import (owned_anchor, owned_background, ownership_regions,
                                       core_distance, preferred_core)
-from test_dense_tile_merge import write_cloud
+from test_merge_stages import write_cloud
 
 
 def core_layout(root):
@@ -46,7 +46,7 @@ class CoreOwnershipTests(unittest.TestCase):
         for workers in (1, 4):
             from contextlib import ExitStack
             from bounded_point_index import PointIndex
-            from dense_tile_merge import describe_model
+            from merge_stages import describe_model
             from dense_instance_ownership import filter_owned_instances
             from orphan_instance_recovery import recover_orphaned_instances, validate_recovered_geometry
             with tempfile.TemporaryDirectory() as tmp:
@@ -370,7 +370,7 @@ class CoreOwnershipTests(unittest.TestCase):
                     segmented_remapped_folder=source, output_tiles_folder=root / 'out',
                     tile_bounds_json=core_layout(root), filter_anchor='highest_point',
                     skip_merged_file=True, _cli_parse_args=False)
-                with patch('strict_prediction_pipeline.merge_collections', return_value={'state': 'test'}) as merge:
+                with patch('remap_first_pipeline.merge_collections', return_value={'state': 'test'}) as merge:
                     getattr(run, f'run_{task}_task')(params)
                 self.assertEqual(merge.call_args.kwargs['filter_anchor'], 'highest_point')
 

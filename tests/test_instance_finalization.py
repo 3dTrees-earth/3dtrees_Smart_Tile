@@ -9,8 +9,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from instance_finalization import compact_originals
 from get_bounds_from_tindex import build_tiles
-from strict_prediction_pipeline import strict_remap
-from test_dense_tile_merge import write_cloud
+from remap_first_pipeline import strict_remap
+from test_merge_stages import write_cloud
 
 
 def test_compaction_across_files_models_and_background(tmp_path):

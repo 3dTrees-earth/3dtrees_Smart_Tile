@@ -10,8 +10,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bounded_point_index import PointIndex
 from parallel_remap import RemapBatchQueries
-from strict_prediction_pipeline import strict_remap
-from test_dense_tile_merge import write_cloud
+from remap_first_pipeline import strict_remap
+from test_merge_stages import write_cloud
 
 
 def test_readonly_index_queries_without_mutation_or_creation(tmp_path):
@@ -95,7 +95,7 @@ def test_worker_failure_propagates_and_pool_closes(tmp_path):
 
 @pytest.mark.parametrize("missing", [False, True])
 def test_strict_remap_processes_match_serial_outputs_and_coverage(tmp_path, monkeypatch, missing):
-    import strict_prediction_pipeline as pipeline
+    import remap_first_pipeline as pipeline
     # Use multiple bounded batches without generating a large synthetic cloud.
     monkeypatch.setattr(pipeline, "MAX_BATCH_POINTS", 8)
     monkeypatch.setattr(pipeline, "spatial_query_worker_count", lambda n: n)
@@ -139,7 +139,7 @@ def test_strict_remap_processes_match_serial_outputs_and_coverage(tmp_path, monk
 
 
 def test_tiny_original_avoids_process_startup(tmp_path, monkeypatch):
-    import strict_prediction_pipeline as pipeline
+    import remap_first_pipeline as pipeline
     monkeypatch.setattr(pipeline, "spatial_query_worker_count", lambda n: n)
     originals, predictions = tmp_path / "raw", tmp_path / "pred"
     originals.mkdir(); predictions.mkdir()

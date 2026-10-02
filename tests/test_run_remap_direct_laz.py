@@ -9,7 +9,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from parameters import Parameters
 import run
-from test_dense_tile_merge import write_cloud
+from test_merge_stages import write_cloud
 
 
 class RunRemapDirectLazTests(unittest.TestCase):

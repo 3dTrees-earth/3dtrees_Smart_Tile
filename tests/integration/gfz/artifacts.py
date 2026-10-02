@@ -59,8 +59,8 @@ def stage_prediction(model, tile, output):
 
 
 def dense(model_name):
-    from dense_tile_merge import describe_model, prepare_dense
-    from strict_prediction_pipeline import origin_for
+    from merge_stages import describe_model, prepare_dense
+    from remap_first_pipeline import origin_for
     folder = ROOT / 'collections' / model_name
     model = describe_model(folder, 'PredInstance_' + model_name)
     # Source ExtraBytes may be present in predictions, but only model outputs

@@ -44,7 +44,7 @@ def test_compressed_core_scan_then_parallel_tiling_completes(tmp_path):
             jobs = root / 'jobs.txt'
             jobs.write_text('c00_r00|([-2,12],[-2,12])\\nc01_r00|([8,22],[-2,12])\\n')
             outputs = main_tile.create_tiles(root/'unused.gpkg', jobs, root/'tiles', root/'logs',
-                threads=2, max_parallel=2, source_parallel=2, tile_parallel=2, chunk_size=4096)
+                threads=2, max_parallel=2, source_parallel=2, parallel_tiles=2, chunk_size=4096)
             assert len(outputs) == 2
             for path in outputs:
                 actual = laspy.read(path)

@@ -10,9 +10,9 @@ import laspy
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from strict_prediction_pipeline import merge_collections, strict_remap
-from test_dense_tile_merge import write_cloud
-from test_strict_prediction_pipeline import add_extended_metadata, assert_extended_metadata
+from remap_first_pipeline import merge_collections, strict_remap
+from test_merge_stages import write_cloud
+from test_remap_first_pipeline import add_extended_metadata, assert_extended_metadata
 from raycloud_instance_ids import encode_instance_ids, read_tile_namespace
 from raycloud_tree_files import filter_tree_sidecars
 
@@ -70,9 +70,9 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                     [1, 1, 1], [2 + tile] * 3, instance='PredInstance_RCT')
             # Both centroids lie on the inclusive core boundary. Their geometry
             # overlaps completely and would qualify for merging without sidecars.
-            with patch('strict_prediction_pipeline.reconcile_instances', side_effect=AssertionError('must not merge')), \
-                 patch('strict_prediction_pipeline.assign_shared_points', side_effect=AssertionError('must not reassign')), \
-                 patch('strict_prediction_pipeline.deduplicate', side_effect=AssertionError('must not thin')):
+            with patch('remap_first_pipeline.reconcile_instances', side_effect=AssertionError('must not merge')), \
+                 patch('remap_first_pipeline.assign_shared_points', side_effect=AssertionError('must not reassign')), \
+                 patch('remap_first_pipeline.deduplicate', side_effect=AssertionError('must not thin')):
                 report = merge_collections(collections=[source], target_dir=None,
                     output_tiles=root/'output', tile_bounds_json=layout, ready=True,
                     instance_dimension='PredInstance_RCT', matching=True)
@@ -152,7 +152,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             write_cloud(source / 'c00_r00_segmented.las', [1, 9.5, 10.5, 12], [1, 2, 2, 2],
                         instance='PredInstance_RCT')
             write_cloud(source / 'c01_r00_segmented.las', [11, 12], [2, 2], instance='PredInstance_RCT')
-            with patch('dense_tile_merge.MAX_BATCH_POINTS', 1):
+            with patch('merge_stages.MAX_BATCH_POINTS', 1):
                 report = merge_collections(collections=[source], target_dir=None, output_tiles=root / 'output',
                     tile_bounds_json=layout, ready=True, instance_dimension='PredInstance_RCT')
             recovery = report['models'][0]['orphan_recovery']

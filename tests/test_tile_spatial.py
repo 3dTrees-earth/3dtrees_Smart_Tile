@@ -9,10 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tile_spatial import (  # noqa: E402
     compute_centroids_vectorized,
-    filter_by_centroid_in_buffer,
     find_overlap_region,
     find_spatial_neighbors,
-    get_border_region_mask,
 )
 
 
@@ -53,46 +51,6 @@ class TileSpatialTests(unittest.TestCase):
         self.assertEqual(neighbors["north"], "north")
         self.assertIsNone(neighbors["west"])
         self.assertIsNone(neighbors["south"])
-
-    def test_filter_by_centroid_in_buffer_uses_precomputed_neighbors(self):
-        points = np.array([
-            [1.0, 5.0, 0.0],
-            [2.0, 5.0, 0.0],
-            [8.0, 5.0, 0.0],
-            [9.0, 5.0, 0.0],
-        ])
-        instances = np.array([1, 1, 2, 2])
-
-        removed, directions = filter_by_centroid_in_buffer(
-            points,
-            instances,
-            (0.0, 10.0, 0.0, 10.0),
-            "center",
-            {},
-            buffer=3.0,
-            precomputed_neighbors={"west": "west", "east": None, "north": None, "south": None},
-        )
-
-        self.assertEqual(removed, {1})
-        self.assertEqual(directions, {1: "west"})
-
-    def test_get_border_region_mask_preserves_edge_inclusivity(self):
-        points = np.array([
-            [1.0, 5.0, 0.0],
-            [2.0, 5.0, 0.0],
-            [8.0, 5.0, 0.0],
-            [9.0, 5.0, 0.0],
-        ])
-
-        mask = get_border_region_mask(
-            points,
-            (0.0, 10.0, 0.0, 10.0),
-            inner_dist=1.0,
-            outer_dist=2.0,
-            neighbors={"west": "w", "east": "e", "north": None, "south": None},
-        )
-
-        np.testing.assert_array_equal(mask, np.array([True, False, False, True]))
 
 
 if __name__ == "__main__":

@@ -6,10 +6,10 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 
 ## Current merge contract (2026-09-21 / 3DT-2101)
 
-- `run.py` merge/filter/remap and `main_merge.run_merge` use
-  `strict_prediction_pipeline.py`, `dense_tile_merge.py` and
-  `bounded_point_index.py`. Older centroid/orphan merge modules are legacy
-  helpers and must not be reintroduced into the supported task path.
+- `run.py` merge/filter/remap use `remap_first_pipeline.py`,
+  `merge_stages.py`, `dense_instance_ownership.py` and
+  `bounded_point_index.py`. The v2.3 centroid/orphan merge modules were removed;
+  do not reintroduce a second merge path.
 - RCT predictions (`PredInstance_RCT`) require paired `_trees.txt` and
   `_trees_info.txt` per tile. Filter whole instances by core ownership and encode
   retained IDs as `tile_id * 100000 + local_id`, with background 0. Tile IDs use
@@ -270,27 +270,24 @@ aligned with `src/run.py` and the strict pipeline when task behavior changes.
 
 ## Module Map
 
-- `src/run.py`: CLI entry point and task routing.
-- `src/parameters.py`: Pydantic settings, CLI parameters, and validators.
-- `src/main_tile.py`: tile task orchestration.
-- `src/tile_copc.py`, `src/tile_tindex.py`, `src/tile_spatial.py`,
-  `src/tile_bounds_graph.py`: tiling helpers.
-- `src/main_subsample.py`: subsampling orchestration.
-- `src/subsample_com.py`, `src/subsample_chunk_worker.py`,
-  `src/subsample_methods.py`, `src/subsample_outputs.py`: subsampling helpers.
-- `src/main_merge.py`, `src/merge_tiles.py`, `src/merge_tiles_cli.py`: merge
-  task orchestration and compatibility entry points.
-- `src/merge_*`: merge internals for overlap handling, instance matching,
-  global IDs, orphan recovery, tile loading, and original dimension handling.
-- `src/main_remap.py`, `src/prediction_collection_remap.py`,
-  `src/output_remap.py`, `src/dimension_transfer.py`: remapping and dimension
-  transfer.
+- `src/run.py`: CLI entry point and task routing; `src/parameters.py`: settings.
+- `src/main_tile.py`, `src/tile_*.py` (`tile_crs`, `tile_tindex`, `tile_copc`,
+  `tile_spatial`, `tile_bounds_graph`, `tile_core_occupancy`,
+  `tile_file_matching`): tile task and tile geometry/matching helpers.
+- `src/main_subsample.py`, `src/subsample_*.py`: subsampling.
+- `src/remap_first_pipeline.py`: merge/filter/remap orchestration and original
+  enrichment; stages in `src/merge_stages.py` (dense transfer, reconciliation,
+  deduplication), `src/dense_instance_ownership.py` (core filter, shared-point
+  ownership), `src/orphan_*.py`, `src/small_instance_reassignment.py`.
+- `src/parallel_tiles.py`, `src/parallel_index_queries.py`,
+  `src/parallel_remap.py`: worker processes; results always in tile/input order.
+- `src/raycloud_*.py`, `src/instance_finalization.py`: RCT and final IDs.
+- `src/prediction_collection_remap.py`, `src/dimension_transfer.py`: collection
+  discovery, streaming onto originals, dimension transfer.
 - `src/main_create_merged_file.py`: prod-merged product creation.
-- `src/copc_metadata.py`, `src/copc_staging.py`, `src/point_cloud_metadata.py`,
-  `src/point_cloud_outputs.py`: metadata preservation, COPC staging, and output
-  writing.
-- `src/instance_labels.py`, `src/worker_budget.py`, `src/union_find.py`: shared
-  contracts/utilities.
+- `src/copc_*.py`, `src/crs_records.py`, `src/ply_crs.py`,
+  `src/point_cloud_metadata.py`: metadata, CRS records and COPC staging.
+- `src/instance_labels.py`, `src/worker_budget.py`: shared contracts/utilities.
 
 ## Change Safety Checklist
 

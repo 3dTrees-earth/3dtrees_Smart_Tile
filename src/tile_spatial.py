@@ -13,16 +13,6 @@ import numpy as np
 Bounds = Tuple[float, float, float, float]
 
 
-def compute_tile_bounds(points: np.ndarray) -> Bounds:
-    """Return the XY bounding box of a point cloud."""
-    return (
-        points[:, 0].min(),
-        points[:, 0].max(),
-        points[:, 1].min(),
-        points[:, 1].max(),
-    )
-
-
 def get_tile_bounds_from_header(filepath: Path) -> Optional[Bounds]:
     """Read XY bounds from a LAS/LAZ header without loading points."""
     try:
@@ -164,71 +154,3 @@ def find_spatial_neighbors(
     return neighbors
 
 
-def filter_by_centroid_in_buffer(
-    points: np.ndarray,
-    instances: np.ndarray,
-    boundary: Bounds,
-    tile_name: str,
-    all_tiles: Dict[str, Bounds],
-    buffer: float = 10.0,
-    precomputed_neighbors: Optional[Dict[str, Optional[str]]] = None,
-) -> Tuple[Set[int], Dict[int, str]]:
-    """Return instances whose centroid falls in an overlapping tile buffer zone."""
-    min_x, max_x, min_y, max_y = boundary
-    neighbors = (
-        {direction: precomputed_neighbors.get(direction) for direction in ("east", "west", "north", "south")}
-        if precomputed_neighbors is not None
-        else find_spatial_neighbors(boundary, tile_name, all_tiles, tolerance=buffer)
-    )
-
-    buf_min_x = min_x + (buffer if neighbors["west"] is not None else 0)
-    buf_max_x = max_x - (buffer if neighbors["east"] is not None else 0)
-    buf_min_y = min_y + (buffer if neighbors["south"] is not None else 0)
-    buf_max_y = max_y - (buffer if neighbors["north"] is not None else 0)
-
-    instances_to_remove = set()
-    instance_buffer_direction = {}
-    for inst_id, centroid in compute_centroids_vectorized(points, instances).items():
-        if inst_id <= 0:
-            continue
-        cx, cy = centroid[0], centroid[1]
-        in_west_buffer = neighbors["west"] is not None and cx < buf_min_x
-        in_east_buffer = neighbors["east"] is not None and cx > buf_max_x
-        in_south_buffer = neighbors["south"] is not None and cy < buf_min_y
-        in_north_buffer = neighbors["north"] is not None and cy > buf_max_y
-
-        if in_west_buffer or in_east_buffer or in_south_buffer or in_north_buffer:
-            instances_to_remove.add(inst_id)
-            if in_west_buffer:
-                instance_buffer_direction[inst_id] = "west"
-            elif in_south_buffer:
-                instance_buffer_direction[inst_id] = "south"
-            elif in_east_buffer:
-                instance_buffer_direction[inst_id] = "east"
-            else:
-                instance_buffer_direction[inst_id] = "north"
-
-    return instances_to_remove, instance_buffer_direction
-
-
-def get_border_region_mask(
-    points: np.ndarray,
-    boundary: Bounds,
-    inner_dist: float,
-    outer_dist: float,
-    neighbors: Dict[str, Optional[str]],
-) -> np.ndarray:
-    """Return a mask for points in the edge band for directions with neighbors."""
-    min_x, max_x, min_y, max_y = boundary
-    x, y = points[:, 0], points[:, 1]
-    mask = np.zeros(len(points), dtype=bool)
-
-    if neighbors.get("east") is not None:
-        mask |= (x > max_x - outer_dist) & (x <= max_x - inner_dist)
-    if neighbors.get("west") is not None:
-        mask |= (x >= min_x + inner_dist) & (x < min_x + outer_dist)
-    if neighbors.get("north") is not None:
-        mask |= (y > max_y - outer_dist) & (y <= max_y - inner_dist)
-    if neighbors.get("south") is not None:
-        mask |= (y >= min_y + inner_dist) & (y < min_y + outer_dist)
-    return mask

@@ -11,9 +11,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from instance_statistics import InstanceStatistics
 from small_instance_reassignment import SEARCH_RADIUS_M, SmallInstancePolicy, plan_reassignment
-from strict_prediction_pipeline import merge_collections
-from test_dense_tile_merge import write_cloud
-from test_strict_prediction_pipeline import layout
+from remap_first_pipeline import merge_collections
+from test_merge_stages import write_cloud
+from test_remap_first_pipeline import layout
 
 
 def cube(center, count, edge):

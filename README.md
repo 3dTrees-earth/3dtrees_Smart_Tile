@@ -1193,29 +1193,32 @@ htop -p $(pgrep -f "python src/run.py")
 ```
 3dtrees_smart_tile/
 ├── src/                                 # Python source code
-│   ├── run.py                          # Main CLI orchestrator
+│   ├── run.py                          # CLI entry point and task routing
 │   ├── parameters.py                   # Parameter configuration (Pydantic)
-│   ├── main_tile.py                    # Tiling pipeline
-│   ├── main_subsample.py               # Subsampling pipeline
-│   ├── main_remap.py                   # Prediction remapping
-│   ├── main_create_merged_file.py      # Prod-merged product creation
-│   ├── main_merge.py                   # Merge wrapper
-│   ├── merge_tiles.py                  # Merge compatibility/core entry points
-│   ├── merge_*.py                      # Merge internals
-│   ├── tile_*.py                       # Tiling internals
-│   ├── subsample_*.py                  # Subsampling internals
-│   ├── copc_*.py                       # COPC metadata and staging helpers
-│   ├── filter_buffer_instances.py      # Legacy standalone buffer filtering
-│   ├── prepare_tile_jobs.py            # Tile job generation
-│   ├── get_bounds_from_tindex.py       # Extent calculation
-│   └── plot_tiles_and_copc.py          # Visualization
+│   ├── main_tile.py                    # tile task
+│   ├── main_subsample.py               # Subsampling (called by the tile task)
+│   ├── remap_first_pipeline.py         # merge, filter and remap tasks
+│   ├── main_create_merged_file.py      # create_merged_file task
+│   ├── merge_stages.py                 # Dense transfer, reconciliation, deduplication
+│   ├── dense_instance_ownership.py     # Core filter and shared-point ownership
+│   ├── orphan_*.py                     # Orphan recovery
+│   ├── raycloud_*.py                   # RayCloudTools trees, tables, meshes
+│   ├── parallel_*.py                   # Worker-process helpers for merge stages
+│   ├── tile_*.py                       # Tiling helpers (incl. tile_crs, tile_file_matching)
+│   ├── subsample_*.py                  # Subsampling helpers
+│   ├── copc_*.py, crs_records.py       # COPC metadata, staging, CRS records
+│   ├── prepare_tile_jobs.py            # Tile job generation (script)
+│   ├── get_bounds_from_tindex.py       # Tile bounds from the tile index (script)
+│   └── plot_tiles_and_copc.py          # Tiling preview
 │
+├── scripts/                            # Developer utilities (not used by tasks)
+├── benchmarks/                         # Synthetic smoke benchmark and records
+├── docs/                               # Contracts, flow diagrams, validation records
+├── tests/                              # Unit and integration tests
 ├── README.md                           # This documentation
 ├── CONTEXT.md                          # Agent/developer context and invariants
 ├── Dockerfile                          # Container configuration
-├── tests/                              # Unit and integration tests
-├── tool_appendix.txt                   # Paper/tool appendix table
-└── .gitignore                          # Git ignore rules
+└── tool_appendix.txt                   # Paper/tool appendix table
 ```
 
 ### Module Descriptions
@@ -1224,19 +1227,22 @@ htop -p $(pgrep -f "python src/run.py")
 |--------|---------|
 | `run.py` | CLI entry point, task routing, parameter handling |
 | `parameters.py` | Pydantic-based parameter definitions with CLI support |
-| `main_tile.py` | Two-phase tiling (distribute + COPC conversion), tindex creation |
-| `main_subsample.py` | Parallel voxel-based subsampling |
-| `main_remap.py` | KDTree-based prediction remapping |
-| `main_create_merged_file.py` | Prod-merged product creation from Original-with-predictions files |
-| `main_merge.py` | Merge task orchestration |
-| `merge_tiles.py`, `merge_*.py` | Merge orchestration and internals |
-| `tile_*.py`, `subsample_*.py` | Extracted tiling and subsampling helpers |
-| `copc_*.py`, `point_cloud_*.py` | COPC staging, metadata preservation, and output helpers |
-| `dense_instance_ownership.py` | Dense instance ownership by centroid, highest point, or lowest point |
-| `filter_buffer_instances.py` | Legacy standalone centroid filter |
-| `prepare_tile_jobs.py` | Tile grid calculation and job list generation |
-| `get_bounds_from_tindex.py` | Extent extraction from spatial index |
-| `plot_tiles_and_copc.py` | Matplotlib visualization of tiles |
+| `main_tile.py`, `tile_*.py` | Tile task: CRS unit check, tile index, bounds, buffered COPC tiles |
+| `main_subsample.py`, `subsample_*.py` | Parallel voxel subsampling to resolution 1 and 2 |
+| `remap_first_pipeline.py` | Remap-first merge (`merge_collections`), final remap (`strict_remap`), original enrichment |
+| `merge_stages.py` | Dense 10 cm → 1 cm transfer, cross-tile reconciliation, deduplication |
+| `dense_instance_ownership.py` | Core filter by centroid/highest/lowest anchor, shared-point and tree/background ownership |
+| `orphan_instance_recovery.py`, `orphan_claims.py` | Recovery of rejected whole instances where no tree covers core geometry |
+| `small_instance_reassignment.py`, `instance_statistics.py` | Optional small-cluster reassignment, `<dimension>_summary.json` |
+| `instance_finalization.py`, `raycloud_*.py` | Final ID compaction, RCT tables and meshes |
+| `bounded_point_index.py`, `spatial_query_cache.py` | Disk-backed spatial index with a bounded region cache |
+| `parallel_tiles.py`, `parallel_index_queries.py`, `parallel_remap.py` | Per-tile processes, query processes, ordered enrichment queries |
+| `tile_file_matching.py` | Match prediction tiles to 1 cm targets by tile bounds or extents |
+| `prediction_collection_remap.py` | Prediction collection discovery and streaming onto originals |
+| `main_create_merged_file.py` | Prod-merged products from Original-with-predictions files |
+| `copc_*.py`, `crs_records.py`, `ply_crs.py`, `point_cloud_metadata.py` | Metadata, CRS records, COPC staging, PLY CRS comment |
+| `prepare_tile_jobs.py`, `get_bounds_from_tindex.py` | Tile grid calculation and job list (run as scripts by the tile task) |
+| `plot_tiles_and_copc.py` | Matplotlib preview of tiles |
 
 ---
 

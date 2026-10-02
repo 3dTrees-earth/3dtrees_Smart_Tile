@@ -10,8 +10,8 @@ import laspy
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from strict_prediction_pipeline import merge_collections
-from test_dense_tile_merge import write_cloud
+from remap_first_pipeline import merge_collections
+from test_merge_stages import write_cloud
 
 
 class RecoveredMergePipelineTests(unittest.TestCase):
@@ -33,8 +33,8 @@ class RecoveredMergePipelineTests(unittest.TestCase):
                 bounds = root / 'bounds.json'; bounds.write_text('{}')
                 # Explicit metadata isolates the real recovery -> reconciliation ->
                 # group-union -> shared-point -> deduplication chain from layout matching.
-                with patch('strict_prediction_pipeline.ownership_regions', return_value=regions), \
-                     patch('strict_prediction_pipeline.tile_overlaps', return_value=overlaps):
+                with patch('remap_first_pipeline.ownership_regions', return_value=regions), \
+                     patch('remap_first_pipeline.tile_overlaps', return_value=overlaps):
                     report = merge_collections(collections=[source], target_dir=None,
                         output_tiles=root / 'out', tile_bounds_json=bounds, ready=True,
                         workers=workers, originals=originals)
@@ -75,8 +75,8 @@ class RecoveredMergePipelineTests(unittest.TestCase):
                 originals = root / 'originals'; originals.mkdir()
                 write_cloud(originals / 'raw.las', [.5, 1, 1.5, 2])
                 bounds = root / 'bounds.json'; bounds.write_text('{}')
-                with patch('strict_prediction_pipeline.ownership_regions', return_value=regions), \
-                     patch('strict_prediction_pipeline.tile_overlaps', return_value=overlaps):
+                with patch('remap_first_pipeline.ownership_regions', return_value=regions), \
+                     patch('remap_first_pipeline.tile_overlaps', return_value=overlaps):
                     report = merge_collections(collections=[source], target_dir=None,
                         output_tiles=root / 'out', tile_bounds_json=bounds, ready=True,
                         workers=workers, originals=originals)

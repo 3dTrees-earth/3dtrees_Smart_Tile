@@ -33,7 +33,7 @@ from copc_metadata import (
 from crs_records import validate_single_crs_record as _validate_single_crs_record
 from parameters import TILE_PARAMS
 from point_cloud_metadata import point_cloud_files
-from tiling_crs import require_metric_tiling_crs
+from tile_crs import require_metric_tiling_crs
 from tile_copc import (
     convert_laz_to_copc as _convert_laz_to_copc,
     convert_laz_to_copc_pdal as _convert_laz_to_copc_pdal,
@@ -389,7 +389,7 @@ def create_tiles(
     threads: int = 5,
     max_parallel: int = 5,
     source_parallel: Optional[int] = None,
-    tile_parallel: Optional[int] = None,
+    parallel_tiles: Optional[int] = None,
     chunk_size: int = 20_000_000,
 ) -> List[Path]:
     """
@@ -412,7 +412,7 @@ def create_tiles(
         threads: Threads used per process for LAZ chunk decompression (LazrsParallel/Rayon)
         max_parallel: Fallback maximum parallel workers for each phase
         source_parallel: Maximum source files processed in parallel in Phase 1
-        tile_parallel: Maximum tiles finalized in parallel in Phase 2
+        parallel_tiles: Maximum tiles finalized in parallel in Phase 2
         chunk_size: Points per chunk when reading source files (smaller = less peak RAM)
 
     Returns:
@@ -424,7 +424,7 @@ def create_tiles(
     print("=" * 60)
 
     source_parallel = max(1, int(source_parallel or max_parallel))
-    tile_parallel = max(1, int(tile_parallel or max_parallel))
+    parallel_tiles = max(1, int(parallel_tiles or max_parallel))
 
     # Create directories
     tiles_dir.mkdir(parents=True, exist_ok=True)
@@ -483,7 +483,7 @@ def create_tiles(
     print(f"  Source files: {len(source_files)}")
     print(f"  Total tiles: {len(all_tiles)} ({already_done} already done, {len(pending_tiles)} pending)")
     print(f"  Source file workers: {source_parallel}")
-    print(f"  Tile finalization workers: {tile_parallel}")
+    print(f"  Tile finalization workers: {parallel_tiles}")
 
     if not pending_tiles:
         print("  ✓ All tiles already exist")
@@ -567,7 +567,7 @@ def create_tiles(
     skipped = 0
 
     with ProcessPoolExecutor(
-        max_workers=tile_parallel, mp_context=multiprocessing.get_context("spawn")
+        max_workers=parallel_tiles, mp_context=multiprocessing.get_context("spawn")
     ) as executor:
         futures = {
             executor.submit(_finalize_tile_to_copc, task): task[0]

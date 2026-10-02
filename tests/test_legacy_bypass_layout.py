@@ -12,7 +12,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from dense_instance_ownership import ownership_regions, owned_anchor
-from strict_prediction_pipeline import merge_collections
+from remap_first_pipeline import merge_collections
 
 
 # Actual header extents from the failed 2590 / 2594 / 2595 replays.

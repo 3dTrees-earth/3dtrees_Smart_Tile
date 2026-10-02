@@ -30,12 +30,18 @@ if str(_src_dir) not in sys.path:
 # Import Pydantic-based parameters
 try:
     from parameters import Parameters, print_params, get_tile_params, get_remap_params
-    from merge_prediction_collections import comma_paths
 except ImportError as e:
     print(f"Error: Could not import parameters.py: {e}")
     print("Please install required dependencies: pip install pydantic pydantic-settings")
     sys.exit(1)
 
+
+
+def comma_paths(value):
+    """Parse a comma-separated path list from CLI/Galaxy parameters."""
+    if not value:
+        return []
+    return [Path(part.strip()) for part in str(value).split(",") if part.strip()]
 
 def _parse_csv(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()] if value else []
@@ -403,7 +409,7 @@ def _small_instance_policy(params: Parameters):
 
 def run_merge_task(params: Parameters):
     """Transfer to dense geometry, filter ownership, reconcile and deduplicate."""
-    from strict_prediction_pipeline import merge_collections
+    from remap_first_pipeline import merge_collections
 
     modes = [bool(params.subsampled_10cm_folder), bool(params.segmented_folders),
              bool(params.segmented_remapped_folder)]
@@ -458,7 +464,7 @@ def run_merge_task(params: Parameters):
 
 def run_remap_task(params: Parameters):
     """Validate baseline and final coverage independently for every model."""
-    from strict_prediction_pipeline import strict_remap
+    from remap_first_pipeline import strict_remap
 
     originals = params.original_raw_input_dir or params.original_input_dir
     if not originals or bool(params.segmented_folders) == bool(params.merged_laz):
@@ -554,7 +560,7 @@ def run_create_merged_file_task(params: Parameters):
 
 def run_filter_task(params: Parameters):
     """Filter core ownership and deduplicate already-dense tiles."""
-    from strict_prediction_pipeline import merge_collections
+    from remap_first_pipeline import merge_collections
 
     if not params.input_dir or not params.output_dir:
         print("Error: --input-dir and --output-dir are required for filter")

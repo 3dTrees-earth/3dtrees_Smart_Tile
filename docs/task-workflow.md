@@ -141,7 +141,7 @@ metadata come from the uploaded raw originals.
 - Tile preparation: [`src/main_tile.py`](../src/main_tile.py) and
   [`src/main_subsample.py`](../src/main_subsample.py).
 - Merge, filter and original enrichment:
-  [`src/strict_prediction_pipeline.py`](../src/strict_prediction_pipeline.py).
+  [`src/remap_first_pipeline.py`](../src/remap_first_pipeline.py).
 - RCT recovery gate: [`src/raycloud_recovery.py`](../src/raycloud_recovery.py).
 - Incremental orphan selection: [`src/orphan_claims.py`](../src/orphan_claims.py).
 - Final merged products:

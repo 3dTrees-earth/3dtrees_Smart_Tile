@@ -10,7 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bounded_point_index import PointIndex
-from dense_tile_merge import describe_model, prepare_dense, reconcile_instances, deduplicate
+from merge_stages import describe_model, prepare_dense, reconcile_instances, deduplicate
 
 
 def write_cloud(path, xs, ids=None, semantics=None, instance="PredInstance", ys=None, zs=None):
@@ -59,7 +59,7 @@ class DenseMergeTests(unittest.TestCase):
             overlap = (np.array([-2., -2.]), np.array([2., 2.]))
             overlaps = [{other: overlap for other in range(tile)} for tile in range(3)]
             with PointIndex(root / 'all.sqlite', dimensions) as index:
-                from dense_tile_merge import index_file
+                from merge_stages import index_file
                 for tile, file in enumerate(files):
                     index_file(index, file, tile, np.zeros(3), model)
                 report = {}
@@ -121,7 +121,7 @@ class DenseMergeTests(unittest.TestCase):
             write_cloud(source / "b.las", [0], [1], zs=[.02])
             model = describe_model(source, "PredInstance")
             with PointIndex(root / "index.sqlite", {"PredInstance": np.uint32}) as index:
-                from dense_tile_merge import index_file
+                from merge_stages import index_file
                 index_file(index, source / "a.las", 0, np.zeros(3), model)
                 d, _, _ = index.nearest(np.array([[0, 0, .02]]), .01)
                 self.assertFalse(np.isfinite(d[0]))
@@ -165,7 +165,7 @@ class DenseMergeTests(unittest.TestCase):
                  ([.018, .1, .218], [9, 9, 9])]
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
             expected, _ = self.run_case(Path(first), tiles)
-            with mock.patch("dense_tile_merge.MAX_BATCH_POINTS", 1):
+            with mock.patch("merge_stages.MAX_BATCH_POINTS", 1):
                 actual, _ = self.run_case(Path(second), tiles)
             for a, b in zip(expected, actual):
                 np.testing.assert_array_equal(a.points.array, b.points.array)

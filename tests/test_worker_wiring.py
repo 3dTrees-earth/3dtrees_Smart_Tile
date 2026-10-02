@@ -13,27 +13,6 @@ from worker_budget import DEFAULT_FILE_WORKERS  # noqa: E402
 
 
 class WorkerWiringTests(unittest.TestCase):
-    def test_main_remap_cli_defaults_to_two_file_workers_and_cpu_spatial_workers(self):
-        import main_remap  # noqa: E402
-
-        argv = [
-            "main_remap.py",
-            "--source_folder",
-            "/tmp/source",
-            "--target_folder",
-            "/tmp/target",
-            "--output_folder",
-            "/tmp/out",
-        ]
-        with mock.patch("sys.argv", argv):
-            with mock.patch("main_remap.available_cpu_count", return_value=13):
-                with mock.patch("main_remap.remap_all_tiles", return_value=Path("/tmp/out")) as remap:
-                    main_remap.main()
-
-        remap.assert_called_once()
-        self.assertEqual(remap.call_args.kwargs["num_workers"], DEFAULT_FILE_WORKERS)
-        self.assertEqual(remap.call_args.kwargs["spatial_workers"], 13)
-
     def test_subsample_pipeline_defaults_spatial_chunks_to_available_cpus(self):
         import main_subsample  # noqa: E402
 

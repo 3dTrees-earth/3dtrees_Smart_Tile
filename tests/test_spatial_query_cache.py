@@ -52,9 +52,9 @@ class QueryCacheTests(unittest.TestCase):
 
     def test_two_collections_keep_separate_ids_with_identical_cached_output(self):
         from unittest.mock import patch
-        from strict_prediction_pipeline import merge_collections
-        from test_dense_tile_merge import write_cloud
-        from test_strict_prediction_pipeline import layout
+        from remap_first_pipeline import merge_collections
+        from test_merge_stages import write_cloud
+        from test_remap_first_pipeline import layout
         import laspy
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);collections=[root/'SAT',root/'FM'];originals=root/'originals';originals.mkdir()

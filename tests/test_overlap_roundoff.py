@@ -8,7 +8,7 @@ import pytest
 
 from bounded_point_index import PointIndex, coordinates, inside_xy
 from dense_instance_ownership import assign_shared_points, preferred_core
-from dense_tile_merge import describe_model, index_file, deduplicate
+from merge_stages import describe_model, index_file, deduplicate
 from spatial_query_cache import SpatialQueryCache
 
 

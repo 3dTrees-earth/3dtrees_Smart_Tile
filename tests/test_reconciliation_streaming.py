@@ -4,8 +4,8 @@ from unittest.mock import patch
 import laspy
 import numpy as np
 from bounded_point_index import PointIndex
-from dense_tile_merge import describe_model,index_file,reconcile_instances
-from test_dense_tile_merge import write_cloud
+from merge_stages import describe_model,index_file,reconcile_instances
+from test_merge_stages import write_cloud
 
 
 def test_three_tile_reconciliation_reads_each_query_file_once(tmp_path):
@@ -15,7 +15,7 @@ def test_three_tile_reconciliation_reads_each_query_file_once(tmp_path):
     with PointIndex(tmp_path/'all.db',dims) as index:
         for t,f in enumerate(files):index_file(index,f,t,np.zeros(3),model)
         report={}
-        with patch('dense_tile_merge.laspy.open',wraps=laspy.open) as opened:
+        with patch('merge_stages.laspy.open',wraps=laspy.open) as opened:
             mapping=reconcile_instances(model,files,index,np.zeros(3),{(t,t+1):2 for t in range(3)},.3,.05,report)
         reads=Counter(Path(c.args[0]).name for c in opened.call_args_list)
         assert reads=={'1.las':1,'2.las':1}

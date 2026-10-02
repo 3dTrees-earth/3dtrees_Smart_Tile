@@ -9,10 +9,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from parameters import Parameters
-import main_merge
 import run
-from test_dense_tile_merge import write_cloud
-from test_strict_prediction_pipeline import layout
+from test_merge_stages import write_cloud
+from test_remap_first_pipeline import layout
 
 
 class RunMergeDirectLazTests(unittest.TestCase):
@@ -37,24 +36,12 @@ class RunMergeDirectLazTests(unittest.TestCase):
             source, target, originals = self.fixture(root)
             params = self.params(root, subsampled_10cm_folder=source, subsampled_target_folder=target,
                                  original_laz_input_dir=originals)
-            with mock.patch("filter_buffer_instances.filter_buffer_instances_dir") as old_filter:
-                run.run_merge_task(params)
-            old_filter.assert_not_called()
+            run.run_merge_task(params)
             report = json.loads((root / "output/remap_first_report.json").read_text())
             self.assertEqual(report["models"][0]["transfer"][0]["matched"], 3)
             self.assertEqual(report["state"], "validated")
             self.assertTrue((root / "output/merged.laz").is_file())
             self.assertTrue((root / "output/original_with_predictions/a.las").is_file())
-
-    def test_main_merge_adapter_preserves_dense_target_scales(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source, target, _ = self.fixture(root)
-            main_merge.run_merge(source, root / "out", target, layout(root, 1),
-                                 skip_merged_file=True, num_threads=1)
-            result = laspy.read(root / "out/tile_00000.laz")
-            np.testing.assert_array_equal(result.header.scales, laspy.read(target / "a.las").header.scales)
-            self.assertEqual(len(result.points), 3)
 
     def test_input_area_stays_unchanged_and_no_originals_is_pending(self):
         with tempfile.TemporaryDirectory() as tmp:

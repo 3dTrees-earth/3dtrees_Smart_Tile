@@ -9,8 +9,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from raycloud_meshes import DATASET_SCOPE, FACE, NATIVE_SCOPE, TILE_SCOPE, VERTEX, TreeMesh
-from strict_prediction_pipeline import merge_collections, strict_remap
-from test_dense_tile_merge import write_cloud
+from remap_first_pipeline import merge_collections, strict_remap
+from test_merge_stages import write_cloud
 import test_raycloud_filter_only as rct_tests
 
 

@@ -46,8 +46,8 @@ flowchart TD
   qualify merely because only one file is present.
 
 Source: [`run_filter_task`](../src/run.py),
-[`merge_collections`](../src/strict_prediction_pipeline.py),
-[`describe_model`, `prepare_dense`](../src/dense_tile_merge.py),
+[`merge_collections`](../src/remap_first_pipeline.py),
+[`describe_model`, `prepare_dense`](../src/merge_stages.py),
 [`ownership_regions`](../src/dense_instance_ownership.py).
 
 ## 2. Initial core ownership
@@ -264,7 +264,7 @@ flowchart TD
 - Recovered-support validation requires **a positive final tree** near each
   required claim sample, not necessarily the candidate's original local ID.
 
-Source: [`reconcile_instances`, `deduplicate`](../src/dense_tile_merge.py),
+Source: [`reconcile_instances`, `deduplicate`](../src/merge_stages.py),
 [`assign_shared_points`](../src/dense_instance_ownership.py),
 [`PointIndex.conflicting_match`](../src/bounded_point_index.py).
 
@@ -335,4 +335,4 @@ matching toggle and overlap threshold. It calls the shared pipeline with
 handled by `remap` or by `merge` with originals supplied.
 
 Source: [`run_filter_task`](../src/run.py),
-[`publish`, `merge_collections`](../src/strict_prediction_pipeline.py).
+[`publish`, `merge_collections`](../src/remap_first_pipeline.py).

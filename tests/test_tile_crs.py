@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.modules.setdefault("plot_tiles_and_copc", types.SimpleNamespace(plot_extents=lambda *_a, **_k: None))
 
 import main_tile  # noqa: E402
-from tiling_crs import require_metric_tiling_crs  # noqa: E402
+from tile_crs import require_metric_tiling_crs  # noqa: E402
 
 
 def cloud(path, crs=None, xyz=((2650174.7, 1249627.9, 0.0), (2650204.6, 1249657.8, 40.0)), version="1.4"):

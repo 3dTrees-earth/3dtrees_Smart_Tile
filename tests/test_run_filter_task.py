@@ -6,8 +6,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from parameters import Parameters
 import run
-from test_dense_tile_merge import write_cloud
-from test_strict_prediction_pipeline import layout
+from test_merge_stages import write_cloud
+from test_remap_first_pipeline import layout
 import laspy
 
 

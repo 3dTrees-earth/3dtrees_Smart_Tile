@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from point_cloud_metadata import copy_single_source_header
-from strict_prediction_pipeline import strict_remap
+from remap_first_pipeline import strict_remap
 
 
 @pytest.mark.parametrize("preserve", [True, False])

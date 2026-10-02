@@ -13,9 +13,9 @@ from scipy.spatial import cKDTree
 
 from bounded_point_index import (MAX_BATCH_POINTS, PointIndex, coordinates, distance_limit,
                                  spatial_batches, inside_xy)
-from dense_tile_merge import DUPLICATE_RADIUS, index_written_record, mapped_values
+from merge_stages import DUPLICATE_RADIUS, index_written_record, mapped_values
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
-from tile_parallel import map_tiles
+from parallel_tiles import map_tiles
 
 
 ANCHORS = ("centroid", "highest_point", "lowest_point")
@@ -23,7 +23,7 @@ ANCHORS = ("centroid", "highest_point", "lowest_point")
 
 def ownership_regions(pairs, tile_bounds_json):
     """Use declared cores and neighbors, including neighbors absent from a subset."""
-    from main_remap import get_file_bounds
+    from tile_file_matching import get_file_bounds
     from tile_bounds_graph import (build_neighbor_graph_from_bounds_json,
                                    match_tiles_to_json_bounds, is_legacy_single_cloud_layout)
 

@@ -9,7 +9,7 @@ import numpy as np
 from laspy.vlrs.vlr import VLR
 
 from bounded_point_index import MAX_BATCH_POINTS, coordinates
-from dense_tile_merge import copy_record, index_file, mapped_values, prediction_values
+from merge_stages import copy_record, index_file, mapped_values, prediction_values
 from point_cloud_metadata import copy_single_source_header, update_extra_dimensions, write_retained_evlrs
 
 

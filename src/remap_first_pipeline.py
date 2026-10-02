@@ -16,7 +16,7 @@ import numpy as np
 
 from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates
 from parallel_remap import RemapBatchQueries
-from dense_tile_merge import (
+from merge_stages import (
     DUPLICATE_RADIUS, copy_record, deduplicate, describe_model, index_file,
     prepare_dense, reconcile_instances,
 )
@@ -230,7 +230,7 @@ def tile_overlaps(pairs, tile_bounds_json, origin):
     """Admit only the intersection of distinct declared buffered tile bounds."""
     if len(pairs) == 1:
         return [{}]
-    from main_remap import get_file_bounds
+    from tile_file_matching import get_file_bounds
     from tile_bounds_graph import build_neighbor_graph_from_bounds_json, match_tiles_to_json_bounds
     bounds, centers, _ = build_neighbor_graph_from_bounds_json(tile_bounds_json)
     mapping, _ = match_tiles_to_json_bounds({str(p[1]): get_file_bounds(p[1]) for p in pairs}, bounds, centers)
@@ -283,7 +283,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
     ``small_instances`` (a SmallInstancePolicy) reassigns small final instances
     after deduplication; it is rejected for RayCloudTools tree IDs.
     """
-    from main_remap import find_matching_files
+    from tile_file_matching import find_matching_files
     if filter_anchor not in ANCHORS:
         raise ValueError(f"Unknown filter anchor: {filter_anchor}")
     if not collections:

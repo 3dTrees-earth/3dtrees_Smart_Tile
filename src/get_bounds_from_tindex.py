@@ -13,7 +13,7 @@ from pathlib import Path
 try:
     import fiona
     from pyproj import CRS
-    from tiling_crs import REPROJECT_HINT, unit_problem
+    from tile_crs import REPROJECT_HINT, unit_problem
 except ImportError as e:
     print(f"ERROR: Required package missing. Install with: pip install fiona pyproj")
     print(f"Error: {e}")

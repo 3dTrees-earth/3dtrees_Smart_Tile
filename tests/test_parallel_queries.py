@@ -9,8 +9,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from bounded_point_index import PointIndex
-from strict_prediction_pipeline import merge_collections, strict_remap
-from test_dense_tile_merge import write_cloud
+from remap_first_pipeline import merge_collections, strict_remap
+from test_merge_stages import write_cloud
 from test_dense_instance_ownership import core_layout
 from worker_budget import spatial_query_worker_count
 
@@ -99,7 +99,7 @@ class ParallelQueryTests(unittest.TestCase):
     def test_merge_and_original_remap_match_with_four_query_workers(self):
         with tempfile.TemporaryDirectory() as tmp, \
              patch('bounded_point_index.spatial_query_worker_count', side_effect=lambda n: n), \
-             patch('strict_prediction_pipeline.spatial_query_worker_count', side_effect=lambda n: n):
+             patch('remap_first_pipeline.spatial_query_worker_count', side_effect=lambda n: n):
             root = Path(tmp)
             source, originals, targets = root / 'source', root / 'originals', root / 'targets'
             source.mkdir(); originals.mkdir(); targets.mkdir()
@@ -126,10 +126,9 @@ class ParallelQueryTests(unittest.TestCase):
             for a, b in zip(*results):
                 np.testing.assert_array_equal(a, b)
 
-    def test_cli_and_compatibility_merge_forward_worker_budget(self):
+    def test_cli_merge_and_filter_forward_worker_budget(self):
         from parameters import Parameters
         import run
-        from main_merge import run_merge
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp);source = root / 'source';source.mkdir()
             write_cloud(source / 'a.las', [.5], [7])
@@ -139,12 +138,9 @@ class ParallelQueryTests(unittest.TestCase):
                     segmented_remapped_folder=source,
                     output_tiles_folder=root / 'out', tile_bounds_json=layout,
                     skip_merged_file=True, workers=4, _cli_parse_args=False)
-                with patch('strict_prediction_pipeline.merge_collections', return_value={'state':'test'}) as merge:
+                with patch('remap_first_pipeline.merge_collections', return_value={'state':'test'}) as merge:
                     getattr(run, f'run_{task}_task')(params)
                 self.assertEqual(merge.call_args.kwargs['workers'], 4)
-            with patch('strict_prediction_pipeline.merge_collections') as merge:
-                run_merge(source, root / 'out', None, layout, num_threads=4, skip_merged_file=True)
-            self.assertEqual(merge.call_args.kwargs['workers'], 4)
 
 
 if __name__ == '__main__':

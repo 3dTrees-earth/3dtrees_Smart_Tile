@@ -3,13 +3,13 @@ from pathlib import Path
 import laspy
 import numpy as np
 import pytest
-from test_dense_tile_merge import write_cloud
-from strict_prediction_pipeline import merge_collections
+from test_merge_stages import write_cloud
+from remap_first_pipeline import merge_collections
 
 
 @pytest.mark.parametrize('missing',[False,True])
 def test_combined_remap_uses_worker_budget_with_identical_outputs(tmp_path,monkeypatch,missing):
-    import strict_prediction_pipeline as pipeline
+    import remap_first_pipeline as pipeline
     monkeypatch.setattr(pipeline,'MAX_BATCH_POINTS',8)
     monkeypatch.setattr(pipeline,'spatial_query_worker_count',lambda n:n)
     originals=tmp_path/'originals';predictions=tmp_path/'predictions'

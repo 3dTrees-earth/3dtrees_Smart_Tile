@@ -7,9 +7,9 @@ import pytest
 
 import dense_instance_ownership as ownership
 from bounded_point_index import PointIndex
-from dense_tile_merge import describe_model, index_file
+from merge_stages import describe_model, index_file
 from spatial_query_cache import SpatialQueryCache
-from test_dense_tile_merge import write_cloud
+from test_merge_stages import write_cloud
 
 
 def run_ownership(tmp_path, files, *, cache_bytes=64 * 1024**2):

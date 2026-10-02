@@ -7,7 +7,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from bounded_point_index import distance_limit
-from dense_tile_merge import DUPLICATE_RADIUS
+from merge_stages import DUPLICATE_RADIUS
 from orphan_claims import select_claims
 
 
