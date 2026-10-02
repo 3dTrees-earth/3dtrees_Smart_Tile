@@ -33,6 +33,7 @@ from copc_metadata import (
 from crs_records import validate_single_crs_record as _validate_single_crs_record
 from parameters import TILE_PARAMS
 from point_cloud_metadata import point_cloud_files
+from tiling_crs import require_metric_tiling_crs
 from tile_copc import (
     convert_laz_to_copc as _convert_laz_to_copc,
     convert_laz_to_copc_pdal as _convert_laz_to_copc_pdal,
@@ -671,6 +672,8 @@ def run_tiling_pipeline(
     source_files = _tiling_input_files(input_dir)
     if not source_files:
         raise ValueError(f"No LAZ/LAS files found in {input_dir}")
+    # Tile sizes and resolutions are metres: reject degree/ECEF/foot/mixed CRSs first.
+    require_metric_tiling_crs(source_files)
 
     # Step 1: Build tindex from input LAZ/LAS
     tindex_file = build_tindex(input_dir, tindex_file)

@@ -915,7 +915,11 @@ If not specified, this defaults to `--workers`.
 
 #### Tile Task
 - **File formats**: LAZ (compressed) or LAS (uncompressed)
-- **Coordinate system**: Should be in a projected CRS (e.g., UTM)
+- **Coordinate system**: one projected CRS in metres (e.g., UTM) shared by all files, or no CRS (local metres).
+  Tile length, buffer, subsampling resolutions and remap radii are metres, so the tile task rejects, before indexing,
+  geographic CRSs (degrees, e.g. EPSG:4326), geocentric CRSs (e.g. EPSG:4978), non-metre units (e.g. US survey foot)
+  and uploads whose files declare different CRSs. The error names the file and CRS (3DT-1898; previously these failed
+  later as "Would create N tiles").
 - **Directory structure**: Flat directory with LAZ/LAS files
 
 #### Merge Task
@@ -1129,9 +1133,9 @@ wrapper uses the same `run.py` task surface inside
 - Reduce simultaneous jobs writing to the same disk
 - Keep `--num-spatial-chunks` enabled so SmartTile avoids one giant temporary merged LAZ
 
-#### "CRS mismatch" or "Coordinates appear projected"
-- Ensure all input files are in the same coordinate reference system
-- Use projected CRS (e.g., UTM) not geographic (WGS84)
+#### "Unsupported input CRS for tiling" or "Input files use N different CRSs"
+- Reproject every file to one projected CRS in metres (e.g., the local UTM zone) and upload again
+- Geographic (WGS84 lon/lat), geocentric (ECEF) and foot-based CRSs are not tiled
 
 #### "No PredInstance attribute found"
 - Verify segmentation output includes `PredInstance` dimension
