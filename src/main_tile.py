@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import multiprocessing
 import os
 import shutil
 import sys
@@ -26,32 +27,26 @@ from typing import Dict, List, Optional, Tuple
 import plot_tiles_and_copc
 
 from copc_metadata import (
-    append_source_geotiff_projection_evlrs as _append_source_geotiff_projection_evlrs,
-    copc_preserves_source_crs as _copc_preserves_source_crs,
     first_crs_source as _first_crs_source,
     laspy_laz_backend as _laspy_laz_backend,
 )
+from crs_records import validate_single_crs_record as _validate_single_crs_record
 from parameters import TILE_PARAMS
 from point_cloud_metadata import point_cloud_files
+from tile_crs import require_metric_tiling_crs
 from tile_copc import (
     convert_laz_to_copc as _convert_laz_to_copc,
-    convert_laz_to_copc_pdal as _convert_laz_to_copc_pdal,
     finalize_tile_to_copc as _finalize_tile_to_copc,
-    finalize_tile_to_copc_pdal as _finalize_tile_to_copc_pdal,
-    finalize_tile_to_copc_untwine as _finalize_tile_to_copc_untwine,
 )
 from tile_tindex import (
     bounds_overlap as _bounds_overlap,
     build_tindex,
     calculate_tile_bounds,
-    filter_source_files_for_tile,
     get_bounds as _get_bounds,
-    get_pdal_path,
-    get_pdal_wrench_path,
     get_source_bounds_from_tindex,
     get_source_files_from_tindex,
     parse_proj_bounds as _parse_proj_bounds,
-    update_tile_bounds_json_from_files,
+    write_single_cloud_bounds,
 )
 
 
@@ -129,66 +124,6 @@ def _make_tile_header(header_snapshot, offsets=None, scales=None):
         pass
 
     return hdr
-
-
-def _crop_with_laspy(
-    input_file: str,
-    output_file: Path,
-    bounds: Tuple[float, float, float, float],
-) -> Tuple[bool, int, str]:
-    """Crop a LAZ/COPC file to bounds using laspy + numpy.
-
-    Reads the full file, applies a bounding box mask, and writes the
-    cropped points as compressed LAZ.  This bypasses PDAL's readers.copc
-    which hangs on large selections (>50M points).
-
-    Args:
-        input_file: Path to input LAZ/COPC file.
-        output_file: Path for the cropped output LAZ file.
-        bounds: (xmin, ymin, xmax, ymax) bounding box.
-
-    Returns:
-        (success, point_count, message)
-    """
-    import laspy
-    import numpy as np
-
-    xmin, ymin, xmax, ymax = bounds
-
-    try:
-        laz_backend = _laspy_laz_backend()
-        kwargs = {}
-        if input_file.lower().endswith(".laz") and laz_backend is not None:
-            kwargs["laz_backend"] = laz_backend
-
-        las = laspy.read(input_file, **kwargs)
-
-        mask = (
-            (np.asarray(las.x) >= xmin)
-            & (np.asarray(las.x) <= xmax)
-            & (np.asarray(las.y) >= ymin)
-            & (np.asarray(las.y) <= ymax)
-        )
-
-        count = int(mask.sum())
-        if count == 0:
-            return (True, 0, "No points in bounds")
-
-        cropped = las.points[mask]
-
-        new_header = _make_tile_header(las.header)
-
-        new_las = laspy.LasData(new_header)
-        new_las.points = cropped
-
-        write_kwargs = {}
-        if laz_backend is not None:
-            write_kwargs["laz_backend"] = laz_backend
-        new_las.write(str(output_file), **write_kwargs)
-
-        return (True, count, "OK")
-    except Exception as e:
-        return (False, 0, str(e))
 
 
 def _source_point_count(src_file: Path) -> int:
@@ -314,7 +249,19 @@ def _distribute_source_file(args: Tuple) -> List[Tuple[str, int]]:
                 cx = np.asarray(chunk.x)
                 cy = np.asarray(chunk.y)
 
-                for i, label in enumerate(tile_labels):
+                chunk_minx = float(cx.min()) if len(cx) else 0.0
+                chunk_maxx = float(cx.max()) if len(cx) else 0.0
+                chunk_miny = float(cy.min()) if len(cy) else 0.0
+                chunk_maxy = float(cy.max()) if len(cy) else 0.0
+                candidate_tile_indices = np.flatnonzero(
+                    (tile_xmax >= chunk_minx)
+                    & (tile_xmin <= chunk_maxx)
+                    & (tile_ymax >= chunk_miny)
+                    & (tile_ymin <= chunk_maxy)
+                )
+
+                for i in candidate_tile_indices:
+                    label = tile_labels[i]
                     mask = (
                         (cx >= tile_xmin[i])
                         & (cx <= tile_xmax[i])
@@ -375,7 +322,7 @@ def create_tiles(
     threads: int = 5,
     max_parallel: int = 5,
     source_parallel: Optional[int] = None,
-    tile_parallel: Optional[int] = None,
+    parallel_tiles: Optional[int] = None,
     chunk_size: int = 20_000_000,
 ) -> List[Path]:
     """
@@ -398,7 +345,7 @@ def create_tiles(
         threads: Threads used per process for LAZ chunk decompression (LazrsParallel/Rayon)
         max_parallel: Fallback maximum parallel workers for each phase
         source_parallel: Maximum source files processed in parallel in Phase 1
-        tile_parallel: Maximum tiles finalized in parallel in Phase 2
+        parallel_tiles: Maximum tiles finalized in parallel in Phase 2
         chunk_size: Points per chunk when reading source files (smaller = less peak RAM)
 
     Returns:
@@ -410,7 +357,7 @@ def create_tiles(
     print("=" * 60)
 
     source_parallel = max(1, int(source_parallel or max_parallel))
-    tile_parallel = max(1, int(tile_parallel or max_parallel))
+    parallel_tiles = max(1, int(parallel_tiles or max_parallel))
 
     # Create directories
     tiles_dir.mkdir(parents=True, exist_ok=True)
@@ -452,15 +399,7 @@ def create_tiles(
         if final_tile.exists() and final_tile.stat().st_size > 0:
             valid_existing_crs = True
             if crs_reference is not None:
-                preserved_geotiff, geotiff_message = _append_source_geotiff_projection_evlrs(
-                    crs_reference, final_tile
-                )
-                if not preserved_geotiff:
-                    print(f"  Existing tile {final_tile.name} GeoTIFF preservation failed: {geotiff_message}")
-                    valid_existing_crs = False
-                valid_existing_crs, crs_message = _copc_preserves_source_crs(
-                    crs_reference, final_tile
-                ) if valid_existing_crs else (False, geotiff_message)
+                valid_existing_crs, crs_message = _validate_single_crs_record(crs_reference, final_tile)
                 if not valid_existing_crs:
                     print(f"  Existing tile {final_tile.name} CRS validation failed: {crs_message}")
                     try:
@@ -477,7 +416,7 @@ def create_tiles(
     print(f"  Source files: {len(source_files)}")
     print(f"  Total tiles: {len(all_tiles)} ({already_done} already done, {len(pending_tiles)} pending)")
     print(f"  Source file workers: {source_parallel}")
-    print(f"  Tile finalization workers: {tile_parallel}")
+    print(f"  Tile finalization workers: {parallel_tiles}")
 
     if not pending_tiles:
         print("  ✓ All tiles already exist")
@@ -521,7 +460,11 @@ def create_tiles(
     print()
 
     tile_point_counts: Dict[str, int] = {}
-    with ProcessPoolExecutor(max_workers=source_parallel) as executor:
+    # Core occupancy already decoded LAZ in this process. Forking would inherit
+    # Rayon locks without their threads; start fresh workers for both phases.
+    with ProcessPoolExecutor(
+        max_workers=source_parallel, mp_context=multiprocessing.get_context("spawn")
+    ) as executor:
         futures = {
             executor.submit(_distribute_source_file, task): Path(task[1]).name
             for task in distribute_tasks
@@ -556,7 +499,9 @@ def create_tiles(
     failed = 0
     skipped = 0
 
-    with ProcessPoolExecutor(max_workers=tile_parallel) as executor:
+    with ProcessPoolExecutor(
+        max_workers=parallel_tiles, mp_context=multiprocessing.get_context("spawn")
+    ) as executor:
         futures = {
             executor.submit(_finalize_tile_to_copc, task): task[0]
             for task in finalize_tasks
@@ -586,14 +531,13 @@ def run_tiling_pipeline(
     output_dir: Path,
     tile_length: float = 100,
     tile_buffer: float = 5,
-    grid_offset: float = 1.0,
     num_workers: int = TILE_PARAMS.get('workers', 2),
     threads: int = 5,
     max_tile_procs: int = TILE_PARAMS.get('workers', 2),
     source_file_workers: Optional[int] = None,
-    dimension_reduction: bool = True,  # Ignored (kept for API compatibility)
     tiling_threshold: float = None,
     chunk_size: int = 2_000_000,
+    grid_origin=None,
 ) -> Path:
     """
     Run the complete tiling pipeline.
@@ -611,12 +555,10 @@ def run_tiling_pipeline(
         output_dir: Base output directory
         tile_length: Tile size in meters
         tile_buffer: Buffer overlap in meters
-        grid_offset: Offset from min coordinates
         num_workers: Fallback tile-stage worker count
         threads: Threads per PDAL writer
         max_tile_procs: Maximum parallel tile processes
         source_file_workers: Maximum source files processed in parallel in Phase 1
-        dimension_reduction: Ignored (kept for API compatibility)
         tiling_threshold: File size threshold in MB. If single file below this, skip tiling
         chunk_size: Points per chunk when reading LAZ/LAS in Phase 1 (smaller = less peak RAM)
 
@@ -659,13 +601,15 @@ def run_tiling_pipeline(
     source_files = _tiling_input_files(input_dir)
     if not source_files:
         raise ValueError(f"No LAZ/LAS files found in {input_dir}")
+    # Tile sizes and resolutions are metres: reject degree/ECEF/foot/mixed CRSs first.
+    require_metric_tiling_crs(source_files)
 
     # Step 1: Build tindex from input LAZ/LAS
     tindex_file = build_tindex(input_dir, tindex_file)
 
     # Step 2: Calculate tile bounds
     jobs_file, bounds_json, env = calculate_tile_bounds(
-        tindex_file, tile_length, tile_buffer, output_dir, grid_offset
+        tindex_file, tile_length, tile_buffer, output_dir, grid_origin
     )
 
     # Symlink tindex for Galaxy if needed
@@ -673,7 +617,22 @@ def run_tiling_pipeline(
     if not fixed_tindex.exists() and tindex_file.exists():
         if fixed_tindex.is_symlink():
             fixed_tindex.unlink()
-        fixed_tindex.symlink_to(tindex_file.name)
+        try:
+            fixed_tindex.symlink_to(tindex_file.name)
+        except OSError:
+            # Windows developer environments may not grant symlink privileges.
+            # Galaxy only needs a stable path, so a byte-for-byte copy is safe.
+            shutil.copy2(tindex_file, fixed_tindex)
+
+    if should_skip_tiling:
+        write_single_cloud_bounds(bounds_json, source_files[0])
+        from prepare_tile_jobs import write_job_list
+        write_job_list(bounds_json, jobs_file)
+    else:
+        from tile_core_occupancy import select_occupied_tile_jobs
+        select_occupied_tile_jobs(
+            source_files, bounds_json, jobs_file, tiles_dir, chunk_size=chunk_size,
+        )
 
     # Plot overview
     plot_tiles_and_copc.plot_extents(
@@ -700,18 +659,14 @@ def run_tiling_pipeline(
                 print(f"  Using existing {out_copc.name}")
             print("  Returning COPC directory for direct subsampling")
             print("=" * 60)
+            write_single_cloud_bounds(bounds_json, out_copc)
             return copc_single_dir
 
         out_copc = copc_single_dir / f"{source_file.stem}.copc.laz"
         rebuild_copc = not out_copc.exists() or out_copc.stat().st_size == 0
         if not rebuild_copc:
-            preserved_geotiff, geotiff_message = _append_source_geotiff_projection_evlrs(
-                source_file, out_copc
-            )
-            valid_crs, crs_message = _copc_preserves_source_crs(source_file, out_copc)
-            if not preserved_geotiff or not valid_crs:
-                if not preserved_geotiff:
-                    print(f"  Existing COPC GeoTIFF preservation failed: {geotiff_message}")
+            valid_crs, crs_message = _validate_single_crs_record(source_file, out_copc)
+            if not valid_crs:
                 print(f"  Existing COPC CRS validation failed: {crs_message}")
                 print("  Rebuilding COPC from source LAZ...")
                 try:
@@ -728,6 +683,7 @@ def run_tiling_pipeline(
             print(f"  Using existing {out_copc.name}")
         print(f"  Returning COPC directory for direct subsampling")
         print("=" * 60)
+        write_single_cloud_bounds(bounds_json, out_copc)
         return copc_single_dir
 
     # Step 3: Create tiles

@@ -191,7 +191,6 @@ def subsample_tile_chunk(
                     except Exception:
                         pass
 
-        pdal_cmd = get_pdal_path()
         writer_opts = _chunk_writer_options(input_file, chunk_file, bounds_str, dimension_reduction)
         input_is_copc = is_copc_file(input_file)
         pipeline = _voxel_chunk_pipeline(

@@ -6,13 +6,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 try:
-    from parameters import Parameters, get_tile_params  # noqa: E402
+    from parameters import Parameters  # noqa: E402
     import run  # noqa: E402
 except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
     if exc.name != "pydantic_settings":
         raise
     Parameters = None
-    get_tile_params = None
     run = None
 
 
@@ -22,7 +21,6 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
         params = Parameters(_cli_parse_args=False)
 
         self.assertEqual(params.subsampling_method, "center-of-mass")
-        self.assertEqual(get_tile_params(params)["subsampling_method"], "center-of-mass")
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_default_worker_policy_is_two_files_and_cpu_spatial_chunks(self):
@@ -46,18 +44,11 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
     def test_default_prod_merged_generation_is_off_and_copc_when_enabled(self):
         params = Parameters(_cli_parse_args=False)
 
-        self.assertFalse(params.produce_merged_file)
         self.assertFalse(params.transfer_original_dims_to_merged)
         self.assertEqual(params.merged_output_formats, "copc.laz")
         self.assertIsNone(params.staged_copc_dir)
-        self.assertEqual(params.remap_tolerance, 0.125)
-
-    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
-    def test_legacy_produce_merged_file_selects_prod_merged_creation(self):
-        params = Parameters(produce_merged_file=True, _cli_parse_args=False)
-
-        self.assertTrue(params.produce_merged_file)
-        self.assertTrue(params.transfer_original_dims_to_merged)
+        self.assertIsNone(params.remap_tolerance)
+        self.assertEqual(params.prediction_transfer_tolerance, 0.1732)
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_staged_copc_dir_alias_is_available(self):
@@ -75,12 +66,6 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
 
         self.assertEqual(params.original_raw_input_dir, Path("/tmp/raw"))
         self.assertEqual(params.original_raw_output_dir, Path("/tmp/raw-out"))
-
-    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
-    def test_filter_output_extension_alias_is_available(self):
-        params = Parameters(filter_output_extension=".laz", _cli_parse_args=False)
-
-        self.assertEqual(params.filter_output_extension, ".laz")
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_merged_output_format_aliases_are_normalized_and_deduped(self):
@@ -120,6 +105,27 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_cli_unknown_long_flags_fail_fast(self):
         self.assertEqual(run._unknown_cli_flags(["--task", "tile", "--tilng-threshold", "1"]), ["tilng-threshold"])
+
+    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
+    def test_inactive_reassignment_options_fail_instead_of_being_ignored(self):
+        import contextlib
+        import io
+
+        removed = (
+            "min_cluster_size", "enable_volume_merge", "disable_volume_merge",
+            "pre_remap_reassign_instance_dimension", "pre_remap_reassign_min_cluster_size",
+            "pre_remap_reassign_hull_point_threshold", "pre_remap_reassign_max_volume",
+            "pre_remap_reassigned_laz",
+        )
+        for name in removed:
+            for flag in (name, name.replace("_", "-")):
+                with self.subTest(flag=flag), contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        run._validate_known_cli_flags(["--task", "merge", "--" + flag, "1"])
+        run._validate_known_cli_flags([
+            "--task", "merge", "--reassign-small-instances",
+            "--max-cluster-size", "3000", "--max-volume-for-merge", "4",
+        ])
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_cli_known_alias_and_preprocessor_flags_are_accepted(self):

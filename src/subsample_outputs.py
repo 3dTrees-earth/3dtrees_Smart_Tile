@@ -71,10 +71,7 @@ def convert_laz_output_to_copc(
             pass
 
     try:
-        from copc_metadata import (
-            append_source_geotiff_projection_evlrs,
-            copc_preserves_source_crs,
-        )
+        from crs_records import validate_single_crs_record
         from main_tile import _convert_laz_to_copc
 
         converted = _convert_laz_to_copc(
@@ -85,14 +82,7 @@ def convert_laz_output_to_copc(
         if not converted:
             return False
         if source_metadata_file is not None:
-            preserved_geotiff, message = append_source_geotiff_projection_evlrs(
-                source_metadata_file,
-                output_copc,
-            )
-            if not preserved_geotiff:
-                print(f"      COPC GeoTIFF projection preservation failed: {message}")
-                return False
-            valid_crs, message = copc_preserves_source_crs(source_metadata_file, output_copc)
+            valid_crs, message = validate_single_crs_record(source_metadata_file, output_copc)
             if not valid_crs:
                 print(f"      COPC CRS validation failed: {message}")
                 return False
@@ -134,19 +124,9 @@ def convert_laz_output_to_copc(
         converted = output_copc.exists() and output_copc.stat().st_size > 0
         if converted and source_metadata_file is not None:
             try:
-                from copc_metadata import (
-                    append_source_geotiff_projection_evlrs,
-                    copc_preserves_source_crs,
-                )
+                from crs_records import validate_single_crs_record
 
-                preserved_geotiff, message = append_source_geotiff_projection_evlrs(
-                    source_metadata_file,
-                    output_copc,
-                )
-                if not preserved_geotiff:
-                    print(f"      COPC GeoTIFF projection preservation failed: {message}")
-                    return False
-                valid_crs, message = copc_preserves_source_crs(source_metadata_file, output_copc)
+                valid_crs, message = validate_single_crs_record(source_metadata_file, output_copc)
                 if not valid_crs:
                     print(f"      COPC CRS validation failed: {message}")
                     return False

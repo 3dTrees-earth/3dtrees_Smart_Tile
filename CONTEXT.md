@@ -4,7 +4,110 @@ This file is for coding agents working on SmartTile. It is intentionally more
 implementation-facing than `README.md`; use the README for user-facing behavior
 and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 
-## Current Handoff State (2026-07-08)
+## Current merge contract (2026-09-21 / 3DT-2101)
+
+- `run.py` merge/filter/remap use `remap_first_pipeline.py`,
+  `merge_stages.py`, `dense_instance_ownership.py` and
+  `bounded_point_index.py`. The v2.3 centroid/orphan merge modules were removed;
+  do not reintroduce a second merge path.
+- RCT predictions (`PredInstance_RCT`) require paired `_trees.txt` and
+  `_trees_info.txt` per tile. Filter whole instances by core ownership and encode
+  retained IDs as `tile_id * 100000 + local_id`, with background 0. Tile IDs use
+  one-based positions in the declared layout; subsets retain their original
+  tile ID. Require local IDs below 100000 and reject uint32 overflow. Skip
+  reconciliation, point deduplication, and membership changes. Recover a rejected
+  whole RCT instance only when it supplies unsupported core geometry and none
+  of its points is within 1 cm XYZ of a retained or previously recovered tree.
+  Check its complete geometry, including buffer tails, before admitting it.
+  Report blocked candidates and their competing instance IDs in orphan_recovery.
+  Filter both tables to the retained IDs with the same encoded `predinstance`.
+  Read existing explicit IDs rather than row positions. Preserve the per-tile
+  namespace VLR on repeat filtering; never apply the offset twice. Record the
+  local/global mapping in `instance_metadata.csv` and the merge manifest.
+  Keep `--skip-merged-file` for the intermediate task. Standalone remap rejects
+  multiple legacy unencoded RCT tiles; regenerate them through merge/filter.
+  Validate collection namespaces from headers, then check labels during the
+  indexing read; do not decompress prediction files in a separate preflight.
+  Shared points can belong to rejected instances in both tiles even when the
+  main neighboring counterparts survive; final RCT remap fills only unmatched
+  predictions with 0. During original enrichment, prefer a positive RCT tree
+  within the remap radius over background, preserving its attributes. See
+  `docs/raycloud-filter-only.md` for the illustrated case.
+- Transfer each model's unfiltered predictions to its own 1 cm target tiles
+  first: 100% assignment within the separately configured 0.1732 m XYZ radius.
+- Remove whole instances whose selected dense anchor is outside their core;
+  background uses half-open spatial cores. Reconcile IDs independently per
+  model without tree sidecars: each accepted transitive group gets one ID and retains every member's
+  unique geometry. Resolve shared points by tile ownership, retaining all
+  attributes of the winning point; never discard a whole merged member.
+- For retained positive instances (including the same merged group) sharing points within 0.01 m,
+  assign disputed points to the retained claimant nearest its closed XY core
+  rectangle; break equal-distance ties by stable source filename order. A tile
+  predicting background or a removed instance cannot win a tree claim. Preserve
+  the winner's instance ID and per-point attributes, and retain unshared buffer
+  tails. Record these decisions in shared_point_ownership.
+- Declared buffered overlap membership uses the same inclusive eight-ULP
+  per-axis bound allowance for cached sources, disk sources and query points.
+  Derive it from local XY bounds only, independent of batch composition or Z;
+  preserve the geometric matching radius and core ownership boundaries.
+- After tree/tree resolution, retained trees override neighboring background
+  within 0.01 m, preserving the tree owner's semantic values and attributes.
+  Query actual surviving trees; removed instances cannot override background.
+- A tiling bypass writes one layout entry with actual cloud bounds and no buffer.
+  Historical unused grid plans may be recovered only for one cloud matching the
+  complete projected extent within 1 cm, with untouched planned bounds and an
+  extent larger than any individual planned tile. Record the recovery; preserve
+  missing-neighbor ownership for partial collections.
+- Deduplicate label-consistent cross-tile points against actual final survivors
+  within 0.01 m XYZ. Adjacent points in separate cores may retain different tree
+  labels or background semantics. Other label conflicts still fail.
+  Same-tile points are never thinned.
+- Validate baseline original coverage at 100% within the first-stage voxel
+  diagonal (17.32 mm for 1 cm resolution). Require 100% final coverage for
+  non-RCT models. For RCT only, assign zero to every prediction field when no
+  surviving point matches within that radius, and record the count and examples
+  in the coverage report. Other sampling gaps, conflicts and missing predictions
+  still fail before publication; the earlier 99% fallback is not used.
+- Preserve unfiltered dense geometry and its manifest for the separate final
+  remap task; Galaxy wrappers must carry the baseline collection explicitly if
+  they do not preserve the manifest. See the README for flags and diagnostics.
+- `--workers` controls native spatial-query threads in strict merge/filter,
+  bounded by scheduler slots, affinity and detected cgroup CPU quotas. Small
+  queries stay serial; index writes and model/tile ordering stay deterministic.
+  Record the requested and effective query budget in `parallelism`.
+- Standalone strict remap and original enrichment during merge/filter share
+  CPU-capped batch processes after serial indexing.
+  Each process opens completed indexes read-only and uses one query thread.
+  Admit at most two batches per process, preserve input order with one writer,
+  and join workers before deleting scratch indexes. Tiny inputs stay serial.
+  Keep coverage, stable ties, original fields and transactional publication
+  identical to the serial path; report indexing/enrichment timings separately.
+- Non-RCT orphan recovery uses a disk-backed spatial claim index and incremental
+  candidate scores. Update coverage only near each newly admitted instance,
+  keeping the same greedy ranking and stable ties. Report selection work as
+  `orphan_recovery.selection_checked_locations`.
+- Dense searches keep fixed-size disk-backed batches as the fallback. Immutable
+  nearest queries reuse 4 m XY-region trees in a process-wide LRU cache. The
+  default 512 MiB cache charge is capped by cgroup memory and the maximum remap
+  process count; `SMARTTILE_SPATIAL_CACHE_MB=0` disables it. Inserts invalidate
+  cached regions. Keep source references, overlap masks, positive-label filters,
+  numerical distance bounds and stable ties identical to disk queries.
+- Shared-point ownership reuses bounded region trees filtered by positive labels,
+  overlap and source-side core eligibility; the cache key includes both cores and
+  the origin. Query-side nearest-core ranking is unchanged. Numerical nearest
+  ties use the existing eight-ULP allowance relative to the true minimum distance,
+  with stable tile/point order independent of cache or disk batch partitioning.
+  Original baseline coverage needs only minimum distances, not source identity.
+- Index dense/filtered/shared-owner output records during their write pass;
+  do not reread compressed outputs only to construct an equivalent index.
+- CRS preservation resolves duplicate projection identities with the same
+  last-record precedence as the reader (source EVLRs follow VLRs). Never append
+  a shadowed normalized WKT over an already-preserved original WKT; repeated
+  product conversion must be idempotent. Keep strict CRS validation enabled.
+- Exact production
+  replays of 3110/3111 and resource benchmarking remain release obligations.
+
+## Historical Handoff State (2026-07-08)
 
 - Repo/branch: `/home/kg281/projects/3dtrees_smart_tile`, branch `v2.2`,
   tracking `upstream/v2.2`.
@@ -45,11 +148,16 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 - COM/processed merged files are intermediate or diagnostic products. Do not use
   center-of-mass geometry as the authoritative merged product for further
   analysis.
+- Final original enrichment compacts surviving IDs independently per model
+  across the original collection into uint32 1..N, background 0. Preserve
+  memberships and all non-ID fields; publish `instance_mapping.json`. RCT
+  tree/treeinfo tables use the same final mapping, while intermediate tile
+  namespaces remain reusable.
 - Instance labels use the simple contract: `0` is background/no tree, positive
   values are tree instances, and negative labels are invalid.
 - Keep prediction dimension names exactly as supplied. Multi-collection remap
   must fail on duplicate output dimension names instead of auto-renaming.
-- Use `uint16` for prediction labels unless a positive instance value exceeds
+- For intermediate prediction labels, use `uint16` unless a positive instance value exceeds
   `65535`; then use `uint32`.
 
 ## Task Modes
@@ -57,12 +165,9 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 - `tile`: converts uploaded LAZ/LAS/COPC inputs into spatial COPC tiles, then
   creates subsampled products. The default first resolution is 1cm COPC LAZ; the
   default second resolution is 10cm regular LAZ.
-- `merge`: filters duplicate buffer-zone instances from segmented predictions,
-  remaps the filtered predictions to the target resolution, merges the remapped
-  predictions into per-tile 1cm products, and can enrich uploaded originals from
-  those per-tile products before optional prod-merged creation.
-- `filter`: removes duplicate buffer-zone instances from segmented/remapped
-  tile files before downstream merge/remap workflows.
+- `merge`: transfers predictions to dense 1 cm tiles before reconciling IDs and
+  deduplicating label-consistent cross-tile points; can strictly enrich originals.
+- `filter`: runs the same reconciliation/deduplication on already-dense tiles.
 - `remap`: transfers prediction dimensions back to original source points. It
   supports multiple segmented prediction collections when their dimension names
   are already unique. The explicit production interface is
@@ -135,6 +240,14 @@ product.
 - SmartTile assumes upstream tools ensure CRS consistency across input files.
   SmartTile should preserve CRS, not perform semantic CRS reconciliation.
 
+## Tiling process safety
+
+- Core occupancy decodes compressed sources in the parent before tile creation.
+  Both source distribution and COPC finalization must use explicit `spawn`
+  process contexts: Linux `fork` inherits lazrs/Rayon locks without their threads
+  and can deadlock on the first worker read. Keep the compressed multi-chunk
+  occupancy-to-COPC regression; uncompressed or single-chunk fixtures miss this.
+
 ## Subsampling Contract
 
 - `center-of-mass` is the default subsampling method. It averages only XYZ inside
@@ -149,29 +262,32 @@ product.
   giant in-memory point cloud, and stream batches into final products whenever
   practical.
 
+## Workflow Reference
+
+See `docs/task-workflow.md` for flow diagrams of all five tasks, their input/output
+contracts, model-specific recovery rules and matching distances. Keep these diagrams
+aligned with `src/run.py` and the strict pipeline when task behavior changes.
+
 ## Module Map
 
-- `src/run.py`: CLI entry point and task routing.
-- `src/parameters.py`: Pydantic settings, CLI parameters, and validators.
-- `src/main_tile.py`: tile task orchestration.
-- `src/tile_copc.py`, `src/tile_tindex.py`, `src/tile_spatial.py`,
-  `src/tile_bounds_graph.py`: tiling helpers.
-- `src/main_subsample.py`: subsampling orchestration.
-- `src/subsample_com.py`, `src/subsample_chunk_worker.py`,
-  `src/subsample_methods.py`, `src/subsample_outputs.py`: subsampling helpers.
-- `src/main_merge.py`, `src/merge_tiles.py`, `src/merge_tiles_cli.py`: merge
-  task orchestration and compatibility entry points.
-- `src/merge_*`: merge internals for overlap handling, instance matching,
-  global IDs, orphan recovery, tile loading, and original dimension handling.
-- `src/main_remap.py`, `src/prediction_collection_remap.py`,
-  `src/output_remap.py`, `src/dimension_transfer.py`: remapping and dimension
-  transfer.
+- `src/run.py`: CLI entry point and task routing; `src/parameters.py`: settings.
+- `src/main_tile.py`, `src/tile_*.py` (`tile_crs`, `tile_tindex`, `tile_copc`,
+  `tile_spatial`, `tile_bounds_graph`, `tile_core_occupancy`,
+  `tile_file_matching`): tile task and tile geometry/matching helpers.
+- `src/main_subsample.py`, `src/subsample_*.py`: subsampling.
+- `src/remap_first_pipeline.py`: merge/filter/remap orchestration and original
+  enrichment; stages in `src/merge_stages.py` (dense transfer, reconciliation,
+  deduplication), `src/dense_instance_ownership.py` (core filter, shared-point
+  ownership), `src/orphan_*.py`, `src/small_instance_reassignment.py`.
+- `src/parallel_tiles.py`, `src/parallel_index_queries.py`,
+  `src/parallel_remap.py`: worker processes; results always in tile/input order.
+- `src/raycloud_*.py`, `src/instance_finalization.py`: RCT and final IDs.
+- `src/prediction_collection_remap.py`, `src/dimension_transfer.py`: collection
+  discovery, streaming onto originals, dimension transfer.
 - `src/main_create_merged_file.py`: prod-merged product creation.
-- `src/copc_metadata.py`, `src/copc_staging.py`, `src/point_cloud_metadata.py`,
-  `src/point_cloud_outputs.py`: metadata preservation, COPC staging, and output
-  writing.
-- `src/instance_labels.py`, `src/worker_budget.py`, `src/union_find.py`: shared
-  contracts/utilities.
+- `src/copc_*.py`, `src/crs_records.py`, `src/ply_crs.py`,
+  `src/point_cloud_metadata.py`: metadata, CRS records and COPC staging.
+- `src/instance_labels.py`, `src/worker_budget.py`: shared contracts/utilities.
 
 ## Change Safety Checklist
 
@@ -189,6 +305,12 @@ Before changing product behavior, check:
 - Are README user examples and this context file still aligned?
 
 ## Validation
+
+For optimization work, always validate the candidate image on the full GFZ
+dataset: all four buffered tiles for SAT and ForestMamba, then original remap.
+Small probes supplement this gate; they do not replace it. Record phase wall
+time, container CPU time/peak memory, and exact output equality against the
+saved baseline. Keep inputs read-only and each run isolated.
 
 Fast local validation:
 

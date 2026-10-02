@@ -22,9 +22,6 @@ import numpy as np
 INSTANCE_UINT32_THRESHOLD = np.iinfo(np.uint16).max
 INSTANCE_DEFAULT_OUTPUT_DTYPE = np.uint16
 INSTANCE_LARGE_OUTPUT_DTYPE = np.uint32
-MERGED_OUTPUT_SCALES = np.array([0.01, 0.01, 0.01], dtype=np.float64)
-
-
 def validate_prediction_instance_labels(
     instances: np.ndarray,
     name: str = "PredInstance",
@@ -66,43 +63,3 @@ def instance_extra_bytes_params(name: str, instances: Optional[np.ndarray] = Non
     return laspy.ExtraBytesParams(name=name, type=instance_output_dtype(instances))
 
 
-def cast_instances_for_output(instances: np.ndarray, name: str = "instance IDs") -> np.ndarray:
-    """Cast non-negative instance IDs to the persisted unsigned output dtype."""
-    arr = np.asarray(instances)
-    validate_prediction_instance_labels(arr, name)
-    return arr.astype(instance_output_dtype(arr), copy=False)
-
-
-def validate_merged_output_contract(
-    merged_laz: Path,
-    instance_dimension: str = "PredInstance",
-) -> None:
-    """Verify persisted merged LAZ follows the SmartTile output contract."""
-    with laspy.open(str(merged_laz), laz_backend=laspy.LazBackend.LazrsParallel) as f:
-        scales = np.asarray(f.header.scales, dtype=np.float64)
-        if not np.allclose(scales, MERGED_OUTPUT_SCALES):
-            raise ValueError(
-                f"{merged_laz} has XYZ scales {scales.tolist()}, expected "
-                f"{MERGED_OUTPUT_SCALES.tolist()} for 1cm merged output"
-            )
-
-        extra_dims = {dim.name: dim for dim in f.header.point_format.extra_dimensions}
-        if instance_dimension not in extra_dims:
-            raise ValueError(f"{merged_laz} is missing required {instance_dimension} extra dimension")
-        dtype = np.dtype(extra_dims[instance_dimension].dtype)
-        if dtype not in {
-            np.dtype(INSTANCE_DEFAULT_OUTPUT_DTYPE),
-            np.dtype(INSTANCE_LARGE_OUTPUT_DTYPE),
-        }:
-            raise ValueError(
-                f"{merged_laz} has {instance_dimension} dtype {dtype}, expected uint16 or uint32"
-            )
-
-        point_data = f.read()
-        instances = np.asarray(getattr(point_data, instance_dimension))
-        expected_dtype = instance_output_dtype(instances)
-        if dtype != expected_dtype:
-            raise ValueError(
-                f"{merged_laz} has {instance_dimension} dtype {dtype}, expected "
-                f"{expected_dtype} for max instance ID {int(np.max(instances)) if instances.size else 0}"
-            )

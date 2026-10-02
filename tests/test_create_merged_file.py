@@ -17,7 +17,6 @@ from main_create_merged_file import (  # noqa: E402
     _untwine_chunk_files_to_copc,
     _validate_expected_dims,
     _validate_preserved_product_dims,
-    create_chunked_prod_merged_file,
     create_chunked_prod_merged_files_for_resolution,
     create_prod_merged_files,
     create_prod_merged_file,
@@ -410,7 +409,6 @@ class CreateMergedFileTests(unittest.TestCase):
                             output,
                             0.1,
                             "copc.laz",
-                            num_spatial_chunks=1,
                         )
 
         self.assertEqual(created, output)
@@ -442,7 +440,6 @@ class CreateMergedFileTests(unittest.TestCase):
                             output,
                             0.1,
                             "laz",
-                            num_spatial_chunks=1,
                         )
 
         self.assertEqual(created, output)
@@ -491,9 +488,9 @@ class CreateMergedFileTests(unittest.TestCase):
                 with mock.patch("main_create_merged_file._scale_offset_options", return_value={}):
                     with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=fail_chunk):
                         with self.assertRaisesRegex(RuntimeError, "chunk 1 failed"):
-                            create_chunked_prod_merged_file([source], output, 0.1, "laz", 2)
+                            create_chunked_prod_merged_files_for_resolution([source], [(output, "laz")], 0.1, 2)
 
-            self.assertFalse((tmp_path / "_prod_merged_10cm_chunks").exists())
+            self.assertFalse((tmp_path / "_prod_merged_10cm_shared_chunks").exists())
 
     def test_chunked_product_failure_can_keep_scratch_for_debug(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -511,9 +508,9 @@ class CreateMergedFileTests(unittest.TestCase):
                     with mock.patch("main_create_merged_file._scale_offset_options", return_value={}):
                         with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=fail_chunk):
                             with self.assertRaisesRegex(RuntimeError, "chunk 1 failed"):
-                                create_chunked_prod_merged_file([source], output, 0.1, "laz", 2)
+                                create_chunked_prod_merged_files_for_resolution([source], [(output, "laz")], 0.1, 2)
 
-            self.assertTrue((tmp_path / "_prod_merged_10cm_chunks").exists())
+            self.assertTrue((tmp_path / "_prod_merged_10cm_shared_chunks").exists())
 
     def test_create_prod_merged_chunks_skips_empty_spatial_chunks_and_preserves_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -545,12 +542,11 @@ class CreateMergedFileTests(unittest.TestCase):
             temp_dir = tmp_path / "untwine_tmp"
             output.write_text("copc")
             fake_copc_metadata = mock.Mock(
-                append_source_geotiff_projection_evlrs=mock.Mock(return_value=(True, "ok")),
-                copc_preserves_source_crs=mock.Mock(return_value=(True, "ok")),
+                validate_single_crs_record=mock.Mock(return_value=(True, "ok")),
                 srs_assignment_from_file=mock.Mock(return_value="EPSG:32632"),
             )
             with mock.patch("main_create_merged_file.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata}):
+                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}):
                     with mock.patch("main_create_merged_file.subprocess.run") as run:
                         def run_untwine(*_, **__):
                             output.write_text("copc")
@@ -582,8 +578,7 @@ class CreateMergedFileTests(unittest.TestCase):
             tmp_path = Path(tmpdir)
             output = tmp_path / "out.copc.laz"
             fake_copc_metadata = mock.Mock(
-                append_source_geotiff_projection_evlrs=mock.Mock(return_value=(True, "ok")),
-                copc_preserves_source_crs=mock.Mock(return_value=(True, "ok")),
+                validate_single_crs_record=mock.Mock(return_value=(True, "ok")),
                 srs_assignment_from_file=mock.Mock(return_value="EPSG:32632"),
             )
 
@@ -592,7 +587,7 @@ class CreateMergedFileTests(unittest.TestCase):
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("main_create_merged_file.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata}):
+                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}):
                     with mock.patch("main_create_merged_file.subprocess.run", side_effect=run_untwine):
                         with mock.patch(
                             "main_create_merged_file._point_cloud_point_count",
@@ -613,8 +608,7 @@ class CreateMergedFileTests(unittest.TestCase):
             tmp_path = Path(tmpdir)
             output = tmp_path / "out.copc.laz"
             fake_copc_metadata = mock.Mock(
-                append_source_geotiff_projection_evlrs=mock.Mock(return_value=(True, "ok")),
-                copc_preserves_source_crs=mock.Mock(return_value=(True, "ok")),
+                validate_single_crs_record=mock.Mock(return_value=(True, "ok")),
                 srs_assignment_from_file=mock.Mock(return_value="EPSG:32632"),
             )
 
@@ -623,7 +617,7 @@ class CreateMergedFileTests(unittest.TestCase):
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("main_create_merged_file.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata}):
+                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}):
                     with mock.patch("main_create_merged_file.subprocess.run", side_effect=run_untwine):
                         with mock.patch(
                             "main_create_merged_file._point_cloud_point_count",
