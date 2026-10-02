@@ -409,7 +409,6 @@ class CreateMergedFileTests(unittest.TestCase):
                             output,
                             0.1,
                             "copc.laz",
-                            num_spatial_chunks=1,
                         )
 
         self.assertEqual(created, output)
@@ -441,7 +440,6 @@ class CreateMergedFileTests(unittest.TestCase):
                             output,
                             0.1,
                             "laz",
-                            num_spatial_chunks=1,
                         )
 
         self.assertEqual(created, output)
