@@ -36,23 +36,16 @@ from point_cloud_metadata import point_cloud_files
 from tile_crs import require_metric_tiling_crs
 from tile_copc import (
     convert_laz_to_copc as _convert_laz_to_copc,
-    convert_laz_to_copc_pdal as _convert_laz_to_copc_pdal,
     finalize_tile_to_copc as _finalize_tile_to_copc,
-    finalize_tile_to_copc_pdal as _finalize_tile_to_copc_pdal,
-    finalize_tile_to_copc_untwine as _finalize_tile_to_copc_untwine,
 )
 from tile_tindex import (
     bounds_overlap as _bounds_overlap,
     build_tindex,
     calculate_tile_bounds,
-    filter_source_files_for_tile,
     get_bounds as _get_bounds,
-    get_pdal_path,
-    get_pdal_wrench_path,
     get_source_bounds_from_tindex,
     get_source_files_from_tindex,
     parse_proj_bounds as _parse_proj_bounds,
-    update_tile_bounds_json_from_files,
     write_single_cloud_bounds,
 )
 
@@ -131,66 +124,6 @@ def _make_tile_header(header_snapshot, offsets=None, scales=None):
         pass
 
     return hdr
-
-
-def _crop_with_laspy(
-    input_file: str,
-    output_file: Path,
-    bounds: Tuple[float, float, float, float],
-) -> Tuple[bool, int, str]:
-    """Crop a LAZ/COPC file to bounds using laspy + numpy.
-
-    Reads the full file, applies a bounding box mask, and writes the
-    cropped points as compressed LAZ.  This bypasses PDAL's readers.copc
-    which hangs on large selections (>50M points).
-
-    Args:
-        input_file: Path to input LAZ/COPC file.
-        output_file: Path for the cropped output LAZ file.
-        bounds: (xmin, ymin, xmax, ymax) bounding box.
-
-    Returns:
-        (success, point_count, message)
-    """
-    import laspy
-    import numpy as np
-
-    xmin, ymin, xmax, ymax = bounds
-
-    try:
-        laz_backend = _laspy_laz_backend()
-        kwargs = {}
-        if input_file.lower().endswith(".laz") and laz_backend is not None:
-            kwargs["laz_backend"] = laz_backend
-
-        las = laspy.read(input_file, **kwargs)
-
-        mask = (
-            (np.asarray(las.x) >= xmin)
-            & (np.asarray(las.x) <= xmax)
-            & (np.asarray(las.y) >= ymin)
-            & (np.asarray(las.y) <= ymax)
-        )
-
-        count = int(mask.sum())
-        if count == 0:
-            return (True, 0, "No points in bounds")
-
-        cropped = las.points[mask]
-
-        new_header = _make_tile_header(las.header)
-
-        new_las = laspy.LasData(new_header)
-        new_las.points = cropped
-
-        write_kwargs = {}
-        if laz_backend is not None:
-            write_kwargs["laz_backend"] = laz_backend
-        new_las.write(str(output_file), **write_kwargs)
-
-        return (True, count, "OK")
-    except Exception as e:
-        return (False, 0, str(e))
 
 
 def _source_point_count(src_file: Path) -> int:

@@ -9,7 +9,7 @@ make the metadata contract explicit in one place.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 
 PROJECTION_VLR_USER_ID = "LASF_Projection"

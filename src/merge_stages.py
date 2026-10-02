@@ -15,7 +15,7 @@ from point_cloud_metadata import (
     copy_single_source_header, extra_bytes_params_from_dimension_info, extra_bytes_attribute_equal,
     update_extra_dimensions, write_retained_evlrs,
 )
-from prediction_collection_remap import prediction_collection_files, _promote_collection_extra_dim
+from prediction_collections import prediction_collection_files, promote_collection_extra_dim
 from instance_labels import instance_extra_bytes_params
 from parallel_index_queries import IndexQueries
 from parallel_tiles import map_tiles
@@ -78,7 +78,7 @@ def describe_model(source, instance_dimension, *, require_instance=True):
                     # Instance widths may vary between tiles; promote before indexing.
                     if name != instance or {np.dtype(expected.type), np.dtype(got.type)} != {np.dtype("uint16"), np.dtype("uint32")}:
                         raise ValueError(f"{file.name}: inconsistent prediction schema for {name}")
-                    dimensions[name] = _promote_collection_extra_dim(expected, reader.header.point_format.dimension_by_name(name))
+                    dimensions[name] = promote_collection_extra_dim(expected, reader.header.point_format.dimension_by_name(name))
     no_data = {name: param.no_data for name, param in dimensions.items()}
     for name in (instance, semantic):
         if name is None:

@@ -22,12 +22,6 @@ def get_pdal_path() -> str:
     return pdal_path if pdal_path else "pdal"
 
 
-def get_pdal_wrench_path() -> str:
-    """Return the pdal_wrench executable path."""
-    wrench_path = shutil.which("pdal_wrench")
-    return wrench_path if wrench_path else "pdal_wrench"
-
-
 def _common_header_srs(paths: List[Path]) -> Optional[str]:
     """Only assign a missing PDAL CRS when every source header agrees."""
     import laspy
@@ -350,16 +344,3 @@ def get_bounds(
     return None
 
 
-def filter_source_files_for_tile(
-    source_files: List[str],
-    source_bounds: Dict[str, Tuple[float, float, float, float]],
-    tile_bounds: Tuple[float, float, float, float],
-    bounds_by_basename: Optional[Dict[str, Tuple[float, float, float, float]]] = None,
-) -> List[str]:
-    """Return source files whose bounds overlap tile bounds."""
-    result = []
-    for source_file in source_files:
-        file_bounds = get_bounds(source_file, source_bounds, bounds_by_basename)
-        if file_bounds is None or bounds_overlap(file_bounds, tile_bounds):
-            result.append(source_file)
-    return result

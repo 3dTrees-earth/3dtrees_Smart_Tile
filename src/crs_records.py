@@ -14,8 +14,12 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from copc_metadata import (
-    PROJECTION_VLR_USER_ID, crs_equivalent, laspy_laz_backend, parse_crs,
-    projection_records, projection_vlr_fingerprints, vlr_record_bytes,
+    PROJECTION_VLR_USER_ID,
+    crs_equivalent,
+    laspy_laz_backend,
+    parse_crs,
+    projection_vlr_fingerprints,
+    vlr_record_bytes,
 )
 
 WKT_RECORD_ID = 2112

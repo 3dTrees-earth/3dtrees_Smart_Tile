@@ -38,20 +38,13 @@ from parameters import TILE_PARAMS
 from point_cloud_metadata import point_cloud_files
 from subsample_chunk_worker import subsample_tile_chunk
 from subsample_com import (
-    COPC_COM_DENSE_BIN_LIMIT,
-    COPC_COM_MAX_WINDOW_SIZE,
-    COPC_COM_TARGET_WINDOW_CELLS,
-    aggregate_center_of_mass_xyz as _aggregate_center_of_mass_xyz,
     aligned_edges as _aligned_edges,
     center_of_mass_subsample_copc,
     center_of_mass_subsample_las,
-    iter_copc_center_of_mass_windows as _iter_copc_center_of_mass_windows,
     process_pool_kwargs as _process_pool_kwargs,
-    write_center_of_mass_points as _write_center_of_mass_points,
 )
 from subsample_methods import (
     SUBSAMPLING_METHOD_CENTER_OF_MASS,
-    SUBSAMPLING_METHOD_NEAREST_TO_CENTROID,
     SUBSAMPLING_METHODS,
     is_copc_file as _is_copc_file,
     normalize_subsampling_method,

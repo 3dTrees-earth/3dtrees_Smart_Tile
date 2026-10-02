@@ -19,7 +19,6 @@ Usage:
 
 import sys
 import argparse
-import os
 from pathlib import Path
 
 # Add src directory to path for imports when run from project root
@@ -29,7 +28,7 @@ if str(_src_dir) not in sys.path:
 
 # Import Pydantic-based parameters
 try:
-    from parameters import Parameters, print_params, get_tile_params, get_remap_params
+    from parameters import Parameters, print_params
 except ImportError as e:
     print(f"Error: Could not import parameters.py: {e}")
     print("Please install required dependencies: pip install pydantic pydantic-settings")
@@ -45,24 +44,6 @@ def comma_paths(value):
 
 def _parse_csv(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()] if value else []
-
-
-def _semantic_dimension_for_instance(instance_dimension: str) -> str | None:
-    """Infer the matching semantic prediction dimension for a PredInstance name."""
-    if not instance_dimension.startswith("PredInstance"):
-        return None
-    return f"PredSemantic{instance_dimension[len('PredInstance'):]}"
-
-
-def _effective_threedtrees_dims(params: Parameters) -> list[str] | None:
-    """Return prediction dimensions to transfer for merge/remap original enrichment."""
-    dims = _parse_csv(params.threedtrees_dims)
-    if dims == ["PredInstance", "PredSemantic"] and params.instance_dimension != "PredInstance":
-        dims = [params.instance_dimension]
-        semantic_dimension = _semantic_dimension_for_instance(params.instance_dimension)
-        if semantic_dimension:
-            dims.append(semantic_dimension)
-    return dims or None
 
 
 def _create_prod_merged_outputs(

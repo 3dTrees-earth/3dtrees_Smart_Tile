@@ -13,15 +13,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from main_subsample import (  # noqa: E402
     SUBSAMPLING_METHOD_CENTER_OF_MASS,
-    SUBSAMPLING_METHOD_NEAREST_TO_CENTROID,
-    _aggregate_center_of_mass_xyz,
-    _iter_copc_center_of_mass_windows,
     _subsample_input_files,
     _voxel_subsampling_filter,
-    _write_center_of_mass_points,
     center_of_mass_subsample_las,
     normalize_subsampling_method,
 )
+from subsample_com import (  # noqa: E402
+    aggregate_center_of_mass_xyz as _aggregate_center_of_mass_xyz,
+    iter_copc_center_of_mass_windows as _iter_copc_center_of_mass_windows,
+    write_center_of_mass_points as _write_center_of_mass_points,
+)
+from subsample_methods import SUBSAMPLING_METHOD_NEAREST_TO_CENTROID  # noqa: E402
 import main_subsample  # noqa: E402
 import subsample_com  # noqa: E402
 

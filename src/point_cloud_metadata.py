@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Set
 
 import laspy
 import numpy as np
@@ -93,21 +93,6 @@ def extra_bytes_params_from_dimension_info(
         offsets=getattr(dim_info, "offsets", None),
         scales=getattr(dim_info, "scales", None),
         no_data=no_data,
-    )
-
-
-def extra_bytes_params_from_params(
-    params: laspy.ExtraBytesParams,
-    name: Optional[str] = None,
-) -> laspy.ExtraBytesParams:
-    """Clone ExtraBytesParams while optionally renaming the dimension."""
-    return laspy.ExtraBytesParams(
-        name=name or params.name,
-        type=params.type,
-        description=getattr(params, "description", "") or "",
-        offsets=getattr(params, "offsets", None),
-        scales=getattr(params, "scales", None),
-        no_data=getattr(params, "no_data", None),
     )
 
 
@@ -209,14 +194,6 @@ def copy_single_source_header(
         ])
 
     return standardize_projection_records(header)
-
-
-def projection_metadata_vlrs(vlrs) -> VLRList:
-    """Keep CRS/projection records that remain true across a CRS-consistent run."""
-    return VLRList([
-        vlr for vlr in (vlrs or [])
-        if getattr(vlr, "user_id", "") == "LASF_Projection"
-    ])
 
 
 def _point_cloud_paths(directory: Optional[Path]) -> List[Path]:
@@ -325,15 +302,3 @@ def load_standardization_dims(json_path: Path) -> Set[str]:
     return expected
 
 
-def bounds_overlap_xy(
-    a: Tuple[float, float, float, float],
-    b: Tuple[float, float, float, float],
-    buffer: float = 0.0,
-) -> bool:
-    """Return whether two XY bounds overlap, optionally expanding both by buffer."""
-    return not (
-        a[1] < b[0] - buffer
-        or a[0] > b[1] + buffer
-        or a[3] < b[2] - buffer
-        or a[2] > b[3] + buffer
-    )

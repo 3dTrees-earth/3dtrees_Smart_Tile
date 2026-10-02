@@ -28,7 +28,7 @@ from dense_instance_ownership import (
     ANCHORS, filter_owned_instances, ownership_regions,
     assign_shared_points,
 )
-from prediction_collection_remap import prediction_collection_files, _assign_prediction_values
+from prediction_collections import assign_prediction_values, prediction_collection_files
 from instance_labels import instance_extra_bytes_params
 from orphan_instance_recovery import recover_orphaned_instances, validate_recovered_geometry
 from raycloud_tree_files import filter_tree_sidecars, tree_sidecars
@@ -204,7 +204,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                                     for data in values.values():
                                         data[missing] = 0
                             for name in selected[i]:
-                                _assign_prediction_values(out, name, values[name], raw=True)
+                                assign_prediction_values(out, name, values[name], raw=True)
                             instance = models[i].instance
                             if instance in file_ids:
                                 file_ids[instance].update(int(uid) for uid in np.unique(values[instance]) if uid > 0)
@@ -505,7 +505,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                 rct_ids = final_ids.get("PredInstance_RCT", {})
                 if rct_ids:
                     report["rct_finalization"] = finalize_rct_originals(
-                        work / "originals", rct_ids, final_files, tree_sidecars(work / "tree_files"), rewrite_clouds=False,
+                        work / "originals", rct_ids, final_files, tree_sidecars(work / "tree_files"),
                         meshes=tree_meshes(work / "tree_files"))
                 report["instance_finalization"] = compact_originals(work / "originals", final_ids,
                                                                     aliases=reassignments)
@@ -619,7 +619,7 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
                                       if model.instance == "PredInstance_RCT")
                 report["rct_finalization"] = finalize_rct_originals(
                     work / "originals", rct_ids, prediction_collection_files(rct_collection),
-                    remap_tree_sidecars(rct_collection), rewrite_clouds=False,
+                    remap_tree_sidecars(rct_collection),
                     meshes=remap_tree_meshes(rct_collection))
             report["instance_finalization"] = compact_originals(work / "originals", final_ids)
             stack.close()

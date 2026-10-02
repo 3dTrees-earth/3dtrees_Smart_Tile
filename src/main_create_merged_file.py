@@ -660,11 +660,6 @@ def _finalize_product(output_file: Path, output_format: str, dimension_sources: 
         raise RuntimeError(message)
 
 
-def _preserve_and_validate_copc_metadata(source_metadata_file: Path, output_file: Path) -> Tuple[bool, str]:
-    """Backward-compatible alias for older tests/callers."""
-    return _preserve_and_validate_las_metadata(source_metadata_file, output_file)
-
-
 def _untwine_chunk_files_to_copc(
     chunk_files: List[Path],
     output_file: Path,

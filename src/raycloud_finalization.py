@@ -2,17 +2,11 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from pathlib import Path
 
-import laspy
 import numpy as np
-from laspy.vlrs.vlr import VLR
 
-from bounded_point_index import MAX_BATCH_POINTS
-from merge_stages import copy_record
-from point_cloud_metadata import copy_single_source_header, update_extra_dimensions, write_retained_evlrs
 from raycloud_instance_ids import RCT_ID_STRIDE, read_tile_namespace, validate_namespaced_labels
 from raycloud_tree_files import pair_tree_sidecars, rct_sidecar_folder, read_tree_header, tree_rows, tree_sidecars
 from raycloud_meshes import DATASET_SCOPE, TILE_SCOPE, TreeMesh, pair_tree_meshes, write_tree_mesh
@@ -65,37 +59,6 @@ def _catalogue_tables(db, predictions, sidecars):
     return headers, provenance
 
 
-def _rewrite_cloud(file, source_ids):
-    """Rewrite only the RCT ID field using bounded point batches."""
-    temporary = file.with_name(f".compact-{file.name}")
-    with laspy.open(file) as reader:
-        header = copy_single_source_header(reader.header)
-        update_extra_dimensions(header, [laspy.ExtraBytesParams(
-            name=INSTANCE, type=np.uint32, description="Dataset-wide compact RCT ID")], replace=True)
-        header.vlrs[:] = [v for v in header.vlrs
-                         if not (v.user_id == "3DTrees" and v.record_id in (24002, 24003))]
-        header.vlrs.append(VLR(user_id="3DTrees", record_id=24003,
-            description="RCT compact IDs v1", record_data=json.dumps({
-                "version": 1, "scope": "dataset", "background": 0,
-                "mapping": MAPPING_FILE,
-            }).encode()))
-        with laspy.open(temporary, mode="w", header=header) as writer:
-            for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-                values = np.asarray(record[INSTANCE])
-                positive = values > 0
-                positions = np.searchsorted(source_ids, values[positive])
-                if (np.any(positions >= len(source_ids)) or
-                        np.any(source_ids[positions] != values[positive])):
-                    raise ValueError(f"{file.name}: RCT IDs changed after remapping")
-                out = copy_record(record, header)
-                compact = np.zeros(len(record), dtype=np.uint32)
-                compact[positive] = positions + 1
-                out[INSTANCE] = compact
-                writer.write_points(out)
-            write_retained_evlrs(writer, header)
-    os.replace(temporary, file)
-
-
 def _open_tile_meshes(predictions, meshes):
     """Open the filtered tile meshes published by merge/filter."""
     opened = []
@@ -108,7 +71,7 @@ def _open_tile_meshes(predictions, meshes):
     return opened
 
 
-def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, rewrite_clouds=True, meshes=()):
+def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, meshes=()):
     """Finalize a private staging folder; callers publish it only on success.
 
     IDs are collected while remapping, avoiding a separate cloud census read.
@@ -125,7 +88,6 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, re
     if len(all_ids) > np.iinfo(np.uint32).max:
         raise ValueError("Compact RCT instance IDs exceed uint32")
     mapping = {uid: i + 1 for i, uid in enumerate(all_ids)}
-    source_ids = np.asarray(all_ids, dtype=np.uint32)
     metadata = {"version": 1, "dimension": INSTANCE, "scope": "dataset", "background": 0,
                 "tree_count": len(all_ids), "instances": [], "files": [],
                 "qsm_quality": "not assessed; file boundaries do not measure model reliability"}
@@ -164,8 +126,6 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, re
                 entry["sidecars"]["trees_mesh"] = mesh_file.name
                 entry["mesh"] = {"vertices": vertices, "faces": faces, "trees_with_faces": len(per_tree),
                                  "trees_without_faces": sorted(set(wanted.values()) - per_tree.keys())}
-            if rewrite_clouds:
-                _rewrite_cloud(file, source_ids)
             metadata["files"].append(entry)
         (output_dir / MAPPING_FILE).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     finally:
