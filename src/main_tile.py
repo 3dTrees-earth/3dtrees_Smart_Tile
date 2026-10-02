@@ -531,12 +531,10 @@ def run_tiling_pipeline(
     output_dir: Path,
     tile_length: float = 100,
     tile_buffer: float = 5,
-    grid_offset: float = 1.0,
     num_workers: int = TILE_PARAMS.get('workers', 2),
     threads: int = 5,
     max_tile_procs: int = TILE_PARAMS.get('workers', 2),
     source_file_workers: Optional[int] = None,
-    dimension_reduction: bool = True,  # Ignored (kept for API compatibility)
     tiling_threshold: float = None,
     chunk_size: int = 2_000_000,
     grid_origin=None,
@@ -557,12 +555,10 @@ def run_tiling_pipeline(
         output_dir: Base output directory
         tile_length: Tile size in meters
         tile_buffer: Buffer overlap in meters
-        grid_offset: Offset from min coordinates
         num_workers: Fallback tile-stage worker count
         threads: Threads per PDAL writer
         max_tile_procs: Maximum parallel tile processes
         source_file_workers: Maximum source files processed in parallel in Phase 1
-        dimension_reduction: Ignored (kept for API compatibility)
         tiling_threshold: File size threshold in MB. If single file below this, skip tiling
         chunk_size: Points per chunk when reading LAZ/LAS in Phase 1 (smaller = less peak RAM)
 
@@ -613,7 +609,7 @@ def run_tiling_pipeline(
 
     # Step 2: Calculate tile bounds
     jobs_file, bounds_json, env = calculate_tile_bounds(
-        tindex_file, tile_length, tile_buffer, output_dir, grid_offset, grid_origin
+        tindex_file, tile_length, tile_buffer, output_dir, grid_origin
     )
 
     # Symlink tindex for Galaxy if needed

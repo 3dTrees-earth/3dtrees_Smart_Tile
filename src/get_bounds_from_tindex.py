@@ -1,22 +1,17 @@
-#!/usr/bin/env python3
-"""
-Get extent from tindex shapefile and compute tile bounds.
+"""Get the extent of a tile index and compute the tile bounds JSON.
+
 Always treats coordinates as planar/metric units (input units are checked by tile_crs).
 """
 
-import argparse
 import json
 import math
 import sys
 from pathlib import Path
 
-try:
-    import fiona
-    from pyproj import CRS
-except ImportError as e:
-    print(f"ERROR: Required package missing. Install with: pip install fiona pyproj")
-    print(f"Error: {e}")
-    exit(1)
+import fiona
+from pyproj import CRS
+
+PROJECTED_CRS_FALLBACK = "EPSG:32630"
 
 
 def load_extent_from_tindex(tindex_path: Path):
@@ -172,84 +167,28 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, gri
     return tiles, grid_bounds
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Compute tile bounds for the tindex extent. "
-            "Assumes everything is in planar/metric units."
-        )
-    )
-    parser.add_argument("tindex_path", type=Path, help="Path to the tindex shapefile")
-    parser.add_argument(
-        "--tile-length", type=float, default=40.0, help="Tile core length (default: 40 units)"
-    )
-    parser.add_argument(
-        "--tile-buffer", type=float, default=5.0, help="Tile buffer distance (default: 5 units)"
-    )
-    parser.add_argument(
-        "--proj-crs",
-        type=str,
-        default="EPSG:32630",
-        help="Projected CRS fallback (default: EPSG:32630)",
-    )
-    parser.add_argument(
-        "--out",
-        type=Path,
-        default=Path("tile_bounds_tindex.json"),
-        help="Where to write the tile bounds JSON summary",
-    )
-    parser.add_argument("--grid-origin", type=float, nargs=2)
-    args = parser.parse_args()
-
-    (minx, miny, maxx, maxy), srs = load_extent_from_tindex(args.tindex_path)
-
-    # Always treat as planar/metric
-    proj_minx, proj_miny, proj_maxx, proj_maxy = minx, miny, maxx, maxy
-    proj_crs = srs if srs != "missing" else args.proj_crs
-
-    # geo_extent matches proj_extent because we assume metric
-    geo_minx, geo_miny, geo_maxx, geo_maxy = minx, miny, maxx, maxy
-
-    # Use data-aligned tiling
-    tiles, grid_bounds = build_tiles(
-        proj_minx, proj_miny, proj_maxx, proj_maxy,
-        args.tile_length, args.tile_buffer,
-        align_to_grid=False, grid_origin=args.grid_origin,
-    )
-
+def write_tile_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, out: Path,
+                      grid_origin=None) -> int:
+    """Write the tile bounds JSON for the tindex extent; returns the tile count."""
+    (minx, miny, maxx, maxy), srs = load_extent_from_tindex(tindex_path)
+    proj_crs = srs if srs != "missing" else PROJECTED_CRS_FALLBACK
+    # Data-aligned tiling; the geographic extent equals the planar one (metric input).
+    tiles, grid_bounds = build_tiles(minx, miny, maxx, maxy, tile_length, tile_buffer,
+                                     align_to_grid=False, grid_origin=grid_origin)
+    extent = {"minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy}
     summary = {
-        "tindex": str(args.tindex_path),
+        "tindex": str(tindex_path),
         "tindex_srs": srs,
         "proj_srs": proj_crs,
-        "proj_extent": {"minx": proj_minx, "miny": proj_miny, "maxx": proj_maxx, "maxy": proj_maxy},
-        "geo_extent": {"minx": geo_minx, "miny": geo_miny, "maxx": geo_maxx, "maxy": geo_maxy},
-        "tile_length": args.tile_length,
-        "tile_buffer": args.tile_buffer,
-        "grid_bounds": {
-            "xmin": grid_bounds[0],
-            "xmax": grid_bounds[1],
-            "ymin": grid_bounds[2],
-            "ymax": grid_bounds[3],
-        },
+        "proj_extent": extent,
+        "geo_extent": dict(extent),
+        "tile_length": tile_length,
+        "tile_buffer": tile_buffer,
+        "grid_bounds": {"xmin": grid_bounds[0], "xmax": grid_bounds[1],
+                        "ymin": grid_bounds[2], "ymax": grid_bounds[3]},
         "tiles": tiles,
     }
-
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("w") as f:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w") as f:
         json.dump(summary, f, indent=2)
-
-    crop_bounds = f"([{grid_bounds[0]},{grid_bounds[1]}],[{grid_bounds[2]},{grid_bounds[3]}])"
-    reader_bounds = f"([{geo_minx},{geo_maxx}],[{geo_miny},{geo_maxy}])"
-
-    print(f"tile_bounds_file={args.out}")
-    print(f"tile_count={len(tiles)}")
-    print(f"crop_bounds=\"{crop_bounds}\"")
-    print(f"reader_bounds=\"{reader_bounds}\"")
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    return len(tiles)

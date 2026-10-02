@@ -61,7 +61,7 @@ def main():
     run('final_remap','smart',['python','-u','/src/run.py','--task','remap',
         '--segmented-folders',','.join('/run/04_detailview/'+m+'/collection' for m in ('SAT','FM','RCT')),
         '--original-laz-input-dir','/input','--output-dir','/run/outputs/original_with_predictions',
-        '--remap-dims',','.join(fields),'--resolution-1','0.01','--workers','10','--chunk-size','1000000','--memory-gb','50'])
+        '--remap-dims',','.join(fields),'--resolution-1','0.01','--workers','10','--chunk-size','1000000'])
     run('compact_species_tables','smart',['python','/run/commands/final_artifacts.py','tables'])
     run('validate_final','smart',['python','/run/commands/final_artifacts.py','final'])
 

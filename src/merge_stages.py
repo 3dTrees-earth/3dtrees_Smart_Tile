@@ -22,8 +22,6 @@ from parallel_tiles import map_tiles
 
 
 DUPLICATE_RADIUS = 0.01
-ORIGINAL_RADIUS = 0.01
-
 # A model may downgrade the LAS point format and carry native fields (notably
 # SAT scan_angle) as ExtraBytes. Dense targets remain their authoritative source.
 STANDARD_DIMENSIONS = frozenset(
@@ -471,26 +469,24 @@ def _dedup_worker(xyz, values):
 
 
 def deduplicate(model, files, dense_index, survivor_index, origin, mapping, output_dir, report, *,
-                overlaps=None, background_semantics_owned=False, core_preferred=None, core_regions=None,
+                overlaps=None, background_semantics_owned=False, core_regions=None,
                 instance_statistics=None, workers=1):
     """Keep stable tile/point order and compare only with final earlier survivors.
 
     ``instance_statistics`` optionally collects final per-instance summaries
     from the surviving records, avoiding another pass over the written tiles.
     Tiles stay sequential (each compares with earlier survivors); within a tile
-    the chunk queries run in up to ``workers`` processes when ``core_preferred``
-    is given as ``core_regions`` (preferred-core rule), with results in order.
+    the chunk queries run in up to ``workers`` processes, with results in order.
+    ``core_regions`` enables the preferred-core rule for same-tree semantics.
     The tile's survivors join ``survivor_index`` after its queries finish.
     """
-    if core_preferred is not None and core_regions is not None:
-        raise ValueError("Pass core_preferred or core_regions, not both")
     output_dir.mkdir(parents=True)
     survivor_index.dimensions = {n: p.type for n, p in model.dimensions.items()}
     stats = report["deduplication"] = {"radius_m": DUPLICATE_RADIUS, "tiles": [], "conflicts": []}
-    processes = max(1, int(workers)) if core_preferred is None else 1
+    processes = max(1, int(workers))
     parallelism = report.setdefault("parallelism", {})
     parallelism.update(deduplication_query_processes=processes, deduplication_parallel_tiles=[])
-    rule = core_preferred if core_preferred is not None else _core_rule(core_regions, origin)
+    rule = _core_rule(core_regions, origin)
     dense_index.flush()
     outputs = []
     for tile, file in enumerate(files):

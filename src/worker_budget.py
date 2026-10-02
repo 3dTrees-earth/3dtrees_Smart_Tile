@@ -8,7 +8,6 @@ from pathlib import Path
 
 
 DEFAULT_FILE_WORKERS = 2
-DEFAULT_MEMORY_GB = 4.0
 BYTES_PER_GB = 1024**3
 
 

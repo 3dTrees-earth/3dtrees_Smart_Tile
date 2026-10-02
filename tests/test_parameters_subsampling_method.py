@@ -6,13 +6,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 try:
-    from parameters import Parameters, get_tile_params  # noqa: E402
+    from parameters import Parameters  # noqa: E402
     import run  # noqa: E402
 except ModuleNotFoundError as exc:  # pragma: no cover - environment-dependent
     if exc.name != "pydantic_settings":
         raise
     Parameters = None
-    get_tile_params = None
     run = None
 
 
@@ -22,7 +21,6 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
         params = Parameters(_cli_parse_args=False)
 
         self.assertEqual(params.subsampling_method, "center-of-mass")
-        self.assertEqual(get_tile_params(params)["subsampling_method"], "center-of-mass")
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_default_worker_policy_is_two_files_and_cpu_spatial_chunks(self):
@@ -46,20 +44,11 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
     def test_default_prod_merged_generation_is_off_and_copc_when_enabled(self):
         params = Parameters(_cli_parse_args=False)
 
-        self.assertFalse(params.produce_merged_file)
         self.assertFalse(params.transfer_original_dims_to_merged)
         self.assertEqual(params.merged_output_formats, "copc.laz")
         self.assertIsNone(params.staged_copc_dir)
         self.assertIsNone(params.remap_tolerance)
         self.assertEqual(params.prediction_transfer_tolerance, 0.1732)
-        self.assertEqual(params.min_remap_match_fraction, 1.0)
-
-    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
-    def test_legacy_produce_merged_file_selects_prod_merged_creation(self):
-        params = Parameters(produce_merged_file=True, _cli_parse_args=False)
-
-        self.assertTrue(params.produce_merged_file)
-        self.assertTrue(params.transfer_original_dims_to_merged)
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_staged_copc_dir_alias_is_available(self):
@@ -77,12 +66,6 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
 
         self.assertEqual(params.original_raw_input_dir, Path("/tmp/raw"))
         self.assertEqual(params.original_raw_output_dir, Path("/tmp/raw-out"))
-
-    @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
-    def test_filter_output_extension_alias_is_available(self):
-        params = Parameters(filter_output_extension=".laz", _cli_parse_args=False)
-
-        self.assertEqual(params.filter_output_extension, ".laz")
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_merged_output_format_aliases_are_normalized_and_deduped(self):

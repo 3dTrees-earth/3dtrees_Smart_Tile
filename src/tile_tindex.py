@@ -8,7 +8,6 @@ import shutil
 import sqlite3
 import struct
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -152,48 +151,28 @@ def calculate_tile_bounds(
     tile_length: float,
     tile_buffer: float,
     output_dir: Path,
-    grid_offset: float = 1.0,
     grid_origin=None,
 ) -> Tuple[Path, Path, dict]:
     """Calculate tile jobs and bounds JSON from a tindex."""
+    from get_bounds_from_tindex import write_tile_bounds
+    from prepare_tile_jobs import write_job_list
+
     print()
     print("=" * 60)
     print("Step 2: Calculating tile bounds")
     print("=" * 60)
-
-    prepare_jobs_script = Path(__file__).parent / "prepare_tile_jobs.py"
     jobs_file = output_dir / f"tile_jobs_{int(tile_length)}m.txt"
     bounds_json = output_dir / "tile_bounds_tindex.json"
-    cmd = [
-        sys.executable,
-        str(prepare_jobs_script),
-        str(tindex_file),
-        f"--tile-length={tile_length}",
-        f"--tile-buffer={tile_buffer}",
-        f"--jobs-out={jobs_file}",
-        f"--bounds-out={bounds_json}",
-        f"--grid-offset={grid_offset}",
-    ]
-
-    if grid_origin is not None:
-        cmd += ["--grid-origin", *map(str, grid_origin)]
-
     print(f"  Tile length: {tile_length}m")
     print(f"  Tile buffer: {tile_buffer}m")
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"prepare_tile_jobs.py failed: {result.stderr}")
-
-    env = {}
-    for line in result.stdout.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            env[key.strip()] = value.strip().strip('"')
-
-    print(f"  ✓ Calculated {env.get('tile_count', 'unknown')} tiles")
+    # Floats, as the former script CLI parsed them: the JSON records 300.0, not 300.
+    tile_count = write_tile_bounds(Path(tindex_file), float(tile_length), float(tile_buffer), bounds_json,
+                                   grid_origin=grid_origin)
+    write_job_list(bounds_json, jobs_file)
+    print(f"  ✓ Calculated {tile_count} tiles")
     print(f"  Jobs file: {jobs_file}")
     print(f"  Bounds file: {bounds_json}")
-    return jobs_file, bounds_json, env
+    return jobs_file, bounds_json, {"tile_count": str(tile_count)}
 
 
 def write_single_cloud_bounds(tile_bounds_json: Path, source_file: Path) -> None:
@@ -215,7 +194,7 @@ def update_tile_bounds_json_from_files(
     file_glob: str = "*.laz",
 ) -> int:
     """Update tile_bounds_tindex.json from created tile file headers."""
-    from tile_spatial import get_tile_bounds_from_header
+    from tile_file_matching import get_file_bounds
 
     if not tile_bounds_json.exists():
         return 0
@@ -248,7 +227,7 @@ def update_tile_bounds_json_from_files(
         path = label_to_path.get(label)
         if path is None:
             continue
-        bounds = get_tile_bounds_from_header(path)
+        bounds = get_file_bounds(path)
         if bounds is None:
             continue
         minx, maxx, miny, maxy = bounds

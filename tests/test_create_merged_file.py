@@ -17,7 +17,6 @@ from main_create_merged_file import (  # noqa: E402
     _untwine_chunk_files_to_copc,
     _validate_expected_dims,
     _validate_preserved_product_dims,
-    create_chunked_prod_merged_file,
     create_chunked_prod_merged_files_for_resolution,
     create_prod_merged_files,
     create_prod_merged_file,
@@ -491,9 +490,9 @@ class CreateMergedFileTests(unittest.TestCase):
                 with mock.patch("main_create_merged_file._scale_offset_options", return_value={}):
                     with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=fail_chunk):
                         with self.assertRaisesRegex(RuntimeError, "chunk 1 failed"):
-                            create_chunked_prod_merged_file([source], output, 0.1, "laz", 2)
+                            create_chunked_prod_merged_files_for_resolution([source], [(output, "laz")], 0.1, 2)
 
-            self.assertFalse((tmp_path / "_prod_merged_10cm_chunks").exists())
+            self.assertFalse((tmp_path / "_prod_merged_10cm_shared_chunks").exists())
 
     def test_chunked_product_failure_can_keep_scratch_for_debug(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -511,9 +510,9 @@ class CreateMergedFileTests(unittest.TestCase):
                     with mock.patch("main_create_merged_file._scale_offset_options", return_value={}):
                         with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=fail_chunk):
                             with self.assertRaisesRegex(RuntimeError, "chunk 1 failed"):
-                                create_chunked_prod_merged_file([source], output, 0.1, "laz", 2)
+                                create_chunked_prod_merged_files_for_resolution([source], [(output, "laz")], 0.1, 2)
 
-            self.assertTrue((tmp_path / "_prod_merged_10cm_chunks").exists())
+            self.assertTrue((tmp_path / "_prod_merged_10cm_shared_chunks").exists())
 
     def test_create_prod_merged_chunks_skips_empty_spatial_chunks_and_preserves_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:

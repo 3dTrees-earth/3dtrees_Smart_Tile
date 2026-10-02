@@ -44,6 +44,9 @@ from instance_statistics import InstanceStatistics, summary_document, summary_fi
 from small_instance_reassignment import reassign_small_instances
 
 
+CORRESPONDENCE_RADIUS = 0.05  # m, cross-tile instance correspondence search
+
+
 def write_report(path, report):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".json.tmp")
@@ -132,20 +135,19 @@ def _record_coverage(metric, xyz, distances, origin):
 
 
 def enrich_originals(models, indices, baseline_indices, originals, output_dir, origin, report, *,
-                     target_dims=None, process_workers=None):
+                     target_dims=None):
     """Stage all originals and measure every model independently before failing."""
     files = raw_point_cloud_files(originals)
     if not files:
         raise ValueError(f"No raw LAS/LAZ originals found in {originals}")
     query_workers = report['parallelism']['query_workers']
-    if process_workers is None:
-        source_point_count = 0
-        for file in files:
-            with laspy.open(file, read_evlrs=False) as reader:
-                source_point_count += reader.header.point_count
-        # Share the same budget for combined merge/remap and standalone remap.
-        # Avoid spawning processes without at least a full batch for each one.
-        process_workers = min(query_workers, max(1, source_point_count // MAX_BATCH_POINTS))
+    source_point_count = 0
+    for file in files:
+        with laspy.open(file, read_evlrs=False) as reader:
+            source_point_count += reader.header.point_count
+    # Share the same budget for combined merge/remap and standalone remap.
+    # Avoid spawning processes without at least a full batch for each one.
+    process_workers = min(query_workers, max(1, source_point_count // MAX_BATCH_POINTS))
     report['parallelism'].update(
         enrichment_processes=process_workers,
         enrichment_query_workers=1 if process_workers > 1 else query_workers,
@@ -274,8 +276,8 @@ def timed_stage(report, name, function, *args, **kwargs):
 
 def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json,
                       originals=None, original_output=None, merged_output=None,
-                      transfer_radius=.1732, overlap_threshold=.3, correspondence_radius=.05,
-                      ready=False, matching=True, report_path=None, target_dims=None,
+                      transfer_radius=.1732, overlap_threshold=.3,
+                      ready=False, matching=True, target_dims=None,
                       instance_dimension="PredInstance", filter_anchor="centroid", workers=1,
                       resolution_1=0.01, remap_tolerance=None, small_instances=None):
     """The sole remap-first merge path for one or more independent models.
@@ -298,14 +300,12 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
         raise ValueError("RayCloudTools intermediate merged output is unsupported; use encoded tiles for original remap")
     if tree_mode and small_instances is not None:
         raise ValueError("Small-instance reassignment would change RayCloudTools tree identity; disable it for PredInstance_RCT")
-    if not (np.isfinite(transfer_radius) and transfer_radius > 0 and
-            np.isfinite(correspondence_radius) and correspondence_radius > 0 and
-            0 < overlap_threshold <= 1):
+    if not (np.isfinite(transfer_radius) and transfer_radius > 0 and 0 < overlap_threshold <= 1):
         raise ValueError("Finite positive matching radii and an overlap threshold in (0,1] are required")
     output_tiles = Path(output_tiles)
     output_tiles.parent.mkdir(parents=True, exist_ok=True)
     baseline_output = output_tiles.with_name(output_tiles.name + "_unfiltered_1cm")
-    report_path = Path(report_path or output_tiles.parent / "remap_first_report.json")
+    report_path = output_tiles.parent / "remap_first_report.json"
     report = new_report(resolution_1, remap_tolerance)
     report["contract"] = "3DT-2101/rct-filter-only-v3-safe-recovery" if tree_mode else "3DT-2183/v8-group-geometry"
     report["instance_policy"] = ("RCT tile_id * 100000 + local_id; whole-instance filtering and conflict-free recovery"
@@ -429,7 +429,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                     if admitted:
                         owned = recovered
                     mapping = timed_stage(model_report, 'reconciliation', reconcile_instances, model, owned_files, owned, origin, counts, overlap_threshold,
-                                                  correspondence_radius, model_report, enabled=matching,
+                                                  CORRESPONDENCE_RADIUS, model_report, enabled=matching,
                                                   overlaps=overlaps, normal_keys=normal_keys if admitted else None, workers=query_workers)
                     # 3DT-2209: a reconciled ID does not imply identical geometry.
                     # Keep every member here; selecting one whole-instance owner

@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-Main subsampling script: Parallel subsampling to resolution 1 (1cm) and resolution 2 (10cm).
+Parallel subsampling to resolution 1 (1cm) and resolution 2 (10cm), called by the tile task.
 
 This script handles subsampling of tiled point clouds:
 1. Subsample tiles to resolution 1 (default: 1cm)
@@ -14,19 +13,15 @@ COPC Optimizations:
 - Leverages COPC's spatial indexing for efficient chunk-based processing
 - Multi-threaded COPC writing for improved performance
 
-Usage:
-    python main_subsample.py --tiles_dir /path/to/tiles --res1 0.01 --res2 0.1
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import os
 import shutil
 import subprocess
-import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -34,7 +29,6 @@ from typing import List, Optional, Tuple
 import laspy
 
 # Import parameters
-from parameters import TILE_PARAMS
 from point_cloud_metadata import point_cloud_files
 from subsample_chunk_worker import subsample_tile_chunk
 from subsample_com import (
@@ -45,7 +39,6 @@ from subsample_com import (
 )
 from subsample_methods import (
     SUBSAMPLING_METHOD_CENTER_OF_MASS,
-    SUBSAMPLING_METHODS,
     is_copc_file as _is_copc_file,
     normalize_subsampling_method,
     voxel_subsampling_filter as _voxel_subsampling_filter,
@@ -979,118 +972,3 @@ def run_subsample_pipeline(
     print(f"  Resolution 2 ({res2_cm}cm): {len(res2_files)} files in {subsampled_res2_dir}")
 
     return subsampled_res1_dir, subsampled_res2_dir
-
-
-def main():
-    """CLI entry point."""
-    parser = argparse.ArgumentParser(
-        description="3DTrees Subsampling Pipeline - Parallel subsampling to multiple resolutions",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-
-    parser.add_argument(
-        "--tiles_dir", "-i",
-        type=Path,
-        required=True,
-        help="Directory containing tile COPC files"
-    )
-
-    parser.add_argument(
-        "--res1",
-        type=float,
-        default=TILE_PARAMS.get('resolution_1', 0.01),
-        help=f"First resolution in meters (default: {TILE_PARAMS.get('resolution_1', 0.01)})"
-    )
-
-    parser.add_argument(
-        "--res2",
-        type=float,
-        default=TILE_PARAMS.get('resolution_2', 0.1),
-        help=f"Second resolution in meters (default: {TILE_PARAMS.get('resolution_2', 0.1)})"
-    )
-
-    parser.add_argument(
-        "--output-copc-res1",
-        "--output_copc_res1",
-        action=argparse.BooleanOptionalAction,
-        default=TILE_PARAMS.get("output_copc_res1", True),
-        help=(
-            "Write resolution 1 outputs as COPC LAZ "
-            f"(default: {TILE_PARAMS.get('output_copc_res1', True)})"
-        ),
-    )
-
-    parser.add_argument(
-        "--output-copc-res2",
-        "--output_copc_res2",
-        action=argparse.BooleanOptionalAction,
-        default=TILE_PARAMS.get("output_copc_res2", False),
-        help=(
-            "Write resolution 2 outputs as COPC LAZ "
-            f"(default: {TILE_PARAMS.get('output_copc_res2', False)})"
-        ),
-    )
-
-    parser.add_argument(
-        "--num_cores",
-        type=int,
-        default=None,
-        help="Number of CPU cores (default: auto-detect, not used for chunking)"
-    )
-
-    parser.add_argument(
-        "--num_threads",
-        type=int,
-        default=None,
-        help="Number of spatial chunks per file for parallel processing (default: auto-detected CPU count)"
-    )
-
-    parser.add_argument(
-        "--subsampling-method",
-        "--subsampling_method",
-        choices=sorted(SUBSAMPLING_METHODS),
-        default=TILE_PARAMS.get("subsampling_method", SUBSAMPLING_METHOD_CENTER_OF_MASS),
-        help=(
-            "Subsampling method: center-of-mass averages XYZ per voxel; "
-            "nearest-to-centroid preserves the previous PDAL voxel centroid nearest-neighbor behavior "
-            f"(default: {TILE_PARAMS.get('subsampling_method', SUBSAMPLING_METHOD_CENTER_OF_MASS)})"
-        ),
-    )
-
-    parser.add_argument(
-        "--output_prefix",
-        type=str,
-        default=None,
-        help="Optional prefix for output filenames"
-    )
-
-    args = parser.parse_args()
-
-    # Validate input
-    if not args.tiles_dir.exists():
-        print(f"Error: Tiles directory does not exist: {args.tiles_dir}")
-        sys.exit(1)
-
-    # Run pipeline
-    try:
-        res1_dir, res2_dir = run_subsample_pipeline(
-            tiles_dir=args.tiles_dir,
-            res1=args.res1,
-            res2=args.res2,
-            num_cores=args.num_cores,
-            num_threads=args.num_threads,
-            output_prefix=args.output_prefix,
-            subsampling_method=args.subsampling_method,
-            output_copc_res1=args.output_copc_res1,
-            output_copc_res2=args.output_copc_res2,
-        )
-        print(f"\nSubsampled files ready:")
-        print(f"  Resolution 1: {res1_dir}")
-        print(f"  Resolution 2: {res2_dir}")
-    except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

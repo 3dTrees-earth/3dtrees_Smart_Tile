@@ -10,12 +10,11 @@ Usage:
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, AliasChoices, field_validator, model_validator
+from pydantic import Field, AliasChoices, field_validator
 from pathlib import Path
-from collections.abc import Iterable
 from typing import Optional
 
-from worker_budget import DEFAULT_FILE_WORKERS, DEFAULT_MEMORY_GB, available_cpu_count
+from worker_budget import DEFAULT_FILE_WORKERS, available_cpu_count
 
 
 class Parameters(BaseSettings):
@@ -139,18 +138,6 @@ class Parameters(BaseSettings):
         "PredInstance",
         description="Name of the instance ID dimension in input files (default: PredInstance, fallback: treeID)",
         validation_alias=AliasChoices("instance-dimension", "instance_dimension"),
-    )
-
-    filter_suffix: str = Field(
-        "_filtered",
-        description="Suffix added to output filenames for the filter task",
-        validation_alias=AliasChoices("filter-suffix", "filter_suffix", "suffix"),
-    )
-
-    filter_output_extension: Optional[str] = Field(
-        default=None,
-        description="Optional output extension override for the filter task, e.g. .laz",
-        validation_alias=AliasChoices("filter-output-extension", "filter_output_extension", "output-extension", "output_extension"),
     )
 
     filter_anchor: str = Field(
@@ -383,57 +370,10 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("baseline-1cm-folders", "baseline_1cm_folders"),
     )
 
-    memory_gb: float = Field(
-        DEFAULT_MEMORY_GB,
-        gt=0,
-        description=(
-            "Memory in GiB for worker pools capped by memory use. The explicit "
-            "default avoids consuming all available memory on shared workers."
-        ),
-        validation_alias=AliasChoices("memory-gb", "memory_gb"),
-    )
-
-    min_remap_match_fraction: float = Field(
-        1.0,
-        ge=1.0,
-        le=1.0,
-        description=(
-            "Required per-file/per-model coverage, fixed at 1.0. Missing coverage is a hard failure."
-        ),
-        validation_alias=AliasChoices(
-            "min-remap-match-fraction",
-            "min_remap_match_fraction",
-        ),
-    )
-
-    output_merged_with_originals: Optional[Path] = Field(
-        default=None,
-        description="Legacy path for the old merged-with-originals remap output. Prod-merged outputs now use --merged-resolutions.",
-        validation_alias=AliasChoices("output-merged-with-originals", "output_merged_with_originals"),
-    )
-
-    produce_merged_file: bool = Field(
-        False,
-        description="For filter/remap tails, also create a merged output product when supported.",
-        validation_alias=AliasChoices("produce-merged-file", "produce_merged_file"),
-    )
-
     transfer_original_dims_to_merged: bool = Field(
         False,
         description="Create prod-merged files from Original-with-predictions after merge/remap. Uses the create_merged_file implementation.",
         validation_alias=AliasChoices("transfer-original-dims-to-merged", "transfer_original_dims_to_merged"),
-    )
-
-    threedtrees_dims: str = Field(
-        "PredInstance,PredSemantic",
-        description="Comma-separated list of dimension names produced by 3DTrees to transfer to original files. These are renamed to {name}_{suffix} in the output (e.g. PredInstance_SAT).",
-        validation_alias=AliasChoices("threedtrees-dims", "threedtrees_dims"),
-    )
-
-    threedtrees_suffix: str = Field(
-        "SAT",
-        description="Suffix for 3DTrees dimension names (e.g. SAT -> PredInstance_SAT).",
-        validation_alias=AliasChoices("threedtrees-suffix", "threedtrees_suffix"),
     )
 
     pre_remap_reassign_instances: bool = Field(
@@ -446,34 +386,11 @@ class Parameters(BaseSettings):
     # Remap task parameters
     # ==========================================================================
 
-    source_folder: Optional[Path] = Field(
-        default=None,
-        description="Path to source LAZ files (e.g., segmented files) for 'remap' task",
-        validation_alias=AliasChoices("source-folder", "source_folder"),
-    )
-
-    target_folder: Optional[Path] = Field(
-        default=None,
-        description="Path to target LAZ files (e.g., subsampled files) for 'remap' task",
-        validation_alias=AliasChoices("target-folder", "target_folder"),
-    )
-
     # Merge algorithm parameters
-    buffer: Optional[float] = Field(
-        10.0,
-        description="Legacy standalone filter-task buffer. Merge derives its buffer from tile_bounds_tindex.json.",
-    )
-
     overlap_threshold: Optional[float] = Field(
         0.3,
         description="Overlap ratio threshold for instance matching (0.3 = 30%)",
         validation_alias=AliasChoices("overlap-threshold", "overlap_threshold"),
-    )
-
-    max_centroid_distance: Optional[float] = Field(
-        3.0,
-        description="Max centroid distance to merge instances in meters",
-        validation_alias=AliasChoices("max-centroid-distance", "max_centroid_distance"),
     )
 
     max_volume_for_merge: Optional[float] = Field(
@@ -496,18 +413,6 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("max-cluster-size", "max_cluster_size"),
     )
 
-    border_zone_width: Optional[float] = Field(
-        10.0,
-        description="Width of border zone beyond buffer for instance matching (meters)",
-        validation_alias=AliasChoices("border-zone-width", "border_zone_width"),
-    )
-
-    remap_merge: bool = Field(
-        False,
-        description="After filter task, remap filtered dimensions to originals and/or subsampled targets.",
-        validation_alias=AliasChoices("remap-merge", "remap_merge"),
-    )
-
     disable_matching: bool = Field(
         False,
         description="Disable cross-tile instance matching",
@@ -520,25 +425,9 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("skip-merged-file", "skip_merged_file"),
     )
 
-    verbose: bool = Field(
-        False,
-        description="Print detailed merge decisions",
-    )
-
     # ==========================================================================
     # Validators
     # ==========================================================================
-
-    @field_validator(
-        "input_dir",
-        "output_dir",
-    )
-    @classmethod
-    def validate_tile_required_params(cls, v, info):
-        """Validate that tile task required parameters are provided."""
-        # Note: Actual validation happens in run.py after instantiation
-        # since we need to check the task value
-        return v
 
     @field_validator(
         "tile_length",
@@ -563,9 +452,7 @@ class Parameters(BaseSettings):
         return v
 
     @field_validator(
-        "buffer",
         "overlap_threshold",
-        "max_centroid_distance",
         "max_volume_for_merge",
     )
     @classmethod
@@ -622,58 +509,12 @@ class Parameters(BaseSettings):
             raise ValueError("filter_anchor must be 'centroid', 'highest_point', or 'lowest_point'")
         return normalized
 
-    @model_validator(mode="after")
-    def sync_prod_merged_flags(self):
-        """Keep legacy Galaxy prod-merged selection and implementation flag aligned."""
-        if self.produce_merged_file or self.transfer_original_dims_to_merged:
-            self.produce_merged_file = True
-            self.transfer_original_dims_to_merged = True
-        return self
-
     @field_validator("merged_output_formats", mode="before")
     @classmethod
     def validate_merged_output_formats(cls, v):
         """Validate and normalize prod-merged output formats."""
-        aliases = {
-            "las": "laz",
-            "laz": "laz",
-            ".laz": "laz",
-            "copc": "copc.laz",
-            "copc_laz": "copc.laz",
-            "copc-laz": "copc.laz",
-            "copc.laz": "copc.laz",
-            ".copc.laz": "copc.laz",
-            "ply": "ply",
-            ".ply": "ply",
-        }
-        parsed = []
-        seen = set()
-
-        def tokens(value):
-            if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-                for item in value:
-                    yield from tokens(item)
-                return
-            text = str(value or "")
-            if text.startswith("[") and text.endswith("]"):
-                text = text[1:-1]
-            for token in text.split(","):
-                yield token.strip().strip("'\"")
-
-        for raw_token in tokens(v or "copc.laz"):
-            token = raw_token.strip().lower()
-            if not token:
-                continue
-            output_format = aliases.get(token)
-            if output_format is None:
-                raise ValueError("merged_output_formats must contain only 'laz', 'copc.laz', or 'ply'")
-            if output_format in seen:
-                continue
-            seen.add(output_format)
-            parsed.append(output_format)
-        if not parsed:
-            raise ValueError("merged_output_formats must contain at least one format")
-        return ",".join(parsed)
+        from product_formats import parse_merged_output_formats
+        return ",".join(parse_merged_output_formats(v))
 
     # ==========================================================================
     # Model configuration
@@ -701,10 +542,7 @@ def print_params(params: Parameters):
     print(f"  output_dir: {params.output_dir}")
     print(f"  workers: {params.workers}")
     print(f"  num_spatial_chunks: {params.num_spatial_chunks}")
-    print(f"  memory_gb: {params.memory_gb}")
     print(f"  instance_dimension: {params.instance_dimension}")
-    print(f"  filter_suffix: {params.filter_suffix}")
-    print(f"  filter_output_extension: {params.filter_output_extension}")
     print(f"  filter_anchor: {params.filter_anchor}")
 
     print("\nTile Task:")
@@ -726,13 +564,10 @@ def print_params(params: Parameters):
     print(f"  original_raw_input_dir: {params.original_raw_input_dir}")
     print(f"  original_raw_output_dir: {params.original_raw_output_dir}")
     print(f"  overlap_threshold: {params.overlap_threshold}")
-    print(f"  max_centroid_distance: {params.max_centroid_distance}")
     print(f"  max_volume_for_merge: {params.max_volume_for_merge}")
     print(f"  max_cluster_size: {params.max_cluster_size}")
     print(f"  disable_matching: {params.disable_matching}")
     print(f"  reassign_small_instances: {params.reassign_small_instances}")
-    print(f"  remap_merge: {params.remap_merge}")
-    print(f"  verbose: {params.verbose}")
 
     print("\nCreate Merged File Task:")
     print(f"  original_with_predictions_dir: {params.original_with_predictions_dir}")
@@ -740,18 +575,14 @@ def print_params(params: Parameters):
     print(f"  standardization_json: {params.standardization_json}")
     print(f"  merged_resolutions: {params.merged_resolutions}")
     print(f"  merged_output_formats: {params.merged_output_formats}")
-    print(f"  produce_merged_file: {params.produce_merged_file}")
 
     print("\nRemap Task:")
     print(f"  merged_laz: {params.merged_laz}")
     print(f"  segmented_folders: {params.segmented_folders}")
     print(f"  remap_dims: {params.remap_dims}")
     print(f"  remap_tolerance: {params.remap_tolerance}")
-    print(f"  min_remap_match_fraction: {params.min_remap_match_fraction}")
     print(f"  original_raw_input_dir: {params.original_raw_input_dir}")
     print(f"  original_raw_output_dir: {params.original_raw_output_dir}")
-    print(f"  threedtrees_dims: {params.threedtrees_dims}")
-    print(f"  threedtrees_suffix: {params.threedtrees_suffix}")
     print(f"  transfer_original_dims_to_merged: {params.transfer_original_dims_to_merged}")
     print(f"  merged_resolutions: {params.merged_resolutions}")
     print(f"  merged_output_formats: {params.merged_output_formats}")
@@ -760,30 +591,6 @@ def print_params(params: Parameters):
 
 
 # Legacy compatibility: provide dict-like access for modules that need it
-def get_tile_params(params: Parameters) -> dict:
-    """Get tile parameters as a dictionary for legacy compatibility."""
-    return {
-        'tile_length': params.tile_length,
-        'tile_buffer': params.tile_buffer,
-        'threads': params.threads,
-        'workers': params.workers,
-        'resolution_1': params.resolution_1,
-        'resolution_2': params.resolution_2,
-        'output_copc_res1': params.output_copc_res1,
-        'output_copc_res2': params.output_copc_res2,
-        'subsampling_method': params.subsampling_method,
-        'chunk_size': params.chunk_size,
-    }
-
-
-def get_remap_params(params: Parameters) -> dict:
-    """Get remap parameters as a dictionary for legacy compatibility."""
-    return {
-        'workers': params.workers,
-        'instance_dimension': params.instance_dimension,
-    }
-
-
 # Legacy dict exports for backwards compatibility with modules that import them directly
 TILE_PARAMS = {
     'tile_length': 100,
@@ -797,22 +604,6 @@ TILE_PARAMS = {
     'subsampling_method': 'center-of-mass',
     'chunk_size': 20_000_000,
 }
-
-REMAP_PARAMS = {
-    'target_resolution_cm': 2,
-    'workers': DEFAULT_FILE_WORKERS,
-}
-
-MERGE_PARAMS = {
-    'overlap_threshold': 0.3,
-    'max_centroid_distance': 3.0,
-    'max_volume_for_merge': 4.0,
-    'min_cluster_size': 300,
-    'workers': DEFAULT_FILE_WORKERS,
-    'verbose': True,
-    'retile_buffer': 2.0,  # Fixed to 2.0m
-}
-
 
 if __name__ == "__main__":
     """CLI for viewing/testing parameter configuration."""

@@ -290,7 +290,6 @@ def run_tile_task(params: Parameters):
             max_tile_procs=tile_writer_workers,
             source_file_workers=tile_source_workers,
             grid_origin=grid_origin,
-            dimension_reduction=dimension_reduction,
             tiling_threshold=tiling_threshold,
             chunk_size=chunk_size,
         )
@@ -481,62 +480,24 @@ def run_remap_task(params: Parameters):
 
 def run_create_merged_file_task(params: Parameters):
     """Create prod-merged files from Original-with-predictions files."""
-    try:
-        from main_create_merged_file import create_prod_merged_files
-    except ImportError as e:
-        print(f"Error: Could not import main_create_merged_file.py: {e}")
-        sys.exit(1)
-
     input_dir = params.original_with_predictions_dir or params.input_dir
     if input_dir is None:
         print("Error: --original-with-predictions-dir or --input-dir is required for create_merged_file task")
         sys.exit(1)
-
-    output_dir = params.output_dir
-    if output_dir is None:
-        output_dir = Path(input_dir).parent
-    else:
-        output_dir = Path(output_dir)
-
-    print("=" * 60)
-    print("Create Prod-Merged Files")
-    print("=" * 60)
-    print(f"Original-with-predictions dir: {input_dir}")
-    print(f"Output dir: {output_dir}")
-    if params.staged_copc_dir:
-        print(f"Staged COPC dir: {params.staged_copc_dir}")
-    if params.standardization_json:
-        print(f"Standardization JSON: {params.standardization_json}")
-    print(f"Selected resolutions: {params.merged_resolutions}")
-    print(f"Selected output formats: {params.merged_output_formats}")
-    print(f"Resolution 1: {params.resolution_1:g}m")
-    print(f"Resolution 2: {params.resolution_2:g}m")
-    print("Product subsampling method: nearest-to-centroid")
-    print()
-
+    input_dir = Path(input_dir)
+    if not input_dir.exists():
+        print(f"Error: Original-with-predictions directory not found: {input_dir}")
+        sys.exit(1)
+    output_dir = Path(params.output_dir) if params.output_dir is not None else input_dir.parent
     try:
-        outputs = create_prod_merged_files(
-            original_with_predictions_dir=Path(input_dir),
-            output_dir=output_dir,
-            resolution_selector=params.merged_resolutions,
-            output_format_selector=params.merged_output_formats,
-            res1=params.resolution_1,
-            res2=params.resolution_2,
-            num_spatial_chunks=params.num_spatial_chunks,
-            chunk_workers=params.num_spatial_chunks,
-            staged_copc_dir=params.staged_copc_dir,
-            standardization_json=params.standardization_json,
-        )
+        _create_prod_merged_outputs(input_dir, output_dir, params)
     except Exception as e:
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
-
     print()
     print("Create merged file complete.")
-    for output in outputs:
-        print(f"  {output}")
 
 
 def run_filter_task(params: Parameters):
@@ -675,7 +636,7 @@ def _field_cli_flags(field_name: str) -> list[str]:
 def _print_cli_help() -> None:
     """Print a compact SmartTile CLI help page."""
     option_groups = [
-        ("Common", ["task", "input_dir", "output_dir", "workers", "num_spatial_chunks", "chunk_size", "memory_gb"]),
+        ("Common", ["task", "input_dir", "output_dir", "workers", "num_spatial_chunks", "chunk_size"]),
         (
             "Tile",
             [
@@ -714,23 +675,17 @@ def _print_cli_help() -> None:
                 "transfer_original_dims_to_merged",
                 "merged_resolutions",
                 "merged_output_formats",
-                "threedtrees_dims",
             ],
         ),
         (
             "Filtering / Matching",
             [
                 "instance_dimension",
-                "filter_suffix",
-                "filter_output_extension",
-                "buffer",
                 "overlap_threshold",
-                "max_centroid_distance",
                 "max_volume_for_merge",
                 "reassign_small_instances",
                 "max_cluster_size",
                 "disable_matching",
-                "verbose",
             ],
         ),
     ]

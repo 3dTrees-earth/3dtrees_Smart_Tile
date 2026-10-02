@@ -155,7 +155,7 @@ def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
             outputs.append(output)
             if recovered_index is not None:
                 index_file(recovered_index, output, tile, origin, model)
-        metric['final_support'] = 'pending' if selected else 'no recovery needed'
+        metric['final_support'] = 'pending'
         return outputs, counts, selected, db_path
     finally:
         db.close()

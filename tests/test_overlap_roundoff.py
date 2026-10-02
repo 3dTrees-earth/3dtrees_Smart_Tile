@@ -93,7 +93,7 @@ def test_gfz_boundary_ownership_dedup_and_remap_keep_core_score(tmp_path, budget
         assert [len(laspy.read(p).points) for p in retained] == [0, 1]
         final = deduplicate(model, retained, owned, survivors, origin, mapping,
             tmp_path/'final', report, overlaps=overlaps, background_semantics_owned=True,
-            core_preferred=lambda a, b, pts: preferred_core(pts, a, b, regions, origin))
+            core_regions=regions)
         assert sum(len(laspy.read(p).points) for p in final) == 1
         query = cloud([399157.564, 5646649.995, 368.34000000000003],
                       [-422243, -462321, 42763], 0.)
