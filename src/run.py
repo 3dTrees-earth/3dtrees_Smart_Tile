@@ -356,7 +356,7 @@ def run_tile_task(params: Parameters):
         # (so remap/merge matching uses file extent instead of nominal grid)
         bounds_json = output_dir / "tile_bounds_tindex.json"
         if bounds_json.exists():
-            from main_tile import update_tile_bounds_json_from_files
+            from tile_tindex import update_tile_bounds_json_from_files
             num_updated = update_tile_bounds_json_from_files(bounds_json, res1_dir)
             if num_updated > 0:
                 print(f"  Updated tile_bounds_tindex.json with bounds from {num_updated} tile(s) in {res1_dir.name}")
