@@ -72,11 +72,11 @@ class CoreOwnershipTests(unittest.TestCase):
                     owned = stack.enter_context(PointIndex(root / 'owned.sqlite', dims, query_workers=workers))
                     recovered = stack.enter_context(PointIndex(root / 'recovered.sqlite', dims, query_workers=workers))
                     filtered, counts = filter_owned_instances(model, files, regions,
-                        root / 'filtered', owned, np.zeros(3), report)
+                        root / 'filtered', owned, np.zeros(3), report, workers=workers)
                     self.assertEqual(sum(counts.values()), 0)
                     outputs, counts, selected, claims_path = recover_orphaned_instances(
                         model, files, filtered, owned, regions, overlaps, root / 'restored',
-                        recovered, np.zeros(3), counts, report)
+                        recovered, np.zeros(3), counts, report, workers=workers)
                     self.assertEqual(selected, [(0, 1)])
                     self.assertEqual(report['orphan_recovery']['uncovered_locations'], 2)
                     self.assertEqual(report['orphan_recovery']['admitted'][0]['new_locations'], 1)

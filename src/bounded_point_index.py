@@ -152,6 +152,28 @@ class PointIndex:
         self.db.commit()
         self._cache_ready = True
 
+    def append_index(self, path):
+        """Append every batch of a finished index file with the same layout.
+
+        Batches keep their order and get the row IDs a direct ``add`` would
+        have assigned, so parallel builders yield the same index as one writer.
+        """
+        if self._cache_ready:
+            self.query_cache.discard(self._cache_owner)
+        self._cache_ready = False
+        self.db.commit()
+        self.db.execute("ATTACH DATABASE ? AS shard", (str(path),))
+        try:
+            offset = self.db.execute("SELECT COALESCE(MAX(id), 0) FROM batches").fetchone()[0]
+            self.db.execute("INSERT INTO batches(id, tile, data) SELECT id + ?, tile, data FROM shard.batches ORDER BY id",
+                            (offset,))
+            self.db.execute("INSERT INTO bounds SELECT id + ?, x0, x1, y0, y1, z0, z1 FROM shard.bounds ORDER BY id",
+                            (offset,))
+            self._cache_tiles.update(row[0] for row in self.db.execute("SELECT DISTINCT tile FROM shard.batches"))
+            self.db.commit()
+        finally:
+            self.db.execute("DETACH DATABASE shard")
+
     def candidates(self, xyz, radius, *, tile=None, before_tile=None):
         if not len(xyz):
             return

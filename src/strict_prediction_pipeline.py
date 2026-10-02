@@ -26,7 +26,7 @@ from point_cloud_metadata import (
 )
 from dense_instance_ownership import (
     ANCHORS, filter_owned_instances, ownership_regions,
-    assign_shared_points, preferred_core,
+    assign_shared_points,
 )
 from prediction_collection_remap import prediction_collection_files, _assign_prediction_values
 from instance_labels import instance_extra_bytes_params
@@ -377,10 +377,10 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                 suffix = Path(f"model_{i:03d}") if len(collections) > 1 else Path()
                 statistics, reassigned = InstanceStatistics(), {}
                 dense_files, counts = timed_stage(model_report, 'dense_transfer_and_index', prepare_dense, model, pairs, dense_dir / suffix, dense, origin,
-                                                    transfer_radius, model_report, ready=ready)
+                                                    transfer_radius, model_report, ready=ready, workers=query_workers)
                 owned_files, counts = timed_stage(model_report, 'core_filter_and_index', filter_owned_instances,
                     model, dense_files, regions, work / "owned" / suffix, owned, origin, model_report,
-                    anchor=filter_anchor)
+                    anchor=filter_anchor, workers=query_workers)
                 if tree_mode:
                     admitted_index = stack.enter_context(PointIndex(work / f"rct_admitted_{i}.sqlite",
                         {model.instance: np.uint32}, query_workers=query_workers))
@@ -389,7 +389,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                     owned_files, counts, admitted, claims_path = timed_stage(model_report, 'orphan_recovery', recover_orphaned_instances,
                         model, dense_files, owned_files, owned, regions, overlaps,
                         work / "recovered" / suffix, None, origin, counts, model_report,
-                        admit_candidate=gate)
+                        admit_candidate=gate, workers=query_workers)
                     model_report["orphan_recovery"].update({
                         "policy": "whole RCT instances only; no point shared with retained or recovered trees",
                         "conflict_radius_m": DUPLICATE_RADIUS, "blocked": gate.blocked})
@@ -424,12 +424,13 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                                                                query_workers=query_workers))
                     owned_files, counts, admitted, claims_path = timed_stage(model_report, 'orphan_recovery', recover_orphaned_instances,
                         model, dense_files, owned_files, owned, regions, overlaps,
-                        work / "recovered" / suffix, recovered, origin, counts, model_report)
+                        work / "recovered" / suffix, recovered, origin, counts, model_report,
+                        workers=query_workers)
                     if admitted:
                         owned = recovered
                     mapping = timed_stage(model_report, 'reconciliation', reconcile_instances, model, owned_files, owned, origin, counts, overlap_threshold,
                                                   correspondence_radius, model_report, enabled=matching,
-                                                  overlaps=overlaps, normal_keys=normal_keys if admitted else None)
+                                                  overlaps=overlaps, normal_keys=normal_keys if admitted else None, workers=query_workers)
                     # 3DT-2209: a reconciled ID does not imply identical geometry.
                     # Keep every member here; selecting one whole-instance owner
                     # discards recovered tips before shared-point ownership runs.
@@ -441,21 +442,20 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                         resolved = stack.enter_context(PointIndex(work / f"resolved_{i}.sqlite", dimensions, query_workers=query_workers))
                         owned_files = timed_stage(model_report, 'shared_point_ownership', assign_shared_points,
                             model, owned_files, owned, regions, mapping, work / "resolved" / suffix,
-                            resolved, origin, model_report, overlaps=overlaps)
+                            resolved, origin, model_report, overlaps=overlaps, workers=query_workers)
                         owned = resolved
                         if any(t["background_input"] > t["background_removed"]
                                for t in model_report["instance_ownership"]["tiles"]):
                             tree_priority = stack.enter_context(PointIndex(work / f"tree_priority_{i}.sqlite", dimensions, query_workers=query_workers))
                             owned_files = timed_stage(model_report, 'tree_background_ownership', assign_shared_points,
                                 model, owned_files, owned, regions, mapping, work / "tree_priority" / suffix,
-                                tree_priority, origin, model_report, overlaps=overlaps, background_only=True)
+                                tree_priority, origin, model_report, overlaps=overlaps, background_only=True,
+                                workers=query_workers)
                             owned = tree_priority
                     final_files = timed_stage(model_report, 'deduplication', deduplicate, model, owned_files, owned, survivors, origin, mapping,
                                               final_dir / suffix, model_report, overlaps=overlaps,
-                                              background_semantics_owned=True,
-                                              core_preferred=lambda first, second, pts: preferred_core(
-                                                  pts, first, second, regions, origin),
-                                              instance_statistics=statistics)
+                                              background_semantics_owned=True, core_regions=regions,
+                                              instance_statistics=statistics, workers=query_workers)
                     validate_recovered_geometry(survivors, model, admitted, claims_path, model_report, origin)
                     # Tiles are relabelled in place; the survivor index keeps the
                     # pre-reassignment labels and compaction folds them (aliases).

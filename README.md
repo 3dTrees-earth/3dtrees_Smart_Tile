@@ -853,11 +853,21 @@ Controls file concurrency for tiling, native queries for merge/filter, and batch
 | Task | What `--workers` Controls |
 |------|---------------------------|
 | **Tile Task** | Parallel source-file distribution; one large source is split into point ranges; tile COPC finalization runs in parallel |
-| **Merge / Filter Tasks** | Parallel KDTree queries within each bounded batch; model/tile order and index writes remain serial |
+| **Merge Task, dense 10 cm -> 1 cm transfer** | Tiles in separate processes (largest first); each tile answers its nearest-prediction queries in processes proportional to its share of 1 cm points, so a single or dominant tile still uses all workers. Results join the shared index in tile order |
+| **Merge / Filter Tasks, later stages** | Parallel KDTree queries within each bounded batch; model/tile order and index writes remain serial |
 | **Remap Task** | Independent query batches in worker processes, each with read-only index connections and one query thread; ordered output writer |
 
 For example, `--workers 4` requests up to four query threads for merge/filter or
 four processes for final remap.
+
+The dense transfer is process-parallel because its per-cell nearest search is
+Python and holds the GIL, so query threads alone left it on one core
+(dataset 3109: 374 M points at 1 cm). Each tile process writes its output tile and
+an index file of exactly the emitted records; the parent appends those files in
+tile order with the row IDs a single writer would assign. Outputs, the index and
+the report are identical for any `--workers` value (tests compare 1 against
+several processes, including equal-distance ties). `parallelism.dense_transfer_processes`
+and `parallelism.dense_query_processes` (per tile) record the split.
 The effective limit is capped by `GALAXY_SLOTS`, CPU affinity and detected cgroup
 CPU quotas, and is recorded in the report's `parallelism` field. Queries use at
 most one thread per 1,024 query points to avoid thread startup overhead on tiny

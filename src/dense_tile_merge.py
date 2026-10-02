@@ -1,7 +1,9 @@
 """Strict per-model dense transfer, instance reconciliation and point deduplication."""
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+import multiprocessing
+from collections import Counter, defaultdict, deque
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +17,8 @@ from point_cloud_metadata import (
 )
 from prediction_collection_remap import prediction_collection_files, _promote_collection_extra_dim
 from instance_labels import instance_extra_bytes_params
+from parallel_index_queries import IndexQueries
+from tile_parallel import map_tiles
 
 
 DUPLICATE_RADIUS = 0.01
@@ -152,53 +156,108 @@ def index_written_record(index, record, tile, header, origin, model, offset):
     return offset + len(record)
 
 
-def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, report, *, ready=False):
-    """Transfer each tile's own predictions, requiring assignment of every target."""
-    output_dir.mkdir(parents=True)
-    files = []
+def _transfer_tile(model, tile, source, target, output_dir, origin, transfer_radius, ready, query_workers,
+                   query_processes=1):
+    """Transfer one tile's own predictions into its 1 cm geometry.
+
+    Writes ``tile_NNNNN.laz`` and an index file of exactly the emitted records
+    (``index_NNNNN.sqlite``) that the caller appends in tile order. Returns
+    ``(output, index_file, metric, counts)``; the metric records any
+    incomplete assignment for the caller to report. ``query_processes`` > 1
+    answers the nearest queries of this tile in worker processes.
+    """
+    dimensions = {n: p.type for n, p in model.dimensions.items()}
+    output = output_dir / f"tile_{tile:05d}.laz"
+    shard_path = output_dir / f"index_{tile:05d}.sqlite"
+    metric = {"source": str(source), "target": str(target), "tile": tile,
+              "total": 0, "matched": 0, "missing_examples": [],
+              "radius_m": None if ready else transfer_radius}
     counts = Counter()
-    for tile, (source, target, _) in enumerate(pairs):
-        source_index_path = output_dir / f"source_{tile}.sqlite"
-        with PointIndex(source_index_path, {n: p.type for n, p in model.dimensions.items()},
-                        query_workers=index.query_workers) as source_index:
-            if not ready:
-                index_file(source_index, source, 0, origin, model)
-            output = output_dir / f"tile_{tile:05d}.laz"
-            metric = {"source": str(source), "target": str(target), "tile": tile,
-                      "total": 0, "matched": 0, "missing_examples": [],
-                      "radius_m": None if ready else transfer_radius}
-            report.setdefault("transfer", []).append(metric)
-            indexed_offset = 0
-            with laspy.open(target) as reader:
-                header = target_header(reader.header, model, ready=ready)
-                with laspy.open(output, mode="w", header=header) as writer:
-                    for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-                        xyz = coordinates(record, reader.header, origin)
-                        if ready:
-                            validate_labels(model, record, source.name)
-                            matched = np.ones(len(record), dtype=bool)
-                            values = prediction_values(record, model.dimensions)
-                        else:
-                            distances, values, _ = source_index.nearest(xyz, transfer_radius)
-                            matched = np.isfinite(distances)
-                        metric["total"] += len(record)
-                        metric["matched"] += int(np.count_nonzero(matched))
-                        for point in xyz[~matched][:5 - len(metric["missing_examples"])]:
-                            metric["missing_examples"].append((point + origin).tolist())
-                        out = copy_record(record, header)
-                        for name, data in values.items():
-                            out.array[name] = data
-                        writer.write_points(out)
-                        indexed_offset = index_written_record(index, out, tile, header, origin, model, indexed_offset)
-                        ids, sizes = np.unique(values[model.instance], return_counts=True)
-                        counts.update({(tile, int(i)): int(n) for i, n in zip(ids, sizes) if i > 0})
-                    write_retained_evlrs(writer, header)
-            if metric["matched"] != metric["total"]:
-                raise ValueError(f"{model.name}: incomplete prediction assignment on {target.name}: "
-                                 f"{metric['matched']}/{metric['total']} within {transfer_radius} m")
-        source_index_path.unlink()
+    source_index_path = output_dir / f"source_{tile}.sqlite"
+    with PointIndex(source_index_path, dimensions, query_workers=query_workers) as source_index, \
+            PointIndex(shard_path, dimensions, query_workers=1) as shard:
+        if not ready:
+            index_file(source_index, source, 0, origin, model)
+        indexed_offset = 0
+        with laspy.open(target) as reader, \
+                IndexQueries(source_index, transfer_radius, workers=1 if ready else query_processes) as queries:
+            header = target_header(reader.header, model, ready=ready)
+            batches = ((record, coordinates(record, reader.header, origin))
+                       for record in reader.chunk_iterator(MAX_BATCH_POINTS))
+            if ready:
+                batches = ((record, xyz, None) for record, xyz in batches)
+            else:
+                batches = queries.map(batches)
+            with laspy.open(output, mode="w", header=header) as writer:
+                for record, xyz, nearest in batches:
+                    if ready:
+                        validate_labels(model, record, source.name)
+                        matched = np.ones(len(record), dtype=bool)
+                        values = prediction_values(record, model.dimensions)
+                    else:
+                        distances, values, _ = nearest
+                        matched = np.isfinite(distances)
+                    metric["total"] += len(record)
+                    metric["matched"] += int(np.count_nonzero(matched))
+                    for point in xyz[~matched][:5 - len(metric["missing_examples"])]:
+                        metric["missing_examples"].append((point + origin).tolist())
+                    out = copy_record(record, header)
+                    for name, data in values.items():
+                        out.array[name] = data
+                    writer.write_points(out)
+                    indexed_offset = index_written_record(shard, out, tile, header, origin, model, indexed_offset)
+                    ids, sizes = np.unique(values[model.instance], return_counts=True)
+                    counts.update({(tile, int(i)): int(n) for i, n in zip(ids, sizes) if i > 0})
+                write_retained_evlrs(writer, header)
+        shard.flush()
+    source_index_path.unlink()
+    return output, shard_path, metric, counts
+
+
+def query_process_shares(sizes, workers, *, ready=False):
+    """Query processes per tile, proportional to its share of 1 cm points (at least 1).
+
+    Uneven tiles would otherwise leave one large tile running alone on one
+    core. Ready predictions need no queries.
+    """
+    if ready or workers == 1:
+        return [1] * len(sizes)
+    total = sum(sizes) or 1
+    return [max(1, round(workers * size / total)) for size in sizes]
+
+
+def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, report, *, ready=False, workers=1):
+    """Transfer each tile's own predictions, requiring assignment of every target.
+
+    Tiles are independent, so up to ``workers`` tiles run in separate processes
+    (the per-cell nearest search is Python and holds the GIL), and each tile
+    answers its queries in processes proportional to its size. Results join
+    the shared index in tile order, so outputs equal a one-process run.
+    """
+    output_dir.mkdir(parents=True)
+    workers = max(1, int(workers))
+    processes = min(workers, len(pairs))
+    sizes = []
+    for _, target, _ in pairs:
+        with laspy.open(target) as reader:
+            sizes.append(reader.header.point_count)
+    query_processes = query_process_shares(sizes, workers, ready=ready)
+    query_workers = index.query_workers if processes == 1 else max(1, index.query_workers // processes)
+    jobs = [(model, tile, source, target, output_dir, origin, transfer_radius, ready, query_workers,
+             query_processes[tile]) for tile, (source, target, _) in enumerate(pairs)]
+    report.setdefault("parallelism", {}).update(dense_transfer_processes=processes,
+                                                 dense_query_processes=query_processes)
+    files, counts = [], Counter()
+    for output, shard_path, metric, tile_counts in map_tiles(_transfer_tile, jobs, processes=processes, sizes=sizes):
+        report.setdefault("transfer", []).append(metric)
+        if metric["matched"] != metric["total"]:
+            raise ValueError(f"{model.name}: incomplete prediction assignment on {Path(metric['target']).name}: "
+                             f"{metric['matched']}/{metric['total']} within {transfer_radius} m")
+        index.append_index(shard_path)
+        shard_path.unlink()
+        counts.update(tile_counts)
         files.append(output)
-        index.flush()
+    index.flush()
     return files, counts
 
 
@@ -243,8 +302,15 @@ def _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, me
     return counters
 
 
+def _count_tile_pairs(model, file, tile, index_path, dimensions, origin, radius, overlaps):
+    """Worker: pair counts of one tile against a read-only copy of the finished index."""
+    metrics = dict(files_read=0, points_read=0, query_points=0, skipped_query_points=0)
+    with PointIndex(index_path, dimensions, query_workers=1, read_only=True) as index:
+        return _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics), metrics
+
+
 def reconcile_instances(model, files, index, origin, counts, overlap_threshold, radius, report, *,
-                        enabled=True, overlaps=None, normal_keys=None):
+                        enabled=True, overlaps=None, normal_keys=None, workers=1):
     """Match mutual-best instance pairs, then form consistent cross-tile groups.
 
     Each pair needs the configured overlap fraction of the smaller instance.
@@ -268,8 +334,21 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
     edges = []
     metrics = dict(files_read=0, points_read=0, query_points=0, skipped_query_points=0)
     if enabled:
-        for tile, file in enumerate(files):
-            counters = _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics)
+        index.flush()
+        processes = min(max(1, int(workers)), len(files))
+        report.setdefault("parallelism", {})["reconciliation_processes"] = processes
+        jobs = [(model, file, tile, index.path, index.dimensions, origin, radius, overlaps)
+                for tile, file in enumerate(files)]
+        def count_here(tile, file):
+            part = dict.fromkeys(metrics, 0)
+            return _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, part), part
+
+        results = (map_tiles(_count_tile_pairs, jobs, processes=processes,
+                             sizes=[Path(file).stat().st_size for file in files])
+                   if processes > 1 else (count_here(tile, file) for tile, file in enumerate(files)))
+        for tile, (counters, part) in enumerate(results):
+            for name, value in part.items():
+                metrics[name] += value
             for other, pairs in counters.items():
                 by_left, by_right = defaultdict(list), defaultdict(list)
                 for (a, b), n in pairs.items():
@@ -339,71 +418,175 @@ def label_matrix(model, values):
     return np.column_stack([values[name] for name in names])
 
 
+class _DedupQueries:
+    """Conflict check and survivor lookup for one tile's chunks, as in deduplicate.
+
+    Both indexes are complete for this tile: the dense index entirely, the
+    survivor index for every earlier tile (``before_tile`` excludes this one).
+    """
+
+    def __init__(self, model, mapping, tile, dense_index, survivor_index, overlaps, background_semantics_owned,
+                 core_preferred):
+        self.model, self.mapping, self.tile = model, mapping, tile
+        self.dense, self.survivors, self.overlaps = dense_index, survivor_index, overlaps
+        self.background_semantics_owned, self.core_preferred = background_semantics_owned, core_preferred
+
+    def __call__(self, xyz, values):
+        model, mapping, tile, core_preferred = self.model, self.mapping, self.tile, self.core_preferred
+        conflict = self.dense.conflicting_match(
+            xyz, label_matrix(model, values), DUPLICATE_RADIUS, before_tile=tile,
+            map_labels=lambda other, data: label_matrix(model, mapped_values(model, data, other, mapping)),
+            background_semantics_owned=self.background_semantics_owned,
+            core_preferred=(None if core_preferred is None else
+                            lambda first, second, pts: core_preferred(
+                                tile if first is None else first,
+                                tile if second is None else second, pts)),
+            overlaps=self.overlaps)
+        if conflict is not None:
+            return conflict, None
+        return None, self.survivors.nearest(xyz, DUPLICATE_RADIUS, before_tile=tile, overlaps=self.overlaps)
+
+
+def _core_rule(core_regions, origin):
+    if core_regions is None:
+        return None
+    from dense_instance_ownership import preferred_core
+    return lambda first, second, pts: preferred_core(pts, first, second, core_regions, origin)
+
+
+_dedup_queries = None
+
+
+def _start_dedup_worker(model, mapping, tile, dense_spec, survivor_spec, overlaps, background_semantics_owned,
+                        core_regions, origin):
+    global _dedup_queries
+    dense = PointIndex(*dense_spec, query_workers=1, read_only=True)
+    survivors = PointIndex(*survivor_spec, query_workers=1, read_only=True)
+    _dedup_queries = _DedupQueries(model, mapping, tile, dense, survivors, overlaps, background_semantics_owned,
+                                   _core_rule(core_regions, origin))
+
+
+def _dedup_worker(xyz, values):
+    return _dedup_queries(xyz, values)
+
+
 def deduplicate(model, files, dense_index, survivor_index, origin, mapping, output_dir, report, *,
-                overlaps=None, background_semantics_owned=False, core_preferred=None,
-                instance_statistics=None):
+                overlaps=None, background_semantics_owned=False, core_preferred=None, core_regions=None,
+                instance_statistics=None, workers=1):
     """Keep stable tile/point order and compare only with final earlier survivors.
 
     ``instance_statistics`` optionally collects final per-instance summaries
     from the surviving records, avoiding another pass over the written tiles.
+    Tiles stay sequential (each compares with earlier survivors); within a tile
+    the chunk queries run in up to ``workers`` processes when ``core_preferred``
+    is given as ``core_regions`` (preferred-core rule), with results in order.
+    The tile's survivors join ``survivor_index`` after its queries finish.
     """
+    if core_preferred is not None and core_regions is not None:
+        raise ValueError("Pass core_preferred or core_regions, not both")
     output_dir.mkdir(parents=True)
     survivor_index.dimensions = {n: p.type for n, p in model.dimensions.items()}
     stats = report["deduplication"] = {"radius_m": DUPLICATE_RADIUS, "tiles": [], "conflicts": []}
+    processes = max(1, int(workers)) if core_preferred is None else 1
+    parallelism = report.setdefault("parallelism", {})
+    parallelism.update(deduplication_query_processes=processes, deduplication_parallel_tiles=[])
+    rule = core_preferred if core_preferred is not None else _core_rule(core_regions, origin)
+    dense_index.flush()
     outputs = []
     for tile, file in enumerate(files):
         output = output_dir / file.name
         metric = {"tile": tile, "input": 0, "surviving": 0, "removed": 0, "removal_examples": []}
         stats["tiles"].append(metric)
         offset = 0
+        survivor_index.flush()
+        tile_overlaps = None if overlaps is None else overlaps[tile]
         with laspy.open(file) as reader:
             header = target_header(reader.header, model, ready=True)
-        with laspy.open(file) as reader, laspy.open(output, mode="w", header=header) as writer:
-            for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-                xyz = coordinates(record, reader.header, origin)
-                values = mapped_values(model, prediction_values(record, model.dimensions), tile, mapping)
-                conflict = dense_index.conflicting_match(
-                    xyz, label_matrix(model, values), DUPLICATE_RADIUS, before_tile=tile,
-                    map_labels=lambda other, data: label_matrix(model, mapped_values(model, data, other, mapping)),
-                    background_semantics_owned=background_semantics_owned,
-                    core_preferred=(None if core_preferred is None else
-                                    lambda first, second, pts: core_preferred(
-                                        tile if first is None else first,
-                                        tile if second is None else second, pts)),
-                    overlaps=None if overlaps is None else overlaps[tile],
-                )
-                if conflict is not None:
-                    pos = conflict.pop("query_index")
-                    conflict.update(model=model.name, query_tile=tile, query_point=offset + pos,
-                                    query_xyz=(xyz[pos] + origin).tolist(),
-                                    query_labels=label_matrix(model, values)[pos].tolist())
-                    if "tile_sources" in report:
-                        conflict["query_source"] = report["tile_sources"][tile]["prediction"]
-                        conflict["source"] = report["tile_sources"][conflict["tile"]]["prediction"]
-                    conflict["xyz"] = (np.asarray(conflict["xyz"]) + origin).tolist()
-                    stats["conflicts"].append(conflict)
-                    raise ValueError(f"Unresolved cross-tile label conflict: {conflict}")
-                distances, survivor_values, refs = survivor_index.nearest(xyz, DUPLICATE_RADIUS, before_tile=tile,
-                                                           overlaps=None if overlaps is None else overlaps[tile])
-                # A neighbor's class must never replace the owning tile's class.
-                same_labels = np.all(label_matrix(model, values) == label_matrix(model, survivor_values), axis=1)
-                keep = ~np.isfinite(distances) | ~same_labels
-                for pos in np.flatnonzero(~keep)[:5 - len(metric["removal_examples"])]:
-                    metric["removal_examples"].append({"point": int(offset + pos),
-                        "survivor": refs[pos].tolist(), "distance_m": float(distances[pos])})
-                out = copy_record(record[keep], header)
-                for name, data in values.items():
-                    out.array[name] = data[keep]
-                writer.write_points(out)
-                survivor_index.add(tile, xyz[keep], {n: v[keep] for n, v in values.items()},
-                                   np.flatnonzero(keep) + offset)
-                if instance_statistics is not None:
-                    instance_statistics.add(values[model.instance][keep], xyz[keep])
-                metric["input"] += len(record)
-                metric["surviving"] += int(np.count_nonzero(keep))
-                metric["removed"] += int(np.count_nonzero(~keep))
-                offset += len(record)
-            write_retained_evlrs(writer, header)
+            parallel = processes > 1 and tile > 0 and reader.header.point_count > 2 * MAX_BATCH_POINTS
+        shard_path = output_dir / f".survivors_{tile:05d}.sqlite"
+        pool = None
+        if parallel:
+            parallelism["deduplication_parallel_tiles"].append(tile)
+            pool = ProcessPoolExecutor(max_workers=processes, mp_context=multiprocessing.get_context("spawn"),
+                initializer=_start_dedup_worker,
+                initargs=(model, mapping, tile, (dense_index.path, dense_index.dimensions),
+                          (survivor_index.path, survivor_index.dimensions), tile_overlaps,
+                          background_semantics_owned, core_regions, origin))
+            query = None
+        else:
+            query = _DedupQueries(model, mapping, tile, dense_index, survivor_index, tile_overlaps,
+                                  background_semantics_owned, rule)
+        try:
+            with laspy.open(file) as reader, laspy.open(output, mode="w", header=header) as writer, \
+                    PointIndex(shard_path, survivor_index.dimensions, query_workers=1) as shard:
+                chunks = ((record, coordinates(record, reader.header, origin)) for record in reader.chunk_iterator(MAX_BATCH_POINTS))
+                chunks = ((record, xyz, mapped_values(model, prediction_values(record, model.dimensions), tile, mapping))
+                          for record, xyz in chunks)
+                for record, xyz, values, (conflict, nearest) in _ordered(chunks, pool, query, processes):
+                    if conflict is not None:
+                        pos = conflict.pop("query_index")
+                        conflict.update(model=model.name, query_tile=tile, query_point=offset + pos,
+                                        query_xyz=(xyz[pos] + origin).tolist(),
+                                        query_labels=label_matrix(model, values)[pos].tolist())
+                        if "tile_sources" in report:
+                            conflict["query_source"] = report["tile_sources"][tile]["prediction"]
+                            conflict["source"] = report["tile_sources"][conflict["tile"]]["prediction"]
+                        conflict["xyz"] = (np.asarray(conflict["xyz"]) + origin).tolist()
+                        stats["conflicts"].append(conflict)
+                        raise ValueError(f"Unresolved cross-tile label conflict: {conflict}")
+                    distances, survivor_values, refs = nearest
+                    # A neighbor's class must never replace the owning tile's class.
+                    same_labels = np.all(label_matrix(model, values) == label_matrix(model, survivor_values), axis=1)
+                    keep = ~np.isfinite(distances) | ~same_labels
+                    for pos in np.flatnonzero(~keep)[:5 - len(metric["removal_examples"])]:
+                        metric["removal_examples"].append({"point": int(offset + pos),
+                            "survivor": refs[pos].tolist(), "distance_m": float(distances[pos])})
+                    out = copy_record(record[keep], header)
+                    for name, data in values.items():
+                        out.array[name] = data[keep]
+                    writer.write_points(out)
+                    shard.add(tile, xyz[keep], {n: v[keep] for n, v in values.items()},
+                              np.flatnonzero(keep) + offset)
+                    if instance_statistics is not None:
+                        instance_statistics.add(values[model.instance][keep], xyz[keep])
+                    metric["input"] += len(record)
+                    metric["surviving"] += int(np.count_nonzero(keep))
+                    metric["removed"] += int(np.count_nonzero(~keep))
+                    offset += len(record)
+                write_retained_evlrs(writer, header)
+                shard.flush()
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=True, cancel_futures=True)
+        # Readers of this tile have stopped; publish its survivors for later tiles.
+        survivor_index.append_index(shard_path)
+        shard_path.unlink()
         survivor_index.flush()
         outputs.append(output)
     return outputs
+
+
+def _ordered(chunks, pool, query, processes):
+    """Yield ``(record, xyz, values, result)`` in chunk order; at most two chunks per process in flight."""
+    if pool is None:
+        for record, xyz, values in chunks:
+            yield record, xyz, values, query(xyz, values)
+        return
+    pending = deque()
+    exhausted = False
+    iterator = iter(chunks)
+    try:
+        while pending or not exhausted:
+            while not exhausted and len(pending) < 2 * processes:
+                try:
+                    record, xyz, values = next(iterator)
+                except StopIteration:
+                    exhausted = True
+                    break
+                pending.append((record, xyz, values, pool.submit(_dedup_worker, xyz, values)))
+            if pending:
+                record, xyz, values, future = pending.popleft()
+                yield record, xyz, values, future.result()
+    finally:
+        for *_, future in pending:
+            future.cancel()

@@ -7,6 +7,7 @@ disk, so selection does not grow with the number of dense points in memory.
 from __future__ import annotations
 
 import sqlite3
+from time import perf_counter
 
 import laspy
 import numpy as np
@@ -14,6 +15,7 @@ from bounded_point_index import MAX_BATCH_POINTS, coordinates
 from dense_tile_merge import DUPLICATE_RADIUS, index_file
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
 from orphan_claims import select_claims
+from parallel_index_queries import IndexQueries
 
 
 def _positive_support(index, xyz, instance_dimension):
@@ -33,9 +35,26 @@ def _core_union_mask(xyz, tile, regions, overlaps, origin):
     return result
 
 
+def _claim_candidates(model, dense_files, rejected, regions, overlaps, origin):
+    """Yield ``((tile, labels), xyz)`` for rejected-instance points inside any relevant core."""
+    for tile, file in enumerate(dense_files):
+        if not rejected[tile]:
+            continue
+        with laspy.open(file) as reader:
+            for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+                labels = np.asarray(record[model.instance])
+                eligible = np.isin(labels, list(rejected[tile]))
+                if not np.any(eligible):
+                    continue
+                xyz = coordinates(record, reader.header, origin)
+                eligible &= _core_union_mask(xyz, tile, regions, overlaps, origin)
+                if np.any(eligible):
+                    yield (tile, labels[eligible]), xyz[eligible]
+
+
 def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
                                regions, overlaps, output_dir, recovered_index,
-                               origin, counts, report, *, admit_candidate=None):
+                               origin, counts, report, *, admit_candidate=None, workers=1):
     """Admit rejected whole instances with the most unsupported core samples.
 
     The provisional ownership decisions were calculated on complete dense
@@ -65,32 +84,27 @@ def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
                    'PRIMARY KEY(tile,instance,loc)) WITHOUT ROWID')
         db.execute('CREATE INDEX claims_loc ON claims(loc)')
         db.execute('CREATE TABLE covered (loc BLOB PRIMARY KEY) WITHOUT ROWID')
-        for tile, file in enumerate(dense_files):
-            if not rejected[tile]:
-                continue
-            with laspy.open(file) as reader:
-                for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-                    labels = np.asarray(record[model.instance])
-                    eligible = np.isin(labels, list(rejected[tile]))
-                    if not np.any(eligible):
-                        continue
-                    xyz = coordinates(record, reader.header, origin)
-                    eligible &= _core_union_mask(xyz, tile, regions, overlaps, origin)
-                    if not np.any(eligible):
-                        continue
-                    positions = np.flatnonzero(eligible)
-                    uncovered = ~_positive_support(owned_index, xyz[positions], model.instance)
-                    positions = positions[uncovered]
-                    if len(positions):
-                        db.executemany('INSERT OR IGNORE INTO claims VALUES (?,?,?)',
-                            ((tile, int(labels[pos]), xyz[pos].astype('<f8').tobytes())
-                             for pos in positions))
+        started = perf_counter()
+        # Support checks are GIL-bound per-cell searches on the finished owned
+        # index: answer them in worker processes; claims form a set, so only
+        # their content (not insertion order) matters.
+        with IndexQueries(owned_index, DUPLICATE_RADIUS, method='covered', positive_dimension=model.instance,
+                          workers=max(1, int(workers)) if any(rejected) else 1) as queries:
+            for (tile, labels), xyz, covered in queries.map(
+                    _claim_candidates(model, dense_files, rejected, regions, overlaps, origin)):
+                uncovered = ~covered
+                if np.any(uncovered):
+                    db.executemany('INSERT OR IGNORE INTO claims VALUES (?,?,?)',
+                        ((tile, int(label), point.astype('<f8').tobytes())
+                         for label, point in zip(labels[uncovered], xyz[uncovered])))
         db.commit()
+        metric['claim_seconds'] = perf_counter() - started
         metric['candidates'] = db.execute(
             'SELECT COUNT(*) FROM (SELECT 1 FROM claims GROUP BY tile,instance)').fetchone()[0]
         metric['uncovered_locations'] = db.execute(
             'SELECT COUNT(DISTINCT loc) FROM claims').fetchone()[0]
         selected = []
+        started = perf_counter()
         for tile, uid, score in select_claims(db, owned_index.query_tree, metric,
                                             admit_candidate=admit_candidate):
             selected.append((tile, uid))
@@ -98,6 +112,7 @@ def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
                                       'new_locations': score,
                                       'source': report['tile_sources'][tile]['prediction']})
         db.commit()
+        metric['selection_seconds'] = perf_counter() - started
         if not selected:
             metric['final_support'] = 'no recovery needed'
             return owned_files, counts, selected, db_path
