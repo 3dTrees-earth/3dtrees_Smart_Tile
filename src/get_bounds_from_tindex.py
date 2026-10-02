@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Get extent from tindex shapefile and compute tile bounds.
-Coordinates must be planar metres; geographic/geocentric/non-metre index CRSs are rejected.
+Always treats coordinates as planar/metric units (input units are checked by tile_crs).
 """
 
 import argparse
@@ -13,7 +13,6 @@ from pathlib import Path
 try:
     import fiona
     from pyproj import CRS
-    from tile_crs import REPROJECT_HINT, unit_problem
 except ImportError as e:
     print(f"ERROR: Required package missing. Install with: pip install fiona pyproj")
     print(f"Error: {e}")
@@ -36,13 +35,10 @@ def load_extent_from_tindex(tindex_path: Path):
                 crs = CRS.from_user_input(src.crs)
                 srs_info = crs.to_string()
             except Exception:
-                crs, srs_info = None, str(src.crs)
-            # Safety net behind the tile task's header check: PDAL may reproject
-            # the index (EPSG:4326 by default), and degree extents become
-            # millions of "metre" tiles (3DT-1709/1777).
-            why = unit_problem(crs) if crs is not None else None
-            if why:
-                raise ValueError(f"Tile index CRS {srs_info} {why}. {REPROJECT_HINT}")
+                srs_info = str(src.crs)
+            # Units are checked on the input headers (tile_crs). The index CRS
+            # is no evidence: PDAL labels an index of CRS-less, local-metre
+            # inputs EPSG:4326 by default without reprojecting them.
 
         print(f"  Detected CRS: {srs_info} (Treating as Planar/Metric)", file=sys.stderr)
 

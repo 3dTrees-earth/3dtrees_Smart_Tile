@@ -120,29 +120,26 @@ class TilePipelineTests(unittest.TestCase):
                 bounds.assert_not_called()
 
 
-class TileIndexCrsTests(unittest.TestCase):
-    """Safety net: a tindex reprojected to degrees must not be tiled as metres."""
+class CrsLessTileIndexTests(unittest.TestCase):
+    """Review regression: CRS-less local-metre uploads must still tile.
 
-    @staticmethod
-    def tindex(path, crs, ring):
-        import fiona
-        schema = {"geometry": "Polygon", "properties": {"Location": "str"}}
-        with fiona.open(path, "w", driver="GPKG", crs=crs, schema=schema) as sink:
-            sink.write({"geometry": {"type": "Polygon", "coordinates": [ring]}, "properties": {"Location": "a.las"}})
-        return path
+    PDAL labels a tile index of CRS-less inputs EPSG:4326 without reprojecting;
+    that label must not be read as degree coordinates.
+    """
 
-    def test_degree_index_is_rejected_and_metre_index_is_read(self):
+    def test_crs_less_input_tile_index_is_read_as_local_metres(self):
+        import shutil
+        if shutil.which("pdal") is None:
+            self.skipTest("PDAL not installed")
         from get_bounds_from_tindex import load_extent_from_tindex
-        degrees = [(7.90, 47.17), (7.91, 47.17), (7.91, 47.18), (7.90, 47.17)]
-        metres = [(2650174.0, 1249627.0), (2650204.0, 1249627.0), (2650204.0, 1249657.0), (2650174.0, 1249627.0)]
+        from tile_tindex import build_tindex
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for crs in ("EPSG:4326", "EPSG:4978"):
-                with self.subTest(crs=crs):
-                    with self.assertRaisesRegex(ValueError, rf"Tile index CRS {crs} is geo"):
-                        load_extent_from_tindex(self.tindex(root / f"{crs[5:]}.gpkg", crs, degrees))
-            bounds, _ = load_extent_from_tindex(self.tindex(root / "2056.gpkg", "EPSG:2056", metres))
-            self.assertEqual(bounds, (2650174.0, 1249627.0, 2650204.0, 1249657.0))
+            (root / "in").mkdir()
+            cloud(root / "in" / "local.laz", None, xyz=((0, 0, 0), (50, 40, 20)))
+            self.assertIsNone(require_metric_tiling_crs([root / "in" / "local.laz"]))
+            bounds, _ = load_extent_from_tindex(build_tindex(root / "in", root / "out" / "tindex.gpkg"))
+            np.testing.assert_allclose(bounds, (0, 0, 50, 40), atol=1e-3)
 
 
 if __name__ == "__main__":
