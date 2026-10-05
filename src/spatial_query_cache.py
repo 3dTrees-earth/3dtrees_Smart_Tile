@@ -13,6 +13,8 @@ from scipy.spatial import cKDTree
 from worker_budget import spatial_query_worker_count
 
 REGION_SIZE = 4.0
+# Upper bound for one cKDTree point: contiguous XYZ copy, index and nodes.
+TREE_BYTES_PER_POINT = 64
 
 
 def default_cache_bytes():
@@ -109,30 +111,36 @@ def region_entry(index, tile, cell, radius, positive_dimension, bounds, *,
     total = index.db.execute('SELECT COALESCE(SUM(length(b.data)),0)' + clause, args).fetchone()[0]
     dtype = index._storage_dtype()
     count = total // dtype.itemsize
-    # Conservative charge includes payload, contiguous XYZ copy, KD tree nodes,
-    # filtering/construction temporaries and one bounded SQLite blob in flight.
-    charge = total * 3 + count * 192 + 1024**2
-    if not index.query_cache.reserve(charge):
+    # Reserve the transient peak: the joined blobs, the selected copy, one blob
+    # in flight and tree construction. Blobs touching the halo hold several
+    # times the region's points, so the kept entry is charged afterwards at its
+    # real size; charging the transient peak evicted entries far too early.
+    transient = total * 2 + count * TREE_BYTES_PER_POINT + 1024**2
+    if not index.query_cache.reserve(transient):
         return None
-    payload = np.empty(count, dtype=dtype)
+    # Index batches are small (one 2 m cell of one insert), so a region spans
+    # hundreds of blobs: copy them into one buffer and filter once, in id order.
+    buffer = bytearray(total)
     offset = 0
-    names = list(index.dimensions)
     for (blob,) in index.db.execute('SELECT b.data' + clause + ' ORDER BY b.id', args):
-        data = np.frombuffer(blob, dtype=dtype)
-        mask = np.all((data['xyz'][:, :2] >= lo) & (data['xyz'][:, :2] <= hi), axis=1)
-        if positive_dimension is not None:
-            mask &= data[f'value_{names.index(positive_dimension)}'] > 0
-        if bounds is not None:
-            from bounded_point_index import inside_xy
-            mask &= inside_xy(data['xyz'], bounds)
-        if select_points is not None:
-            mask &= select_points(data['xyz'])
-        selected = data[mask]
-        payload[offset:offset + len(selected)] = selected
-        offset += len(selected)
-    payload = payload[:offset]
-    entry = (cKDTree(payload['xyz']) if offset else None, payload)
-    index.query_cache.put(key, entry, charge)
+        buffer[offset:offset + len(blob)] = blob
+        offset += len(blob)
+    assert offset == total, 'immutable index changed during a region read'
+    data = np.frombuffer(buffer, dtype=dtype)
+    x, y = data['xyz'][:, 0], data['xyz'][:, 1]
+    mask = (x >= lo[0]) & (x <= hi[0]) & (y >= lo[1]) & (y <= hi[1])
+    if positive_dimension is not None:
+        mask &= data[f'value_{list(index.dimensions).index(positive_dimension)}'] > 0
+    if bounds is not None:
+        from bounded_point_index import inside_xy
+        mask &= inside_xy(data['xyz'], bounds)
+    if select_points is not None:
+        mask &= select_points(data['xyz'])
+    payload = data[mask]
+    del buffer, data
+    entry = (cKDTree(payload['xyz']) if len(payload) else None, payload)
+    # Never above the reserved transient, so the cache stays within its budget.
+    index.query_cache.put(key, entry, payload.nbytes + len(payload) * TREE_BYTES_PER_POINT + 1024**2)
     return entry
 
 

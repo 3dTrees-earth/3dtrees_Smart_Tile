@@ -148,3 +148,45 @@ def test_tiny_original_avoids_process_startup(tmp_path, monkeypatch):
     report = strict_remap(collections=[predictions], baseline_collections=[predictions],
                           originals=originals, output=tmp_path / "out", workers=4)
     assert report["parallelism"]["enrichment_processes"] == 1
+
+
+def test_region_routed_queries_equal_one_process_across_many_regions(tmp_path):
+    """Batches split over 4 m regions and owner workers reassemble to the serial result.
+
+    Includes the RCT branch (positive trees first, then background for the
+    misses), vector-free and integer values, ties and uncovered points.
+    """
+    from parallel_remap import region_owners
+    rng = np.random.default_rng(7)
+    dims = {"PredInstance_RCT": np.uint32, "score": np.float32}
+    with PointIndex(tmp_path / "rct.sqlite", dims) as rct, PointIndex(tmp_path / "base.sqlite", {}) as base:
+        for tile in range(2):
+            xyz = np.c_[rng.uniform(0, 40, 20000), rng.uniform(0, 40, 20000), rng.uniform(0, 5, 20000)]
+            xyz[::50] = np.round(xyz[::50], 2)            # coincident points across tiles: tie-breaking
+            labels = rng.integers(0, 30, len(xyz)).astype(np.uint32)
+            rct.add(tile, xyz[:16384], {"PredInstance_RCT": labels[:16384], "score": xyz[:16384, 2].astype(np.float32)},
+                    np.arange(16384))
+            rct.add(tile, xyz[16384:], {"PredInstance_RCT": labels[16384:], "score": xyz[16384:, 2].astype(np.float32)},
+                    np.arange(16384, len(xyz)))
+            base.add(tile, xyz[:16384], {}, np.arange(16384))
+            base.add(tile, xyz[16384:], {}, np.arange(16384, len(xyz)))
+        rct.flush(); base.flush()
+        queries_xyz = [np.c_[rng.uniform(-1, 41, 3000), rng.uniform(-1, 41, 3000), rng.uniform(0, 5, 3000)]
+                       for _ in range(6)]
+        assert len(np.unique(region_owners(queries_xyz[0], 4))) == 4
+        runs = {}
+        for workers in (1, 3, 4):
+            with RemapBatchQueries([rct], [base], workers=workers, radius=.05) as queries:
+                runs[workers] = [models for _, _, models in queries.map(
+                    (i, xyz) for i, xyz in enumerate(queries_xyz))]
+        serial = runs[1]
+        for key, result in runs.items():
+            for a, b in zip(serial, result):
+                (sb, sd, sv), (pb, pd, pv) = a[0], b[0]
+                np.testing.assert_array_equal(sb, pb)
+                np.testing.assert_array_equal(sd, pd)
+                for name in sv:
+                    np.testing.assert_array_equal(sv[name], pv[name])
+        assert any(np.isinf(models[0][1]).any() for models in serial)          # uncovered points
+        assert any((models[0][2]["PredInstance_RCT"] > 0).any() for models in serial)
+

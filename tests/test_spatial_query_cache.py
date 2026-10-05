@@ -23,6 +23,29 @@ class QueryCacheTests(unittest.TestCase):
                 self.assertLessEqual(pool.bytes_used,pool.max_bytes)
             self.assertEqual(pool.bytes_used,0)
 
+    def test_entry_is_charged_at_kept_size_not_halo_blob_size(self):
+        # Blobs touching a region's halo hold more points than the region keeps.
+        # Charging the read size let only a few dense regions fit, so they were
+        # rebuilt repeatedly; the kept entry is charged at its real size.
+        from spatial_query_cache import TREE_BYTES_PER_POINT, region_entry
+        with tempfile.TemporaryDirectory() as tmp:
+            pool=SpatialQueryCache(64*1024**2)
+            with PointIndex(Path(tmp)/'i.db',{'id':np.uint32},query_cache=pool) as idx:
+                rng=np.random.default_rng(3)
+                for _ in range(20):
+                    xyz=np.c_[rng.uniform(0,6,1000),rng.uniform(0,2,1000),np.zeros(1000)]
+                    idx.add(0,xyz,{'id':np.ones(1000,dtype=np.uint32)},np.arange(1000))
+                idx.flush()
+                tree,payload=region_entry(idx,0,(0,0),.01,None,None)
+                self.assertTrue(np.all(payload['xyz'][:,0]<=4.01))
+                read=sum(len(b) for (b,) in idx.db.execute('SELECT b.data FROM bounds r JOIN batches b ON b.id=r.id WHERE r.x0<=4.01'))
+                self.assertLess(payload.nbytes,read)
+                (_,charged),=pool.entries.values()
+                self.assertEqual(charged,payload.nbytes+len(payload)*TREE_BYTES_PER_POINT+1024**2)
+                tree,payload=region_entry(idx,0,(1,1),.01,None,None)   # far region: no points
+                self.assertIsNone(tree);self.assertEqual(len(payload),0)
+                self.assertLessEqual(pool.bytes_used,pool.max_bytes)
+
     def test_append_invalidates_cached_region(self):
         with tempfile.TemporaryDirectory() as tmp:
             pool=SpatialQueryCache(8*1024**2)

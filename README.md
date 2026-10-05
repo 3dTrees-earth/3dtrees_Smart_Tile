@@ -1352,7 +1352,10 @@ four-tile, three-model filter → DetailView → original-remap validation.
 Immutable nearest-neighbor queries can reuse trees for 4 m XY regions. The cache
 is shared across active indexes within each process; its default accounting cap
 is 512 MiB, reduced according to the cgroup memory limit and maximum remap worker
-count. Oversized regions use the disk-backed query path. Insertions invalidate
+count. A region is read once as one buffer; the read peak is reserved first and
+the kept entry (region points plus tree) is then charged at its real size, so
+dense regions stay cached instead of being rebuilt. Oversized regions use the
+disk-backed query path. Insertions invalidate
 cached geometry. Set `SMARTTILE_SPATIAL_CACHE_MB=0` to disable caching for
 differential validation, or a nonnegative MiB value to request a different cap
 (the allocation-derived ceiling still applies). This is a cache budget, not a
@@ -1369,8 +1372,11 @@ are unchanged.
 `--workers` also caps original-remap processes when originals are supplied to
 `merge` or `filter`, using the same implementation as standalone `remap`.
 Each worker opens immutable indexes read-only and uses one spatial-query thread;
-only the parent writes outputs, in original point order. At most two batches per
-worker may be pending. Inputs too small for a full batch per worker use fewer
+only the parent writes outputs, in original point order. Each batch is split by
+4 m cache region and a region always goes to the same worker, so its search
+tree is built once and stays cached for the next batches (consecutive batches of
+an original file revisit the same regions); results equal a one-process run.
+At most two batches per worker may be pending. Inputs too small for a full batch per worker use fewer
 processes. The report records `parallelism.enrichment_processes`,
 `enrichment_query_workers`, and `max_pending_batches`.
 

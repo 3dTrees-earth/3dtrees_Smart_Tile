@@ -89,7 +89,8 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 - Dense searches keep fixed-size disk-backed batches as the fallback. Immutable
   nearest queries reuse 4 m XY-region trees in a process-wide LRU cache. The
   default 512 MiB cache charge is capped by cgroup memory and the maximum remap
-  process count; `SMARTTILE_SPATIAL_CACHE_MB=0` disables it. Inserts invalidate
+  process count; `SMARTTILE_SPATIAL_CACHE_MB=0` disables it. Reserve the read
+  peak, then charge kept entries at their real size. Inserts invalidate
   cached regions. Keep source references, overlap masks, positive-label filters,
   numerical distance bounds and stable ties identical to disk queries.
 - Shared-point ownership reuses bounded region trees filtered by positive labels,
