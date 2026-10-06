@@ -16,6 +16,7 @@ import numpy as np
 
 from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates
 from parallel_remap import RemapBatchQueries
+from original_blocks import block_batches, spill_original
 from merge_stages import (
     DUPLICATE_RADIUS, copy_record, deduplicate, describe_model, index_file,
     prepare_dense, reconcile_instances,
@@ -134,6 +135,10 @@ def _record_coverage(metric, xyz, distances, origin):
         metric["missing_examples"].append((point + origin).tolist())
 
 
+# Points per original read when writing enriched copies.
+ORIGINAL_WRITE_POINTS = 1_000_000
+
+
 def enrich_originals(models, indices, baseline_indices, originals, output_dir, origin, report, *,
                      target_dims=None):
     """Stage all originals and measure every model independently before failing."""
@@ -172,6 +177,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
     }
     radius = report["original_radius_m"]
     enrichment_start = time.monotonic()
+    phases = {"spill": 0.0, "query": 0.0, "write": 0.0}
     with RemapBatchQueries(indices, baseline_indices, workers=process_workers,
                           radius=radius) as queries:
         for file in files:
@@ -190,31 +196,58 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                         metric["unmatched_policy"] = "background_zero"
                         metric["background_assigned"] = 0
                 metrics.extend(baseline_metrics + final_metrics)
-                with laspy.open(output_dir / file.name, mode="w", header=header) as writer:
-                    batches = ((record, coordinates(record, reader.header, origin))
-                               for record in reader.chunk_iterator(MAX_BATCH_POINTS))
-                    for record, xyz, results in queries.map(batches):
+                source_header = reader.header
+            # Query in spatial blocks so each region tree is built once, then
+            # write in the original point order (original_blocks docstring).
+            with tempfile.TemporaryDirectory(prefix=".enrich-", dir=output_dir.parent) as scratch:
+                scratch = Path(scratch)
+                tick = time.monotonic()
+                spill_original(file, origin, scratch / "blocks", process_workers)
+                phases["spill"] += time.monotonic() - tick
+                tick = time.monotonic()
+                total = int(source_header.point_count)
+                store, assigned = {}, 0
+                for index, xyz, results in queries.map(block_batches(scratch / "blocks", source_header, origin)):
+                    assigned += len(index)
+                    for i, (base_distances, distances, values) in enumerate(results):
+                        _record_coverage(baseline_metrics[i], xyz, base_distances, origin)
+                        _record_coverage(final_metrics[i], xyz, distances, origin)
+                        if models[i].instance == "PredInstance_RCT":
+                            missing = ~np.isfinite(distances)
+                            final_metrics[i]["background_assigned"] += int(np.count_nonzero(missing))
+                            if np.any(missing):
+                                values = {name: data.copy() for name, data in values.items()}
+                                for data in values.values():
+                                    data[missing] = 0
+                        for name in selected[i]:
+                            if name not in store:
+                                store[name] = np.lib.format.open_memmap(
+                                    scratch / f"{name}.npy", mode="w+", dtype=values[name].dtype,
+                                    shape=(total, *values[name].shape[1:]))
+                            store[name][index] = values[name]
+                        instance = models[i].instance
+                        if instance in file_ids:
+                            file_ids[instance].update(int(uid) for uid in np.unique(values[instance]) if uid > 0)
+                if assigned != total:
+                    raise ValueError(f"{file.name}: enrichment queried {assigned:,} of {total:,} points")
+                phases["query"] += time.monotonic() - tick
+                tick = time.monotonic()
+                with laspy.open(file) as reader, \
+                        laspy.open(output_dir / file.name, mode="w", header=header) as writer:
+                    position = 0
+                    for record in reader.chunk_iterator(ORIGINAL_WRITE_POINTS):
                         out = copy_record(record, header)
-                        for i, (base_distances, distances, values) in enumerate(results):
-                            _record_coverage(baseline_metrics[i], xyz, base_distances, origin)
-                            _record_coverage(final_metrics[i], xyz, distances, origin)
-                            if models[i].instance == "PredInstance_RCT":
-                                missing = ~np.isfinite(distances)
-                                final_metrics[i]["background_assigned"] += int(np.count_nonzero(missing))
-                                if np.any(missing):
-                                    values = {name: data.copy() for name, data in values.items()}
-                                    for data in values.values():
-                                        data[missing] = 0
-                            for name in selected[i]:
-                                assign_prediction_values(out, name, values[name], raw=True)
-                            instance = models[i].instance
-                            if instance in file_ids:
-                                file_ids[instance].update(int(uid) for uid in np.unique(values[instance]) if uid > 0)
+                        for name, data in store.items():
+                            assign_prediction_values(out, name, data[position:position + len(record)], raw=True)
                         writer.write_points(out)
+                        position += len(record)
                     write_retained_evlrs(writer, header)
+                del store
+                phases["write"] += time.monotonic() - tick
                 for dimension, ids in file_ids.items():
                     ids_by_dimension.setdefault(dimension, {})[file.name] = ids
     report.setdefault("timings", {})["enrichment_seconds"] = time.monotonic() - enrichment_start
+    report["timings"]["enrichment_phase_seconds"] = phases
     report["background_assigned_points"] = sum(m.get("background_assigned", 0) for m in metrics)
     failures = [m for m in metrics if m["matched"] != m["total"]
                 and m.get("unmatched_policy") != "background_zero"]
