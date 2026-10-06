@@ -22,6 +22,7 @@ import os
 import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import plot_tiles_and_copc
@@ -364,18 +365,7 @@ def create_tiles(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Parse tile jobs ──────────────────────────────────────────────────
-    all_tiles: Dict[str, Tuple[float, float, float, float]] = {}
-    with open(tile_jobs_file, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("|")
-            if len(parts) >= 2:
-                label = parts[0]
-                tb = _parse_proj_bounds(parts[1])
-                if tb:
-                    all_tiles[label] = tb
+    all_tiles = read_tile_jobs(tile_jobs_file)
 
     if not all_tiles:
         raise ValueError("No tile jobs found")
@@ -526,6 +516,105 @@ def create_tiles(
     return list(tiles_dir.glob("*.copc.laz"))
 
 
+@dataclass(frozen=True)
+class TilingPlan:
+    """Inputs and layout shared by the COPC tile path and the single-scan path."""
+    source_files: List[Path]
+    tindex_file: Path
+    bounds_json: Path
+    jobs_file: Path
+    tiles_dir: Path
+    skip_tiling: bool
+
+
+def plan_tiling(input_dir, output_dir, tile_length, tile_buffer, tiling_threshold=None,
+                chunk_size=2_000_000, grid_origin=None, defer_occupancy=False) -> TilingPlan:
+    """Index sources, plan populated tiles and write the overview; no point output.
+
+    A single input below `tiling_threshold` MB is planned as one whole-cloud
+    tile without buffer. With `defer_occupancy`, the plan keeps every grid
+    tile; the caller reads the points, publishes occupancy and calls
+    `plot_overview` (the single-scan path avoids a separate occupancy read).
+    """
+    tiles_dir = output_dir / f"tiles_{int(tile_length)}m"
+    (output_dir / "logs").mkdir(parents=True, exist_ok=True)
+    tindex_file = output_dir / f"tindex_{int(tile_length)}m.gpkg"
+
+    source_files = _tiling_input_files(input_dir)
+    if not source_files:
+        raise ValueError(f"No LAZ/LAS files found in {input_dir}")
+    should_skip_tiling = False
+    if tiling_threshold is not None and len(source_files) == 1:
+        original_size_mb = source_files[0].stat().st_size / (1024 * 1024)
+        if original_size_mb < tiling_threshold:
+            should_skip_tiling = True
+            print("=" * 60)
+            print("Tiling Threshold Check")
+            print("=" * 60)
+            print(f"  Single file detected: {source_files[0].name}")
+            print(f"  Original file size: {original_size_mb:.2f} MB")
+            print(f"  Threshold: {tiling_threshold} MB")
+            print("  Decision: one whole-cloud tile, no buffer")
+            print("=" * 60)
+            print()
+    # Tile sizes and resolutions are metres: reject degree/ECEF/foot/mixed CRSs first.
+    require_metric_tiling_crs(source_files)
+
+    # Step 1: Build tindex from input LAZ/LAS
+    tindex_file = build_tindex(input_dir, tindex_file)
+
+    # Step 2: Calculate tile bounds
+    jobs_file, bounds_json, env = calculate_tile_bounds(
+        tindex_file, tile_length, tile_buffer, output_dir, grid_origin
+    )
+
+    # Symlink tindex for Galaxy if needed
+    fixed_tindex = output_dir / "tindex.gpkg"
+    if not fixed_tindex.exists() and tindex_file.exists():
+        if fixed_tindex.is_symlink():
+            fixed_tindex.unlink()
+        try:
+            fixed_tindex.symlink_to(tindex_file.name)
+        except OSError:
+            # Windows developer environments may not grant symlink privileges.
+            # Galaxy only needs a stable path, so a byte-for-byte copy is safe.
+            shutil.copy2(tindex_file, fixed_tindex)
+
+    plan = TilingPlan(source_files, tindex_file, bounds_json, jobs_file, tiles_dir, should_skip_tiling)
+    if should_skip_tiling:
+        write_single_cloud_bounds(bounds_json, source_files[0])
+        from prepare_tile_jobs import write_job_list
+        write_job_list(bounds_json, jobs_file)
+    elif defer_occupancy:
+        return plan
+    else:
+        from tile_core_occupancy import select_occupied_tile_jobs
+        select_occupied_tile_jobs(
+            source_files, bounds_json, jobs_file, tiles_dir, chunk_size=chunk_size,
+        )
+    plot_overview(plan)
+    return plan
+
+
+def plot_overview(plan: TilingPlan) -> None:
+    """Write the tile layout overview next to the bounds JSON."""
+    plot_tiles_and_copc.plot_extents(
+        plan.tindex_file, plan.bounds_json, plan.bounds_json.parent / "overview_copc_tiles.png"
+    )
+
+
+def read_tile_jobs(jobs_file: Path) -> Dict[str, Tuple[float, float, float, float]]:
+    """Return {label: (xmin, ymin, xmax, ymax)} from a tile job list."""
+    tiles: Dict[str, Tuple[float, float, float, float]] = {}
+    for line in Path(jobs_file).read_text().splitlines():
+        parts = line.strip().split("|")
+        if len(parts) >= 2:
+            bounds = _parse_proj_bounds(parts[1])
+            if bounds:
+                tiles[parts[0]] = bounds
+    return tiles
+
+
 def run_tiling_pipeline(
     input_dir: Path,
     output_dir: Path,
@@ -573,71 +662,11 @@ def run_tiling_pipeline(
     print(f"Tile size: {tile_length}m with {tile_buffer}m buffer")
     print()
 
-    tiles_dir = output_dir / f"tiles_{int(tile_length)}m"
-    log_dir = output_dir / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    tindex_file = output_dir / f"tindex_{int(tile_length)}m.gpkg"
-
-    # Check if we should skip tiling (single small file)
-    should_skip_tiling = False
-    if tiling_threshold is not None:
-        input_files = _tiling_input_files(input_dir)
-
-        if len(input_files) == 1:
-            original_size_mb = input_files[0].stat().st_size / (1024 * 1024)
-            if original_size_mb < tiling_threshold:
-                should_skip_tiling = True
-                print("=" * 60)
-                print("Tiling Threshold Check")
-                print("=" * 60)
-                print(f"  Single file detected: {input_files[0].name}")
-                print(f"  Original file size: {original_size_mb:.2f} MB")
-                print(f"  Threshold: {tiling_threshold} MB")
-                print("  Decision: Will skip tiling and use a COPC source for subsampling")
-                print("=" * 60)
-                print()
-
-    # Validate input
-    source_files = _tiling_input_files(input_dir)
-    if not source_files:
-        raise ValueError(f"No LAZ/LAS files found in {input_dir}")
-    # Tile sizes and resolutions are metres: reject degree/ECEF/foot/mixed CRSs first.
-    require_metric_tiling_crs(source_files)
-
-    # Step 1: Build tindex from input LAZ/LAS
-    tindex_file = build_tindex(input_dir, tindex_file)
-
-    # Step 2: Calculate tile bounds
-    jobs_file, bounds_json, env = calculate_tile_bounds(
-        tindex_file, tile_length, tile_buffer, output_dir, grid_origin
-    )
-
-    # Symlink tindex for Galaxy if needed
-    fixed_tindex = output_dir / "tindex.gpkg"
-    if not fixed_tindex.exists() and tindex_file.exists():
-        if fixed_tindex.is_symlink():
-            fixed_tindex.unlink()
-        try:
-            fixed_tindex.symlink_to(tindex_file.name)
-        except OSError:
-            # Windows developer environments may not grant symlink privileges.
-            # Galaxy only needs a stable path, so a byte-for-byte copy is safe.
-            shutil.copy2(tindex_file, fixed_tindex)
-
-    if should_skip_tiling:
-        write_single_cloud_bounds(bounds_json, source_files[0])
-        from prepare_tile_jobs import write_job_list
-        write_job_list(bounds_json, jobs_file)
-    else:
-        from tile_core_occupancy import select_occupied_tile_jobs
-        select_occupied_tile_jobs(
-            source_files, bounds_json, jobs_file, tiles_dir, chunk_size=chunk_size,
-        )
-
-    # Plot overview
-    plot_tiles_and_copc.plot_extents(
-        tindex_file, bounds_json, output_dir / "overview_copc_tiles.png"
-    )
+    plan = plan_tiling(input_dir, output_dir, tile_length, tile_buffer, tiling_threshold,
+                       chunk_size, grid_origin)
+    tiles_dir, log_dir, tindex_file = plan.tiles_dir, output_dir / "logs", plan.tindex_file
+    bounds_json, jobs_file = plan.bounds_json, plan.jobs_file
+    source_files, should_skip_tiling = plan.source_files, plan.skip_tiling
 
     # Check if we should skip tiling (single small file)
     # Done AFTER tindex/bounds/plot so those outputs are always available for merge

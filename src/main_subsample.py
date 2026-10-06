@@ -650,6 +650,59 @@ def subsample_simple(
         return (input_file.name, False, str(e), 0)
 
 
+def subsample_output_name(input_file: Path, resolution: float, output_prefix: Optional[str],
+                          output_copc: bool) -> str:
+    """Output file name for one subsampled input, shared by every subsampling path."""
+    res_cm = int(resolution * 100)
+    output_ext = ".copc.laz" if output_copc else ".laz"
+    # Generate output filename
+    stem = input_file.stem
+    # Remove .copc suffix if present
+    if stem.endswith('.copc'):
+        stem = stem[:-5]
+
+    # Extract original base filename by removing prefixes and resolution suffixes
+    import re
+    base_name = stem
+
+    # Remove resolution suffix patterns from previous subsampling stages.
+    base_name = re.sub(r'_subsampled[\d.]+m$', '', base_name)
+    base_name = re.sub(r'_subsampled_\d+(?:\.\d+)?cm$', '', base_name)
+    base_name = re.sub(r'_\d+cm$', '', base_name)
+
+    # Remove output_prefix if present at the start (e.g., "output_dir_100m_")
+    if output_prefix and base_name.startswith(output_prefix + '_'):
+        base_name = base_name[len(output_prefix) + 1:]
+
+    # Remove any remaining prefix patterns that look like "something_100m_" or "output_dir_100m_"
+    base_name = re.sub(r'^[^_]+_\d+m_', '', base_name)
+
+    # For tiled files, try to extract tile ID (c##_r##) pattern
+    tile_match = re.search(r'(c\d+_r\d+)', base_name)
+    if tile_match:
+        # Keep tile ID for tiled files
+        tile_id = tile_match.group(1)
+        # Extract base name before tile ID if there's a prefix
+        base_before_tile = base_name[:tile_match.start()]
+        if base_before_tile and base_before_tile.endswith('_'):
+            base_before_tile = base_before_tile[:-1]
+        # Remove any remaining prefix from base_before_tile
+        if base_before_tile:
+            base_before_tile = re.sub(r'^[^_]+_\d+m_', '', base_before_tile)
+            if base_before_tile:
+                output_name = f"{base_before_tile}_{tile_id}_subsampled_{res_cm}cm{output_ext}"
+            else:
+                output_name = f"{tile_id}_subsampled_{res_cm}cm{output_ext}"
+        else:
+            output_name = f"{tile_id}_subsampled_{res_cm}cm{output_ext}"
+    else:
+        # Single file or no tile ID - use clean base name
+        # Remove any remaining prefix patterns
+        base_name = re.sub(r'^[^_]+_\d+m_', '', base_name)
+        output_name = f"{base_name}_subsampled_{res_cm}cm{output_ext}"
+    return output_name
+
+
 def subsample_parallel(
     input_dir: Path,
     output_dir: Path,
@@ -697,59 +750,11 @@ def subsample_parallel(
         print(f"    No input files found in {input_dir}")
         return []
 
-    # Convert resolution to cm for filename
-    res_cm = int(resolution * 100)
-    output_ext = ".copc.laz" if output_copc else ".laz"
-
     # Prepare tasks
     tasks = []
     manifest = _read_subsample_manifest(output_dir)
     for input_file in sorted(input_files):
-        # Generate output filename
-        stem = input_file.stem
-        # Remove .copc suffix if present
-        if stem.endswith('.copc'):
-            stem = stem[:-5]
-
-        # Extract original base filename by removing prefixes and resolution suffixes
-        import re
-        base_name = stem
-
-        # Remove resolution suffix patterns from previous subsampling stages.
-        base_name = re.sub(r'_subsampled[\d.]+m$', '', base_name)
-        base_name = re.sub(r'_subsampled_\d+(?:\.\d+)?cm$', '', base_name)
-        base_name = re.sub(r'_\d+cm$', '', base_name)
-
-        # Remove output_prefix if present at the start (e.g., "output_dir_100m_")
-        if output_prefix and base_name.startswith(output_prefix + '_'):
-            base_name = base_name[len(output_prefix) + 1:]
-
-        # Remove any remaining prefix patterns that look like "something_100m_" or "output_dir_100m_"
-        base_name = re.sub(r'^[^_]+_\d+m_', '', base_name)
-
-        # For tiled files, try to extract tile ID (c##_r##) pattern
-        tile_match = re.search(r'(c\d+_r\d+)', base_name)
-        if tile_match:
-            # Keep tile ID for tiled files
-            tile_id = tile_match.group(1)
-            # Extract base name before tile ID if there's a prefix
-            base_before_tile = base_name[:tile_match.start()]
-            if base_before_tile and base_before_tile.endswith('_'):
-                base_before_tile = base_before_tile[:-1]
-            # Remove any remaining prefix from base_before_tile
-            if base_before_tile:
-                base_before_tile = re.sub(r'^[^_]+_\d+m_', '', base_before_tile)
-                if base_before_tile:
-                    output_name = f"{base_before_tile}_{tile_id}_subsampled_{res_cm}cm{output_ext}"
-                else:
-                    output_name = f"{tile_id}_subsampled_{res_cm}cm{output_ext}"
-            else:
-                output_name = f"{tile_id}_subsampled_{res_cm}cm{output_ext}"
-        else:
-            # Single file or no tile ID - use clean base name
-            # Remove any remaining prefix patterns
-            base_name = re.sub(r'^[^_]+_\d+m_', '', base_name)
-            output_name = f"{base_name}_subsampled_{res_cm}cm{output_ext}"
+        output_name = subsample_output_name(input_file, resolution, output_prefix, output_copc)
 
         output_file = output_dir / output_name
         target_output_file = copc_output_path(output_file) if output_copc else laz_output_path(output_file)

@@ -16,6 +16,11 @@ def available_cpu_count() -> int:
     return max(1, os.cpu_count() or 1)
 
 
+def allocated_cpu_count() -> int:
+    """CPUs this process may use: scheduler slots, affinity and cgroup quota."""
+    return spatial_query_worker_count(available_cpu_count())
+
+
 def spatial_query_worker_count(requested_workers: int) -> int:
     """Cap explicit query threads to scheduler slots, CPU affinity and quota.
 

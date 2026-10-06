@@ -14,7 +14,7 @@ from pydantic import Field, AliasChoices, field_validator
 from pathlib import Path
 from typing import Optional
 
-from worker_budget import DEFAULT_FILE_WORKERS, available_cpu_count
+from worker_budget import DEFAULT_FILE_WORKERS, allocated_cpu_count
 
 
 class Parameters(BaseSettings):
@@ -147,8 +147,9 @@ class Parameters(BaseSettings):
     )
 
     num_spatial_chunks: Optional[int] = Field(
-        default_factory=available_cpu_count,
-        description="Per-file spatial/chunk parallelism. Defaults to available CPU count.",
+        default_factory=allocated_cpu_count,
+        description="Per-file spatial/chunk parallelism. Defaults to the allocated CPUs "
+                    "(GALAXY_SLOTS, CPU affinity and cgroup quota).",
         validation_alias=AliasChoices("num-spatial-chunks", "num_spatial_chunks"),
     )
 

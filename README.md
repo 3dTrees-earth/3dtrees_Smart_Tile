@@ -115,10 +115,10 @@ show their model-specific branches.
 |-------|-----------|-------------|
 | 1 | **Spatial Index** | Creates a GeoPackage tindex using `pdal tindex` for efficient spatial queries across all input files. |
 | 2 | **Tile Bounds** | Calculates optimal tile grid based on data extent, tile size (default: 100m), and buffer (default: 20m) parameters. |
-| 3a | **Phase 1: Distribute** | Reads each source LAZ/LAS file once (in memory-efficient chunks via laspy), distributes points to overlapping tiles as intermediate part files. Per-tile offsets prevent int32 overflow. |
-| 3b | **Phase 2: COPC Conversion** | Merges part files and converts each tile to COPC format using untwine (fast, automatic fallback to PDAL). |
-| 4 | **Subsampling R1** | Downsamples COPC tiles to resolution 1 (default: 1cm) using parallel spatial chunk processing. |
-| 5 | **Subsampling R2** | Further downsamples to resolution 2 (default: 10cm) for neural network inference. |
+| 3 | **Single read** (center of mass, default) | Reads every source point once, in parallel point ranges. Each point is encoded into every buffered tile it falls in and spilled to XY blocks; tile-core occupancy is counted in the same read. |
+| 4 | **Block reduction** | Workers reduce blocks in parallel to both resolutions (default 1 cm and 10 cm) and write LAS fragments. No full-resolution tiles are written. |
+| 5 | **Outputs** | 1 cm: Untwine builds one COPC per tile from its fragments. 10 cm: fragments are concatenated into LAZ. |
+| — | **Nearest-to-centroid** | Builds full-resolution COPC tiles (laspy crop + Untwine) and subsamples them as before. |
 
 #### MERGE TASK: Result Integration
 
@@ -637,11 +637,21 @@ The SmartTile Docker image has been validated against Untwine 1.5.1: `--dims ""`
 - `center-of-mass` (default): averages only X/Y/Z within each populated voxel. Non-coordinate dimensions are copied from the real point nearest to that averaged XYZ when dimensions are preserved; they are never averaged.
 - `nearest-to-centroid`: uses PDAL `filters.voxelcentroidnearestneighbor`, preserving the previous SmartTile behavior.
 
-**Process**:
-1. COPC `center-of-mass` runs voxel-aligned COPC windows in parallel, controlled by `--num-spatial-chunks`
-2. Other subsampling paths split each tile spatially into chunks along X-axis
-3. Chunks/windows are processed in parallel
-4. Results are merged back into single file
+**Center of mass in the tile task (single read, `src/tile_centroids.py`)**:
+1. Sources are read once in parallel point ranges (`--num-spatial-chunks` workers). Each point is encoded into every buffered tile it falls in, with the tile's LAS scale and offsets, and spilled to XY blocks aligned to both voxel grids.
+2. The block edge comes from a 2 M-point sample of the sources: at most 10% of points may fall in blocks above 4 M points (edge 5–50 m, a whole number of 10 cm voxels). Larger blocks are split once while reducing.
+3. Each block is reduced independently. An output point is the exact mean of the voxel's integer LAS coordinates, rounded half-to-even once onto the same grid. Every resolution is computed from the original points, not from finer means (3DT-2203). Results do not depend on worker count, block size or point order.
+4. Workers write LAS fragments; Untwine builds each 1 cm COPC from a tile's fragments, and the 10 cm LAZ is assembled in block order.
+
+Earlier versions built a full-resolution COPC per tile and read it back through ~5 m window queries. COPC's coarse octree nodes overlap every window, so each point was decoded about 25 times (dataset 3109).
+
+| Dataset (10 CPUs) | Points | COPC windows | Single read |
+|---|---|---|---|
+| 3147 (single file) | 9 M | 100 s | 22 s |
+| 3109 | 330 M | 879–1,039 s | 160 s |
+| 483 (150 GB limit) | 3.68 B | not run | 1,457 s |
+
+**Nearest-to-centroid** still builds full-resolution COPC tiles and splits each tile into X-axis chunks processed in parallel.
 
 **Outputs**:
 - `subsampled_res1/`: Resolution_1 files, default 1cm COPC LAZ (`*.copc.laz`)
@@ -896,8 +906,8 @@ Controls tiling/COPC writer threading. It does not control subsampling paralleli
 
 Controls per-file or per-product spatial chunking:
 
-- COPC `center-of-mass` uses `--num-spatial-chunks` voxel-aligned COPC window workers
-- Other paths split each tile into `--num-spatial-chunks` spatial chunks along the X-axis
+- Tile-task `center-of-mass` uses `--num-spatial-chunks` processes for the single read and the block reduction. The default is the allocated CPUs (`GALAXY_SLOTS`, CPU affinity, cgroup quota), not the host's core count
+- Nearest-to-centroid splits each tile into `--num-spatial-chunks` spatial chunks along the X-axis
 - `create_merged_file` uses `--num-spatial-chunks` for bounded COPC product reads before final COPC/LAZ/PLY writing
 - Remap uses `--num-spatial-chunks` as the number of native COPC spatial-query windows when original files are COPC
 - Remap uses `--num-spatial-chunks` as the maximum number of concurrent raw LAZ/LAS original chunks when only one original file is being enriched
@@ -1372,10 +1382,16 @@ are unchanged.
 `--workers` also caps original-remap processes when originals are supplied to
 `merge` or `filter`, using the same implementation as standalone `remap`.
 Each worker opens immutable indexes read-only and uses one spatial-query thread;
-only the parent writes outputs, in original point order. Each batch is split by
-4 m cache region and a region always goes to the same worker, so its search
-tree is built once and stays cached for the next batches (consecutive batches of
-an original file revisit the same regions); results equal a one-process run.
+only the parent writes outputs, in original point order. Originals are often stored
+in acquisition order (on dataset 645 each 32k-point batch touched ~450 cache
+regions), so each original is first spilled into XY blocks of whole 4 m regions
+(`src/original_blocks.py`) and queried block by block. Results go to a file-backed
+array by point index, and a final sequential pass writes the enriched original
+in its original order. Within a block, each batch is split by 4 m cache region
+and a region always goes to the same worker, so its search tree is built once
+and stays cached; results equal a one-process run. The report records
+`timings.enrichment_phase_seconds` (spill, query, write). Dataset 645 at
+10 CPUs: enrichment 1,314 s → 170 s with identical outputs.
 At most two batches per worker may be pending. Inputs too small for a full batch per worker use fewer
 processes. The report records `parallelism.enrichment_processes`,
 `enrichment_query_workers`, and `max_pending_batches`.

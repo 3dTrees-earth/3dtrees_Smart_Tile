@@ -46,22 +46,35 @@ def occupied_cores(source_files, tiles, *, chunk_size=1_000_000):
 def select_occupied_tile_jobs(source_files, bounds_json, jobs_file, tiles_dir, *, chunk_size):
     """Publish only cores containing source points as active tiles and jobs.
 
-    Preserve grid coordinates and record skipped cores separately, so neighbor
-    discovery uses the actual layout. Refuse stale outputs from an older layout
-    rather than letting directory-based subsampling pick them up on a resume.
+    Refuse stale outputs from an older layout rather than letting
+    directory-based subsampling pick them up on a resume.
     """
     bounds_json, jobs_file, tiles_dir = map(Path, (bounds_json, jobs_file, tiles_dir))
+    tiles = json.loads(bounds_json.read_text())['tiles']
+    keep = occupied_cores(source_files, tiles, chunk_size=chunk_size)
+    for tile, populated in zip(tiles, keep):
+        label = f"c{tile['col']:02d}_r{tile['row']:02d}"
+        if not populated and ((tiles_dir / f'{label}.copc.laz').exists() or (tiles_dir / label).exists()):
+            raise FileExistsError(
+                f'Empty-core tile {label} has existing output; use a fresh output directory')
+    return publish_occupied_tiles(bounds_json, jobs_file, keep)
+
+
+def publish_occupied_tiles(bounds_json, jobs_file, keep):
+    """Rewrite the layout and job list with only the populated cores.
+
+    Grid coordinates are preserved and skipped cores recorded separately, so
+    neighbor discovery uses the actual layout.
+    """
+    bounds_json, jobs_file = Path(bounds_json), Path(jobs_file)
     data = json.loads(bounds_json.read_text())
     tiles = data['tiles']
-    keep = occupied_cores(source_files, tiles, chunk_size=chunk_size)
+    keep = np.asarray(keep, dtype=bool)
+    if len(keep) != len(tiles):
+        raise ValueError('Occupancy must cover every planned tile')
     if not keep.any():
         raise ValueError('No planned tile core contains source points')
     skipped = [tile for tile, populated in zip(tiles, keep) if not populated]
-    for tile in skipped:
-        label = f"c{tile['col']:02d}_r{tile['row']:02d}"
-        if (tiles_dir / f'{label}.copc.laz').exists() or (tiles_dir / label).exists():
-            raise FileExistsError(
-                f'Empty-core tile {label} has existing output; use a fresh output directory')
     data['tiles'] = [tile for tile, populated in zip(tiles, keep) if populated]
     data['tile_count'] = len(data['tiles'])
     data['core_occupancy'] = {

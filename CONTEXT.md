@@ -257,8 +257,15 @@ product.
   on subsampled points, copy them from a real nearest source point.
 - `nearest-to-centroid` preserves the previous PDAL voxel nearest-neighbor
   behavior.
-- `--num-spatial-chunks` controls spatial parallelism for both subsampling
-  strategies, COPC-original remap windows, and bounded prod-merged COPC reads.
+- Tile-task center of mass reads each source point once (`tile_centroids`):
+  no full-resolution tiles, occupancy counted in the same read, exact integer
+  voxel means rounded half-to-even once. Every resolution comes from original
+  points. Outputs must not depend on worker count, block size or point order.
+- `--num-spatial-chunks` controls spatial parallelism for subsampling,
+  COPC-original remap windows, and bounded prod-merged COPC reads. It defaults
+  to the allocated CPUs, never the host core count.
+- Enrichment queries originals in spatial blocks (`original_blocks`) and writes
+  them back in original point order.
 - Keep large runs memory bounded: prefer chunked COPC reads/writes, avoid one
   giant in-memory point cloud, and stream batches into final products whenever
   practical.
@@ -275,7 +282,8 @@ aligned with `src/run.py` and the strict pipeline when task behavior changes.
 - `src/main_tile.py`, `src/tile_*.py` (`tile_crs`, `tile_tindex`, `tile_copc`,
   `tile_spatial`, `tile_bounds_graph`, `tile_core_occupancy`,
   `tile_file_matching`): tile task and tile geometry/matching helpers.
-- `src/main_subsample.py`, `src/subsample_*.py`: subsampling.
+- `src/main_subsample.py`, `src/subsample_*.py`: subsampling; `src/tile_centroids.py`:
+  single-read center-of-mass tiles; `src/original_blocks.py`: block-ordered enrichment input.
 - `src/remap_first_pipeline.py`: merge/filter/remap orchestration and original
   enrichment; stages in `src/merge_stages.py` (dense transfer, reconciliation,
   deduplication), `src/dense_instance_ownership.py` (core filter, shared-point

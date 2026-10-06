@@ -199,26 +199,101 @@ def _require_tile_bounds_json(tile_bounds_json: Path | None) -> Path:
     return tile_bounds_json
 
 
+def _tile_and_subsample_copc(params, input_dir, output_dir, grid_origin, workers, threads,
+                             tile_writer_workers, tile_source_workers, subsampling_chunks,
+                             dimension_reduction):
+    """Nearest-to-centroid path: full-resolution COPC tiles, then windowed subsampling."""
+    from main_tile import run_tiling_pipeline
+    from main_subsample import run_subsample_pipeline
+
+    tile_length, tile_buffer = params.tile_length, params.tile_buffer
+    res1, res2 = params.resolution_1, params.resolution_2
+    output_copc_res1, output_copc_res2 = params.output_copc_res1, params.output_copc_res2
+    subsampling_method = params.subsampling_method
+    tiling_threshold, chunk_size = params.tiling_threshold, params.chunk_size
+    tiles_dir = run_tiling_pipeline(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        tile_length=tile_length,
+        tile_buffer=tile_buffer,
+        num_workers=workers,
+        threads=threads,
+        max_tile_procs=tile_writer_workers,
+        source_file_workers=tile_source_workers,
+        grid_origin=grid_origin,
+        tiling_threshold=tiling_threshold,
+        chunk_size=chunk_size,
+    )
+
+    # Check if tiling was skipped (returns copc_dir instead of tiles_dir)
+    tiling_skipped = tiles_dir.name.startswith("copc_")
+
+    if tiling_skipped:
+        # Single file case - create tiles_* directory structure for consistency
+        # Move COPC files to tiles_* directory so subsampling creates consistent structure
+        tiles_dir_normalized = output_dir / f"tiles_{int(tile_length)}m"
+        original_copc_dir = output_dir / "original_copc"
+        tiles_dir_normalized.mkdir(exist_ok=True)
+        original_copc_dir.mkdir(exist_ok=True)
+
+        # Copy/move COPC files to tiles directory
+        import shutil
+        for copc_file in tiles_dir.glob("*.copc.laz"):
+            dest_file = tiles_dir_normalized / copc_file.name
+            if not dest_file.exists():
+                try:
+                    shutil.copy2(copc_file, dest_file)
+                except OSError as exc:
+                    print(
+                        "  Warning: metadata-preserving copy failed "
+                        f"({exc}); retrying as data-only copy"
+                    )
+                    shutil.copyfile(copc_file, dest_file)
+            original_copc_file = original_copc_dir / copc_file.name
+            if not original_copc_file.exists():
+                try:
+                    shutil.copy2(copc_file, original_copc_file)
+                except OSError as exc:
+                    print(
+                        "  Warning: metadata-preserving original COPC copy failed "
+                        f"({exc}); retrying as data-only copy"
+                    )
+                    shutil.copyfile(copc_file, original_copc_file)
+
+        # Update tiles_dir to use normalized structure
+        tiles_dir = tiles_dir_normalized
+        output_prefix = f"{output_dir.name}_{int(tile_length)}m"
+        print(f"  Note: Tiling was skipped, using normalized directory structure: {tiles_dir}")
+    else:
+        # Normal tiled case
+        output_prefix = f"{output_dir.name}_{int(tile_length)}m"
+
+    # Step 5-6: Subsampling pipeline
+    res1_dir, res2_dir = run_subsample_pipeline(
+        tiles_dir=tiles_dir,
+        res1=res1,
+        res2=res2,
+        num_cores=workers,
+        num_threads=subsampling_chunks,
+        output_prefix=output_prefix,
+        output_base_dir=output_dir,  # Output directly to output_dir, not under tiles_dir
+        dimension_reduction=dimension_reduction,
+        subsampling_method=subsampling_method,
+        output_copc_res1=output_copc_res1,
+        output_copc_res2=output_copc_res2,
+    )
+    return tiles_dir, res1_dir, res2_dir
+
+
 def run_tile_task(params: Parameters):
     """
-    Run the tile task: COPC conversion, tiling, and subsampling.
+    Run the tile task: index, tile layout, and subsampled tiles at both resolutions.
 
-    Pipeline:
-    1. Convert LAZ/LAS inputs to intermediate COPC with standard LAS dimensions by default
-    2. Build spatial index
-    3. Calculate tile bounds
-    4. Create overlapping tiles
-    5. Subsample to resolution 1 (1cm by default)
-    6. Subsample to resolution 2 (10cm)
+    Center of mass (default) reads each source point once and writes the
+    subsampled tiles directly (tile_centroids). Nearest-to-centroid builds
+    full-resolution COPC tiles first and subsamples them.
     """
-    # Import Python modules
-    try:
-        from main_tile import run_tiling_pipeline
-        from main_subsample import run_subsample_pipeline
-    except ImportError as e:
-        print(f"Error: Could not import required modules: {e}")
-        print("Make sure main_tile.py and main_subsample.py exist.")
-        sys.exit(1)
+    from subsample_methods import SUBSAMPLING_METHOD_CENTER_OF_MASS, normalize_subsampling_method
 
     # Required arguments
     if not params.input_dir:
@@ -279,78 +354,23 @@ def run_tile_task(params: Parameters):
         if (params.grid_origin_x is None) != (params.grid_origin_y is None):
             raise ValueError("Both grid-origin-x and grid-origin-y are required")
         grid_origin = None if params.grid_origin_x is None else (params.grid_origin_x, params.grid_origin_y)
-        # Step 1-4: Tiling pipeline
-        tiles_dir = run_tiling_pipeline(
-            input_dir=input_dir,
-            output_dir=output_dir,
-            tile_length=tile_length,
-            tile_buffer=tile_buffer,
-            num_workers=workers,
-            threads=threads,
-            max_tile_procs=tile_writer_workers,
-            source_file_workers=tile_source_workers,
-            grid_origin=grid_origin,
-            tiling_threshold=tiling_threshold,
-            chunk_size=chunk_size,
-        )
-
-        # Check if tiling was skipped (returns copc_dir instead of tiles_dir)
-        tiling_skipped = tiles_dir.name.startswith("copc_")
-
-        if tiling_skipped:
-            # Single file case - create tiles_* directory structure for consistency
-            # Move COPC files to tiles_* directory so subsampling creates consistent structure
-            tiles_dir_normalized = output_dir / f"tiles_{int(tile_length)}m"
-            original_copc_dir = output_dir / "original_copc"
-            tiles_dir_normalized.mkdir(exist_ok=True)
-            original_copc_dir.mkdir(exist_ok=True)
-
-            # Copy/move COPC files to tiles directory
-            import shutil
-            for copc_file in tiles_dir.glob("*.copc.laz"):
-                dest_file = tiles_dir_normalized / copc_file.name
-                if not dest_file.exists():
-                    try:
-                        shutil.copy2(copc_file, dest_file)
-                    except OSError as exc:
-                        print(
-                            "  Warning: metadata-preserving copy failed "
-                            f"({exc}); retrying as data-only copy"
-                        )
-                        shutil.copyfile(copc_file, dest_file)
-                original_copc_file = original_copc_dir / copc_file.name
-                if not original_copc_file.exists():
-                    try:
-                        shutil.copy2(copc_file, original_copc_file)
-                    except OSError as exc:
-                        print(
-                            "  Warning: metadata-preserving original COPC copy failed "
-                            f"({exc}); retrying as data-only copy"
-                        )
-                        shutil.copyfile(copc_file, original_copc_file)
-
-            # Update tiles_dir to use normalized structure
-            tiles_dir = tiles_dir_normalized
-            output_prefix = f"{output_dir.name}_{int(tile_length)}m"
-            print(f"  Note: Tiling was skipped, using normalized directory structure: {tiles_dir}")
+        if normalize_subsampling_method(subsampling_method) == SUBSAMPLING_METHOD_CENTER_OF_MASS:
+            # Center of mass needs only voxel sums: read each source point once and
+            # skip the full-resolution tile COPCs (tile_centroids module docstring).
+            from main_tile import plan_tiling
+            from tile_centroids import subsample_tiles_single_scan
+            from worker_budget import spatial_query_worker_count
+            plan = plan_tiling(input_dir, output_dir, tile_length, tile_buffer, tiling_threshold,
+                               chunk_size, grid_origin, defer_occupancy=True)
+            tiles_dir = plan.tiles_dir
+            res1_dir, res2_dir = subsample_tiles_single_scan(
+                plan, output_dir, (res1, res2), (output_copc_res1, output_copc_res2),
+                workers=spatial_query_worker_count(subsampling_chunks), converters=tile_writer_workers,
+                output_prefix=f"{output_dir.name}_{int(tile_length)}m")
         else:
-            # Normal tiled case
-            output_prefix = f"{output_dir.name}_{int(tile_length)}m"
-
-        # Step 5-6: Subsampling pipeline
-        res1_dir, res2_dir = run_subsample_pipeline(
-            tiles_dir=tiles_dir,
-            res1=res1,
-            res2=res2,
-            num_cores=workers,
-            num_threads=subsampling_chunks,
-            output_prefix=output_prefix,
-            output_base_dir=output_dir,  # Output directly to output_dir, not under tiles_dir
-            dimension_reduction=dimension_reduction,
-            subsampling_method=subsampling_method,
-            output_copc_res1=output_copc_res1,
-            output_copc_res2=output_copc_res2,
-        )
+            tiles_dir, res1_dir, res2_dir = _tile_and_subsample_copc(
+                params, input_dir, output_dir, grid_origin, workers, threads, tile_writer_workers,
+                tile_source_workers, subsampling_chunks, dimension_reduction)
 
         # Step 7: Update tile_bounds_tindex.json with actual bounds from created tiles
         # (so remap/merge matching uses file extent instead of nominal grid)
