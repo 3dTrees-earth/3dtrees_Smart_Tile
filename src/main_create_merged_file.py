@@ -17,8 +17,11 @@ import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
+from ply_crs import add_crs_comment_to_ply, crs_comment_from_file
+
+from product_formats import parse_merged_output_formats
 from point_cloud_metadata import (
     copc_files,
     load_standardization_dims,
@@ -94,54 +97,6 @@ def parse_merged_resolutions(
 
     if not parsed:
         raise ValueError("No merged resolutions selected")
-    return parsed
-
-
-def _selector_tokens(value) -> Iterable[str]:
-    """Yield selector tokens from CLI strings, Galaxy lists, or list-like strings."""
-    if isinstance(value, (list, tuple, set)):
-        for item in value:
-            yield from _selector_tokens(item)
-        return
-    text = str(value or "")
-    if text.startswith("[") and text.endswith("]"):
-        text = text[1:-1]
-    for raw_token in text.split(","):
-        yield raw_token.strip().strip("'\"")
-
-
-def parse_merged_output_formats(value: str) -> List[str]:
-    """Parse prod-merged output format selector into unique normalized formats."""
-    aliases = {
-        "las": "laz",
-        "laz": "laz",
-        ".laz": "laz",
-        "copc": "copc.laz",
-        "copc_laz": "copc.laz",
-        "copc-laz": "copc.laz",
-        "copc.laz": "copc.laz",
-        ".copc.laz": "copc.laz",
-        "ply": "ply",
-        ".ply": "ply",
-    }
-    parsed = []
-    seen = set()
-    for raw_token in _selector_tokens(value or "copc.laz"):
-        token = raw_token.strip().lower()
-        if not token:
-            continue
-        output_format = aliases.get(token)
-        if output_format is None:
-            raise ValueError(
-                f"Unsupported merged output format '{raw_token}'. "
-                "Use laz, copc.laz, or ply."
-            )
-        if output_format in seen:
-            continue
-        seen.add(output_format)
-        parsed.append(output_format)
-    if not parsed:
-        raise ValueError("No merged output formats selected")
     return parsed
 
 
@@ -626,28 +581,36 @@ def _validate_preserved_product_dims(
 
 
 def _preserve_and_validate_las_metadata(source_metadata_file: Path, output_file: Path) -> Tuple[bool, str]:
-    """Ensure a LAS/LAZ/COPC product carries source CRS/GeoTIFF projection metadata."""
-    from copc_metadata import (
-        append_source_geotiff_projection_evlrs,
-        copc_preserves_source_crs,
-    )
+    """Ensure a LAS/LAZ/COPC product carries the source CRS as one standardized record."""
+    from crs_records import validate_single_crs_record
 
-    preserved_geotiff, message = append_source_geotiff_projection_evlrs(
-        source_metadata_file,
-        output_file,
-    )
-    if not preserved_geotiff:
-        return (False, f"GeoTIFF projection preservation failed: {message}")
-
-    valid_crs, message = copc_preserves_source_crs(source_metadata_file, output_file)
+    valid_crs, message = validate_single_crs_record(source_metadata_file, output_file)
     if not valid_crs:
         return (False, f"CRS validation failed: {message}")
+
+    if source_metadata_file.exists():
+        from vector_extra_bytes import preserve_vector_schema
+
+        preserved_vectors, message = preserve_vector_schema(
+            source_metadata_file,
+            output_file,
+        )
+        if not preserved_vectors:
+            return (False, f"Vector ExtraBytes metadata preservation failed: {message}")
     return (True, "LAS metadata preserved")
 
 
-def _preserve_and_validate_copc_metadata(source_metadata_file: Path, output_file: Path) -> Tuple[bool, str]:
-    """Backward-compatible alias for older tests/callers."""
-    return _preserve_and_validate_las_metadata(source_metadata_file, output_file)
+def _finalize_product(output_file: Path, output_format: str, dimension_sources: List[Path],
+                      metadata_source: Path) -> None:
+    """Validate a written LAS/COPC product, or record the CRS of a PLY product."""
+    if parse_merged_output_formats(output_format)[0] == "ply":
+        add_crs_comment_to_ply(output_file, crs_comment_from_file(metadata_source))
+        return
+    valid, message = _validate_preserved_product_dims(dimension_sources, output_file)
+    if valid:
+        valid, message = _preserve_and_validate_las_metadata(metadata_source, output_file)
+    if not valid:
+        raise RuntimeError(message)
 
 
 def _untwine_chunk_files_to_copc(
@@ -748,16 +711,7 @@ def _merge_prod_chunks(
     )
     result = _run_pdal_pipeline(pipeline, work_dir / f"_{output_file.stem}_merge_chunks.json")
     if result.returncode == 0 and output_file.exists() and output_file.stat().st_size > 0:
-        if normalized_format in {"laz", "copc.laz"}:
-            valid_dims, message = _validate_preserved_product_dims(chunk_files, output_file)
-            if not valid_dims:
-                raise RuntimeError(message)
-            valid_metadata, message = _preserve_and_validate_las_metadata(
-                source_metadata_file,
-                output_file,
-            )
-            if not valid_metadata:
-                raise RuntimeError(message)
+        _finalize_product(output_file, normalized_format, chunk_files, source_metadata_file)
         return
 
     if normalized_format != "copc.laz":
@@ -785,59 +739,6 @@ def _merge_prod_chunks(
         temp_laz.unlink()
     except OSError:
         pass
-
-
-def create_chunked_prod_merged_file(
-    copc_input_files: List[Path],
-    output_file: Path,
-    resolution: float,
-    output_format: str,
-    num_spatial_chunks: int,
-    chunk_workers: Optional[int] = None,
-) -> Path:
-    """Create one prod-merged product using bounded COPC reads per spatial chunk."""
-    chunk_bounds = _prod_merged_chunk_bounds(copc_input_files, resolution, num_spatial_chunks)
-    if not chunk_bounds:
-        raise RuntimeError("No spatial chunks available for prod-merged output")
-
-    _remove_existing_output(output_file)
-    work_dir = output_file.parent / f"_{output_file.stem}_chunks"
-    if work_dir.exists():
-        shutil.rmtree(work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
-    scale_offset_options = _scale_offset_options(copc_input_files[0])
-
-    chunk_files: List[Path] = []
-    success = False
-    try:
-        chunk_files = _create_prod_merged_chunks(
-            copc_input_files,
-            work_dir,
-            output_file.stem,
-            chunk_bounds,
-            resolution,
-            scale_offset_options,
-            chunk_workers=chunk_workers,
-        )
-
-        if not chunk_files:
-            raise RuntimeError("No prod-merged chunks were created")
-
-        _merge_prod_chunks(
-            chunk_files,
-            output_file,
-            output_format,
-            work_dir,
-            source_metadata_file=copc_input_files[0],
-            scale_offset_options=scale_offset_options,
-        )
-        success = output_file.exists() and output_file.stat().st_size > 0
-    finally:
-        _cleanup_chunk_work_dir(work_dir, success)
-
-    if not output_file.exists() or output_file.stat().st_size == 0:
-        raise RuntimeError(f"Prod-merged output was not created: {output_file}")
-    return output_file
 
 
 def create_chunked_prod_merged_files_for_resolution(
@@ -910,25 +811,13 @@ def create_prod_merged_file(
     output_file: Path,
     resolution: float,
     output_format: str = "copc.laz",
-    num_spatial_chunks: Optional[int] = None,
-    chunk_workers: Optional[int] = None,
 ) -> Path:
-    """Create one prod-merged product at the requested resolution and format."""
+    """Create one prod-merged product with a single PDAL pipeline (no spatial chunks)."""
     if not copc_input_files:
         raise ValueError("No COPC input files provided")
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     _remove_existing_output(output_file)
-    if num_spatial_chunks and num_spatial_chunks > 1:
-        return create_chunked_prod_merged_file(
-            copc_input_files,
-            output_file,
-            resolution,
-            output_format,
-            num_spatial_chunks,
-            chunk_workers=chunk_workers,
-        )
-
     pipeline = prod_merged_pipeline(copc_input_files, output_file, resolution, output_format)
     pipeline_file = output_file.parent / f"_{output_file.stem}_pipeline.json"
     result = _run_pdal_pipeline(pipeline, pipeline_file)
@@ -937,16 +826,7 @@ def create_prod_merged_file(
         raise RuntimeError(f"PDAL prod-merged pipeline failed: {_pdal_error(result, 500)}")
     if not output_file.exists() or output_file.stat().st_size == 0:
         raise RuntimeError(f"Prod-merged output was not created: {output_file}")
-    if parse_merged_output_formats(output_format)[0] in {"laz", "copc.laz"}:
-        valid_dims, message = _validate_preserved_product_dims(copc_input_files, output_file)
-        if not valid_dims:
-            raise RuntimeError(message)
-        valid_metadata, message = _preserve_and_validate_las_metadata(
-            copc_input_files[0],
-            output_file,
-        )
-        if not valid_metadata:
-            raise RuntimeError(message)
+    _finalize_product(output_file, output_format, copc_input_files, copc_input_files[0])
     return output_file
 
 
@@ -1004,14 +884,7 @@ def create_prod_merged_files(
             )
         else:
             created_outputs = [
-                create_prod_merged_file(
-                    copc_input_files,
-                    output_file,
-                    resolution,
-                    output_format,
-                    num_spatial_chunks=num_spatial_chunks,
-                    chunk_workers=chunk_workers,
-                )
+                create_prod_merged_file(copc_input_files, output_file, resolution, output_format)
                 for output_file, output_format in selected_outputs
             ]
 

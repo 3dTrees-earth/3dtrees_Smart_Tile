@@ -119,10 +119,12 @@ Overlap ratio threshold for instance matching, 0--1 (default: \texttt{0.3}). \\
 Max centroid distance in meters to merge instances (default: \texttt{3.0}). \\
 \textbf{\texttt{--correspondence-tolerance}} &
 Max distance for point correspondence in meters (default: \texttt{0.05}). \\
+\textbf{\texttt{--reassign-small-instances}} &
+If set, give small instances the ID of the nearest remaining instance by XY centroid (within 5~m) after deduplication; not for RayCloudTools. \\
+\textbf{\texttt{--max-cluster-size}} &
+Instances with fewer points are checked for reassignment (default: \texttt{3000}). \\
 \textbf{\texttt{--max-volume-for-merge}} &
-Max convex hull volume in m$^3$ for small-instance merging (default: \texttt{4.0}). \\
-\textbf{\texttt{--min-cluster-size}} &
-Minimum cluster size in points for reassignment (default: \texttt{300}). \\
+Max axis-aligned bounding-box volume in m$^3$ of a small instance (default: \texttt{4.0}). \\
 \textbf{\texttt{--border-zone-width}} &
 Width of border zone in meters for instance matching (default: \texttt{10.0}). \\
 \textbf{\texttt{--disable-matching}} &

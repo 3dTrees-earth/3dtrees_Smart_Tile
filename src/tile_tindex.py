@@ -8,7 +8,6 @@ import shutil
 import sqlite3
 import struct
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -22,10 +21,19 @@ def get_pdal_path() -> str:
     return pdal_path if pdal_path else "pdal"
 
 
-def get_pdal_wrench_path() -> str:
-    """Return the pdal_wrench executable path."""
-    wrench_path = shutil.which("pdal_wrench")
-    return wrench_path if wrench_path else "pdal_wrench"
+def _common_header_srs(paths: List[Path]) -> Optional[str]:
+    """Only assign a missing PDAL CRS when every source header agrees."""
+    import laspy
+    from copc_metadata import crs_equivalent, parse_crs
+
+    common = None
+    for path in paths:
+        with laspy.open(path) as reader:
+            crs = parse_crs(reader.header)
+        if crs is None or (common is not None and not crs_equivalent(common, crs)):
+            return None
+        common = crs
+    return common.to_wkt() if common is not None else None
 
 
 def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
@@ -47,7 +55,8 @@ def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
     if not source_files:
         raise ValueError(f"No LAZ/LAS files found in {input_dir}")
 
-    tindex_srs = None
+    common_header_srs = _common_header_srs(source_files)
+    tindex_srs = common_header_srs
     try:
         info_result = subprocess.run(
             [get_pdal_path(), "info", "--metadata", str(source_files[0])],
@@ -60,6 +69,7 @@ def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
             tindex_srs = (
                 meta.get("metadata", {}).get("srs", {}).get("compoundwkt")
                 or meta.get("metadata", {}).get("spatialreference")
+                or common_header_srs
             )
     except Exception as exc:
         print(f"  Warning: Could not extract SRS for tindex: {exc}")
@@ -90,6 +100,9 @@ def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
             if tindex_srs:
                 tmp_cmd.append(f"--t_srs={tindex_srs}")
 
+            if common_header_srs:
+                tmp_cmd.append(f"--a_srs={common_header_srs}")
+
             result = subprocess.run(tmp_cmd, capture_output=True, text=True, check=False)
             if result.returncode != 0 and "Unexpected argument 'filelist'" in (result.stderr or result.stdout):
                 stdin_cmd = [
@@ -105,6 +118,8 @@ def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
                 ]
                 if tindex_srs:
                     stdin_cmd.append(f"--t_srs={tindex_srs}")
+                if common_header_srs:
+                    stdin_cmd.append(f"--a_srs={common_header_srs}")
                 result = subprocess.run(
                     stdin_cmd,
                     input=file_list_path.read_text(),
@@ -136,44 +151,41 @@ def calculate_tile_bounds(
     tile_length: float,
     tile_buffer: float,
     output_dir: Path,
-    grid_offset: float = 1.0,
+    grid_origin=None,
 ) -> Tuple[Path, Path, dict]:
     """Calculate tile jobs and bounds JSON from a tindex."""
+    from get_bounds_from_tindex import write_tile_bounds
+    from prepare_tile_jobs import write_job_list
+
     print()
     print("=" * 60)
     print("Step 2: Calculating tile bounds")
     print("=" * 60)
-
-    prepare_jobs_script = Path(__file__).parent / "prepare_tile_jobs.py"
     jobs_file = output_dir / f"tile_jobs_{int(tile_length)}m.txt"
     bounds_json = output_dir / "tile_bounds_tindex.json"
-    cmd = [
-        sys.executable,
-        str(prepare_jobs_script),
-        str(tindex_file),
-        f"--tile-length={tile_length}",
-        f"--tile-buffer={tile_buffer}",
-        f"--jobs-out={jobs_file}",
-        f"--bounds-out={bounds_json}",
-        f"--grid-offset={grid_offset}",
-    ]
-
     print(f"  Tile length: {tile_length}m")
     print(f"  Tile buffer: {tile_buffer}m")
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"prepare_tile_jobs.py failed: {result.stderr}")
-
-    env = {}
-    for line in result.stdout.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            env[key.strip()] = value.strip().strip('"')
-
-    print(f"  ✓ Calculated {env.get('tile_count', 'unknown')} tiles")
+    # Floats, as the former script CLI parsed them: the JSON records 300.0, not 300.
+    tile_count = write_tile_bounds(Path(tindex_file), float(tile_length), float(tile_buffer), bounds_json,
+                                   grid_origin=grid_origin)
+    write_job_list(bounds_json, jobs_file)
+    print(f"  ✓ Calculated {tile_count} tiles")
     print(f"  Jobs file: {jobs_file}")
     print(f"  Bounds file: {bounds_json}")
-    return jobs_file, bounds_json, env
+    return jobs_file, bounds_json, {"tile_count": str(tile_count)}
+
+
+def write_single_cloud_bounds(tile_bounds_json: Path, source_file: Path) -> None:
+    """Describe the actual single cloud when the size threshold bypasses tiling."""
+    import laspy
+
+    with laspy.open(source_file) as reader:
+        h = reader.header
+        x0, y0, x1, y1 = float(h.x_min), float(h.y_min), float(h.x_max), float(h.y_max)
+    data = json.loads(tile_bounds_json.read_text())
+    from tile_bounds_graph import single_cloud_layout
+    data = single_cloud_layout(data, (x0, x1, y0, y1))
+    tile_bounds_json.write_text(json.dumps(data, indent=2) + "\n")
 
 
 def update_tile_bounds_json_from_files(
@@ -182,7 +194,7 @@ def update_tile_bounds_json_from_files(
     file_glob: str = "*.laz",
 ) -> int:
     """Update tile_bounds_tindex.json from created tile file headers."""
-    from tile_spatial import get_tile_bounds_from_header
+    from tile_file_matching import get_file_bounds
 
     if not tile_bounds_json.exists():
         return 0
@@ -191,6 +203,13 @@ def update_tile_bounds_json_from_files(
     tiles = data.get("tiles", [])
     if not tiles:
         return 0
+
+    if data.get("tiling_skipped"):
+        files = point_cloud_files(files_dir)
+        if len(tiles) != 1 or len(files) != 1:
+            raise ValueError("Skipped tiling requires exactly one cloud and one layout entry")
+        write_single_cloud_bounds(tile_bounds_json, files[0])
+        return 1
 
     label_to_path: Dict[str, Path] = {}
     for path in files_dir.glob(file_glob):
@@ -208,7 +227,7 @@ def update_tile_bounds_json_from_files(
         path = label_to_path.get(label)
         if path is None:
             continue
-        bounds = get_tile_bounds_from_header(path)
+        bounds = get_file_bounds(path)
         if bounds is None:
             continue
         minx, maxx, miny, maxy = bounds
@@ -304,16 +323,3 @@ def get_bounds(
     return None
 
 
-def filter_source_files_for_tile(
-    source_files: List[str],
-    source_bounds: Dict[str, Tuple[float, float, float, float]],
-    tile_bounds: Tuple[float, float, float, float],
-    bounds_by_basename: Optional[Dict[str, Tuple[float, float, float, float]]] = None,
-) -> List[str]:
-    """Return source files whose bounds overlap tile bounds."""
-    result = []
-    for source_file in source_files:
-        file_bounds = get_bounds(source_file, source_bounds, bounds_by_basename)
-        if file_bounds is None or bounds_overlap(file_bounds, tile_bounds):
-            result.append(source_file)
-    return result

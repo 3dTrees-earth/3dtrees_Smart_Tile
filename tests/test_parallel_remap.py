@@ -1,0 +1,192 @@
+import hashlib
+import sys
+from pathlib import Path
+import sqlite3
+
+import laspy
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from bounded_point_index import PointIndex
+from parallel_remap import RemapBatchQueries
+from remap_first_pipeline import strict_remap
+from test_merge_stages import write_cloud
+
+
+def test_readonly_index_queries_without_mutation_or_creation(tmp_path):
+    path = tmp_path / "index.sqlite"
+    with PointIndex(path, {"label": np.uint16}) as index:
+        index.add(0, np.zeros((1, 3)), {"label": np.array([7])}, np.array([0]))
+        index.flush()
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    with PointIndex(path, {"label": np.uint16}, read_only=True) as index:
+        assert index.nearest(np.zeros((1, 3)), .01)[1]["label"].tolist() == [7]
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            index.db.execute("DELETE FROM batches")
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+    missing = tmp_path / "missing.sqlite"
+    with pytest.raises(sqlite3.OperationalError):
+        PointIndex(missing, {}, read_only=True)
+    assert not missing.exists()
+
+
+def test_batch_queries_are_ordered_bounded_and_match_serial(tmp_path):
+    with PointIndex(tmp_path / "i.sqlite", {"label": np.uint16}) as index:
+        # Duplicate coordinates exercise stable tie-breaking across source tiles.
+        for tile, label in [(0, 7), (1, 9)]:
+            index.add(tile, np.array([[0., 0., 0.], [.02, 0., 0.]]),
+                      {"label": np.array([label, label])}, np.array([0, 1]))
+        serial = []
+        for workers in (1, 4):
+            produced = consumed = 0
+            def batches():
+                nonlocal produced
+                for i in range(13):
+                    produced += 1
+                    assert produced - consumed <= 2 * workers
+                    yield i, np.array([[0., 0., 0.], [.01, 0., 0.], [1., 0., 0.]])
+            result = []
+            with RemapBatchQueries([index], [index], workers=workers, radius=.01) as queries:
+                for item, xyz, models in queries.map(batches()):
+                    consumed += 1
+                    assert item == consumed - 1
+                    base, final, values = models[0]
+                    assert values['label'].tolist() == [7, 7, 0]
+                    assert np.isinf(final[-1])
+                    result.append((base, final, values['label']))
+            if workers == 1:
+                serial = result
+            else:
+                for a, b in zip(serial, result):
+                    for x, y in zip(a, b):
+                        np.testing.assert_array_equal(x, y)
+
+
+def test_rct_tree_beats_closer_background_in_serial_and_workers(tmp_path):
+    dims = {'PredInstance_RCT': np.uint32, 'PredSemantic_RCT': np.uint8}
+    with PointIndex(tmp_path / 'rct.sqlite', dims) as index:
+        index.add(0, np.array([[0., 0., 0.], [1., 0., 0.]]),
+                  {'PredInstance_RCT': np.array([0, 0]), 'PredSemantic_RCT': np.array([2, 2])},
+                  np.array([0, 1]))
+        index.add(1, np.array([[.005, 0., 0.]]),
+                  {'PredInstance_RCT': np.array([200007]), 'PredSemantic_RCT': np.array([9])}, np.array([0]))
+        for workers in (1, 2):
+            xyz = np.array([[0., 0., 0.], [1., 0., 0.], [4., 0., 0.]])
+            with RemapBatchQueries([index], [index], workers=workers, radius=.01732) as queries:
+                _, _, results = next(queries.map([(None, xyz)]))
+            base, final, values = results[0]
+            assert values['PredInstance_RCT'].tolist() == [200007, 0, 0]
+            assert values['PredSemantic_RCT'].tolist() == [9, 2, 0]
+            np.testing.assert_allclose(final[:2], [.005, 0.])
+            assert np.isinf(base[-1]) and np.isinf(final[-1])
+
+
+def test_worker_failure_propagates_and_pool_closes(tmp_path):
+    with PointIndex(tmp_path / "i.sqlite", {}) as index:
+        index.add(0, np.zeros((1, 3)), {}, np.array([0]))
+        with pytest.raises(IndexError), RemapBatchQueries([index], [index], workers=2, radius=.01) as queries:
+            list(queries.map([(None, np.array([0., 0., 0.]))]))
+    # A subsequent pool must be usable after the first failed.
+    with PointIndex(tmp_path / "next.sqlite", {}) as index:
+        with RemapBatchQueries([index], [index], workers=2, radius=.01) as queries:
+            assert len(list(queries.map([(None, np.zeros((1, 3)))]))) == 1
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_strict_remap_processes_match_serial_outputs_and_coverage(tmp_path, monkeypatch, missing):
+    import remap_first_pipeline as pipeline
+    # Use multiple bounded batches without generating a large synthetic cloud.
+    monkeypatch.setattr(pipeline, "MAX_BATCH_POINTS", 8)
+    monkeypatch.setattr(pipeline, "spatial_query_worker_count", lambda n: n)
+    originals = tmp_path / "originals"
+    originals.mkdir()
+    xs = np.arange(35) * .02
+    source = write_cloud(originals / "a.laz", xs)
+    cloud = laspy.read(source)
+    cloud.header.vlrs.append(laspy.VLR(user_id="test", record_id=77, record_data=b"preserve"))
+    cloud.write(source)
+    collections = []
+    for name in ("sat", "fm"):
+        folder = tmp_path / name
+        folder.mkdir()
+        values = xs[:-1] if missing else xs
+        write_cloud(folder / "a.laz", values, np.full(len(values), 7), np.full(len(values), 3),
+                    instance=name + "PredInstance")
+        collections.append(folder)
+    reports = []
+    for workers in (1, 4):
+        output = tmp_path / f"out{workers}"
+        kwargs = dict(collections=collections, baseline_collections=collections,
+                      originals=originals, output=output, workers=workers)
+        if missing:
+            import json
+            with pytest.raises(ValueError, match="100% original coverage"):
+                strict_remap(**kwargs)
+            assert not output.exists()
+            reports.append(json.loads((tmp_path / f"out{workers}_coverage.json").read_text()))
+        else:
+            reports.append(strict_remap(**kwargs))
+            result = laspy.read(output / "a.laz")
+            for n in cloud.points.array.dtype.names:
+                np.testing.assert_array_equal(cloud.points.array[n], result.points.array[n])
+            assert any(v.record_data_bytes() == b"preserve" for v in result.header.vlrs)
+    assert reports[0]["original_coverage"] == reports[1]["original_coverage"]
+    assert reports[1]["parallelism"]["enrichment_processes"] == 4
+    if not missing:
+        np.testing.assert_array_equal(laspy.read(tmp_path / 'out1/a.laz').points.array,
+                                      laspy.read(tmp_path / 'out4/a.laz').points.array)
+
+
+def test_tiny_original_avoids_process_startup(tmp_path, monkeypatch):
+    import remap_first_pipeline as pipeline
+    monkeypatch.setattr(pipeline, "spatial_query_worker_count", lambda n: n)
+    originals, predictions = tmp_path / "raw", tmp_path / "pred"
+    originals.mkdir(); predictions.mkdir()
+    write_cloud(originals / "a.las", [0])
+    write_cloud(predictions / "a.las", [0], [7])
+    report = strict_remap(collections=[predictions], baseline_collections=[predictions],
+                          originals=originals, output=tmp_path / "out", workers=4)
+    assert report["parallelism"]["enrichment_processes"] == 1
+
+
+def test_region_routed_queries_equal_one_process_across_many_regions(tmp_path):
+    """Batches split over 4 m regions and owner workers reassemble to the serial result.
+
+    Includes the RCT branch (positive trees first, then background for the
+    misses), vector-free and integer values, ties and uncovered points.
+    """
+    from parallel_remap import region_owners
+    rng = np.random.default_rng(7)
+    dims = {"PredInstance_RCT": np.uint32, "score": np.float32}
+    with PointIndex(tmp_path / "rct.sqlite", dims) as rct, PointIndex(tmp_path / "base.sqlite", {}) as base:
+        for tile in range(2):
+            xyz = np.c_[rng.uniform(0, 40, 20000), rng.uniform(0, 40, 20000), rng.uniform(0, 5, 20000)]
+            xyz[::50] = np.round(xyz[::50], 2)            # coincident points across tiles: tie-breaking
+            labels = rng.integers(0, 30, len(xyz)).astype(np.uint32)
+            rct.add(tile, xyz[:16384], {"PredInstance_RCT": labels[:16384], "score": xyz[:16384, 2].astype(np.float32)},
+                    np.arange(16384))
+            rct.add(tile, xyz[16384:], {"PredInstance_RCT": labels[16384:], "score": xyz[16384:, 2].astype(np.float32)},
+                    np.arange(16384, len(xyz)))
+            base.add(tile, xyz[:16384], {}, np.arange(16384))
+            base.add(tile, xyz[16384:], {}, np.arange(16384, len(xyz)))
+        rct.flush(); base.flush()
+        queries_xyz = [np.c_[rng.uniform(-1, 41, 3000), rng.uniform(-1, 41, 3000), rng.uniform(0, 5, 3000)]
+                       for _ in range(6)]
+        assert len(np.unique(region_owners(queries_xyz[0], 4))) == 4
+        runs = {}
+        for workers in (1, 3, 4):
+            with RemapBatchQueries([rct], [base], workers=workers, radius=.05) as queries:
+                runs[workers] = [models for _, _, models in queries.map(
+                    (i, xyz) for i, xyz in enumerate(queries_xyz))]
+        serial = runs[1]
+        for key, result in runs.items():
+            for a, b in zip(serial, result):
+                (sb, sd, sv), (pb, pd, pv) = a[0], b[0]
+                np.testing.assert_array_equal(sb, pb)
+                np.testing.assert_array_equal(sd, pd)
+                for name in sv:
+                    np.testing.assert_array_equal(sv[name], pv[name])
+        assert any(np.isinf(models[0][1]).any() for models in serial)          # uncovered points
+        assert any((models[0][2]["PredInstance_RCT"] > 0).any() for models in serial)
+

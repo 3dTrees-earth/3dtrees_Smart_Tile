@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-Main subsampling script: Parallel subsampling to resolution 1 (1cm) and resolution 2 (10cm).
+Parallel subsampling to resolution 1 (1cm) and resolution 2 (10cm), called by the tile task.
 
 This script handles subsampling of tiled point clouds:
 1. Subsample tiles to resolution 1 (default: 1cm)
@@ -14,19 +13,15 @@ COPC Optimizations:
 - Leverages COPC's spatial indexing for efficient chunk-based processing
 - Multi-threaded COPC writing for improved performance
 
-Usage:
-    python main_subsample.py --tiles_dir /path/to/tiles --res1 0.01 --res2 0.1
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import os
 import shutil
 import subprocess
-import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -34,25 +29,16 @@ from typing import List, Optional, Tuple
 import laspy
 
 # Import parameters
-from parameters import TILE_PARAMS
 from point_cloud_metadata import point_cloud_files
 from subsample_chunk_worker import subsample_tile_chunk
 from subsample_com import (
-    COPC_COM_DENSE_BIN_LIMIT,
-    COPC_COM_MAX_WINDOW_SIZE,
-    COPC_COM_TARGET_WINDOW_CELLS,
-    aggregate_center_of_mass_xyz as _aggregate_center_of_mass_xyz,
     aligned_edges as _aligned_edges,
     center_of_mass_subsample_copc,
     center_of_mass_subsample_las,
-    iter_copc_center_of_mass_windows as _iter_copc_center_of_mass_windows,
     process_pool_kwargs as _process_pool_kwargs,
-    write_center_of_mass_points as _write_center_of_mass_points,
 )
 from subsample_methods import (
     SUBSAMPLING_METHOD_CENTER_OF_MASS,
-    SUBSAMPLING_METHOD_NEAREST_TO_CENTROID,
-    SUBSAMPLING_METHODS,
     is_copc_file as _is_copc_file,
     normalize_subsampling_method,
     voxel_subsampling_filter as _voxel_subsampling_filter,
@@ -664,6 +650,59 @@ def subsample_simple(
         return (input_file.name, False, str(e), 0)
 
 
+def subsample_output_name(input_file: Path, resolution: float, output_prefix: Optional[str],
+                          output_copc: bool) -> str:
+    """Output file name for one subsampled input, shared by every subsampling path."""
+    res_cm = int(resolution * 100)
+    output_ext = ".copc.laz" if output_copc else ".laz"
+    # Generate output filename
+    stem = input_file.stem
+    # Remove .copc suffix if present
+    if stem.endswith('.copc'):
+        stem = stem[:-5]
+
+    # Extract original base filename by removing prefixes and resolution suffixes
+    import re
+    base_name = stem
+
+    # Remove resolution suffix patterns from previous subsampling stages.
+    base_name = re.sub(r'_subsampled[\d.]+m$', '', base_name)
+    base_name = re.sub(r'_subsampled_\d+(?:\.\d+)?cm$', '', base_name)
+    base_name = re.sub(r'_\d+cm$', '', base_name)
+
+    # Remove output_prefix if present at the start (e.g., "output_dir_100m_")
+    if output_prefix and base_name.startswith(output_prefix + '_'):
+        base_name = base_name[len(output_prefix) + 1:]
+
+    # Remove any remaining prefix patterns that look like "something_100m_" or "output_dir_100m_"
+    base_name = re.sub(r'^[^_]+_\d+m_', '', base_name)
+
+    # For tiled files, try to extract tile ID (c##_r##) pattern
+    tile_match = re.search(r'(c\d+_r\d+)', base_name)
+    if tile_match:
+        # Keep tile ID for tiled files
+        tile_id = tile_match.group(1)
+        # Extract base name before tile ID if there's a prefix
+        base_before_tile = base_name[:tile_match.start()]
+        if base_before_tile and base_before_tile.endswith('_'):
+            base_before_tile = base_before_tile[:-1]
+        # Remove any remaining prefix from base_before_tile
+        if base_before_tile:
+            base_before_tile = re.sub(r'^[^_]+_\d+m_', '', base_before_tile)
+            if base_before_tile:
+                output_name = f"{base_before_tile}_{tile_id}_subsampled_{res_cm}cm{output_ext}"
+            else:
+                output_name = f"{tile_id}_subsampled_{res_cm}cm{output_ext}"
+        else:
+            output_name = f"{tile_id}_subsampled_{res_cm}cm{output_ext}"
+    else:
+        # Single file or no tile ID - use clean base name
+        # Remove any remaining prefix patterns
+        base_name = re.sub(r'^[^_]+_\d+m_', '', base_name)
+        output_name = f"{base_name}_subsampled_{res_cm}cm{output_ext}"
+    return output_name
+
+
 def subsample_parallel(
     input_dir: Path,
     output_dir: Path,
@@ -711,59 +750,11 @@ def subsample_parallel(
         print(f"    No input files found in {input_dir}")
         return []
 
-    # Convert resolution to cm for filename
-    res_cm = int(resolution * 100)
-    output_ext = ".copc.laz" if output_copc else ".laz"
-
     # Prepare tasks
     tasks = []
     manifest = _read_subsample_manifest(output_dir)
     for input_file in sorted(input_files):
-        # Generate output filename
-        stem = input_file.stem
-        # Remove .copc suffix if present
-        if stem.endswith('.copc'):
-            stem = stem[:-5]
-
-        # Extract original base filename by removing prefixes and resolution suffixes
-        import re
-        base_name = stem
-
-        # Remove resolution suffix patterns from previous subsampling stages.
-        base_name = re.sub(r'_subsampled[\d.]+m$', '', base_name)
-        base_name = re.sub(r'_subsampled_\d+(?:\.\d+)?cm$', '', base_name)
-        base_name = re.sub(r'_\d+cm$', '', base_name)
-
-        # Remove output_prefix if present at the start (e.g., "output_dir_100m_")
-        if output_prefix and base_name.startswith(output_prefix + '_'):
-            base_name = base_name[len(output_prefix) + 1:]
-
-        # Remove any remaining prefix patterns that look like "something_100m_" or "output_dir_100m_"
-        base_name = re.sub(r'^[^_]+_\d+m_', '', base_name)
-
-        # For tiled files, try to extract tile ID (c##_r##) pattern
-        tile_match = re.search(r'(c\d+_r\d+)', base_name)
-        if tile_match:
-            # Keep tile ID for tiled files
-            tile_id = tile_match.group(1)
-            # Extract base name before tile ID if there's a prefix
-            base_before_tile = base_name[:tile_match.start()]
-            if base_before_tile and base_before_tile.endswith('_'):
-                base_before_tile = base_before_tile[:-1]
-            # Remove any remaining prefix from base_before_tile
-            if base_before_tile:
-                base_before_tile = re.sub(r'^[^_]+_\d+m_', '', base_before_tile)
-                if base_before_tile:
-                    output_name = f"{base_before_tile}_{tile_id}_subsampled_{res_cm}cm{output_ext}"
-                else:
-                    output_name = f"{tile_id}_subsampled_{res_cm}cm{output_ext}"
-            else:
-                output_name = f"{tile_id}_subsampled_{res_cm}cm{output_ext}"
-        else:
-            # Single file or no tile ID - use clean base name
-            # Remove any remaining prefix patterns
-            base_name = re.sub(r'^[^_]+_\d+m_', '', base_name)
-            output_name = f"{base_name}_subsampled_{res_cm}cm{output_ext}"
+        output_name = subsample_output_name(input_file, resolution, output_prefix, output_copc)
 
         output_file = output_dir / output_name
         target_output_file = copc_output_path(output_file) if output_copc else laz_output_path(output_file)
@@ -986,118 +977,3 @@ def run_subsample_pipeline(
     print(f"  Resolution 2 ({res2_cm}cm): {len(res2_files)} files in {subsampled_res2_dir}")
 
     return subsampled_res1_dir, subsampled_res2_dir
-
-
-def main():
-    """CLI entry point."""
-    parser = argparse.ArgumentParser(
-        description="3DTrees Subsampling Pipeline - Parallel subsampling to multiple resolutions",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-
-    parser.add_argument(
-        "--tiles_dir", "-i",
-        type=Path,
-        required=True,
-        help="Directory containing tile COPC files"
-    )
-
-    parser.add_argument(
-        "--res1",
-        type=float,
-        default=TILE_PARAMS.get('resolution_1', 0.01),
-        help=f"First resolution in meters (default: {TILE_PARAMS.get('resolution_1', 0.01)})"
-    )
-
-    parser.add_argument(
-        "--res2",
-        type=float,
-        default=TILE_PARAMS.get('resolution_2', 0.1),
-        help=f"Second resolution in meters (default: {TILE_PARAMS.get('resolution_2', 0.1)})"
-    )
-
-    parser.add_argument(
-        "--output-copc-res1",
-        "--output_copc_res1",
-        action=argparse.BooleanOptionalAction,
-        default=TILE_PARAMS.get("output_copc_res1", True),
-        help=(
-            "Write resolution 1 outputs as COPC LAZ "
-            f"(default: {TILE_PARAMS.get('output_copc_res1', True)})"
-        ),
-    )
-
-    parser.add_argument(
-        "--output-copc-res2",
-        "--output_copc_res2",
-        action=argparse.BooleanOptionalAction,
-        default=TILE_PARAMS.get("output_copc_res2", False),
-        help=(
-            "Write resolution 2 outputs as COPC LAZ "
-            f"(default: {TILE_PARAMS.get('output_copc_res2', False)})"
-        ),
-    )
-
-    parser.add_argument(
-        "--num_cores",
-        type=int,
-        default=None,
-        help="Number of CPU cores (default: auto-detect, not used for chunking)"
-    )
-
-    parser.add_argument(
-        "--num_threads",
-        type=int,
-        default=None,
-        help="Number of spatial chunks per file for parallel processing (default: auto-detected CPU count)"
-    )
-
-    parser.add_argument(
-        "--subsampling-method",
-        "--subsampling_method",
-        choices=sorted(SUBSAMPLING_METHODS),
-        default=TILE_PARAMS.get("subsampling_method", SUBSAMPLING_METHOD_CENTER_OF_MASS),
-        help=(
-            "Subsampling method: center-of-mass averages XYZ per voxel; "
-            "nearest-to-centroid preserves the previous PDAL voxel centroid nearest-neighbor behavior "
-            f"(default: {TILE_PARAMS.get('subsampling_method', SUBSAMPLING_METHOD_CENTER_OF_MASS)})"
-        ),
-    )
-
-    parser.add_argument(
-        "--output_prefix",
-        type=str,
-        default=None,
-        help="Optional prefix for output filenames"
-    )
-
-    args = parser.parse_args()
-
-    # Validate input
-    if not args.tiles_dir.exists():
-        print(f"Error: Tiles directory does not exist: {args.tiles_dir}")
-        sys.exit(1)
-
-    # Run pipeline
-    try:
-        res1_dir, res2_dir = run_subsample_pipeline(
-            tiles_dir=args.tiles_dir,
-            res1=args.res1,
-            res2=args.res2,
-            num_cores=args.num_cores,
-            num_threads=args.num_threads,
-            output_prefix=args.output_prefix,
-            subsampling_method=args.subsampling_method,
-            output_copc_res1=args.output_copc_res1,
-            output_copc_res2=args.output_copc_res2,
-        )
-        print(f"\nSubsampled files ready:")
-        print(f"  Resolution 1: {res1_dir}")
-        print(f"  Resolution 2: {res2_dir}")
-    except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
