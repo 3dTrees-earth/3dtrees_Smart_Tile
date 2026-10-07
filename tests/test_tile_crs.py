@@ -95,6 +95,14 @@ class MetricCrsTests(unittest.TestCase):
                 self.check(cloud(root / "a.las", "EPSG:2056"),
                            cloud(root / "b.las", "EPSG:25832", ((652550, 5772900, 0), (652600, 5772950, 30))))
 
+    def test_files_with_and_without_crs_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(ValueError, r"1 input file\(s\) have no CRS \(b.las\) while a.las declares EPSG:2056"):
+                self.check(cloud(root / "a.las", "EPSG:2056"), cloud(root / "b.las", None))
+            # Several CRS-less files alone remain local metres.
+            self.assertIsNone(self.check(cloud(root / "c.las", None), cloud(root / "d.las", None)))
+
     def test_equivalent_crs_texts_are_one_crs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

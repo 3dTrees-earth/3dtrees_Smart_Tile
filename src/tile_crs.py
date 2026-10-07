@@ -6,7 +6,9 @@ geocentric CRSs (ECEF X/Y/Z), non-metre linear units and uploads mixing
 different CRSs therefore produce nonsense extents ("would create millions of
 tiles", 3DT-1709/1710/1777) or silently wrong voxel sizes. The tile task checks
 every input header before indexing and fails with the file and CRS named.
-Files without readable CRS metadata are local coordinates and are accepted.
+Files without readable CRS metadata are local coordinates and are accepted
+when no input declares a CRS; a mix of files with and without a CRS is
+rejected, because their coordinates need not share one frame.
 """
 from __future__ import annotations
 
@@ -56,11 +58,20 @@ def unit_problem(crs) -> Optional[str]:
 def require_metric_tiling_crs(files: Iterable[Path]):
     """Return the common CRS of ``files`` (None if none declares one); raise ValueError otherwise."""
     declared: List[Tuple[Path, object]] = []
+    undeclared: List[Path] = []
     for path in files:
         with laspy.open(path, read_evlrs=False) as reader:
             crs = parse_crs(reader.header)
         if crs is not None:
             declared.append((Path(path), crs))
+        else:
+            undeclared.append(Path(path))
+    if declared and undeclared:
+        shown = ", ".join(path.name for path in undeclared[:SHOWN_FILES])
+        more = f" (and {len(undeclared) - SHOWN_FILES} more files)" if len(undeclared) > SHOWN_FILES else ""
+        raise ValueError(f"{len(undeclared)} input file(s) have no CRS ({shown}{more}) while "
+                         f"{declared[0][0].name} declares {_label(declared[0][1])}. All point clouds of one "
+                         "dataset must share one projected CRS in metres; assign or reproject and upload again.")
     problems = [(path, crs, why) for path, crs in declared if (why := unit_problem(crs))]
     if problems:
         shown = "; ".join(f"{path.name}: {_label(crs)} {why}" for path, crs, why in problems[:SHOWN_FILES])

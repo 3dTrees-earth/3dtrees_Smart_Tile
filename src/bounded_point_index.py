@@ -163,16 +163,27 @@ class PointIndex:
         self._cache_ready = False
         self.db.commit()
         self.db.execute("ATTACH DATABASE ? AS shard", (str(path),))
+        failed = True
         try:
             offset = self.db.execute("SELECT COALESCE(MAX(id), 0) FROM batches").fetchone()[0]
             self.db.execute("INSERT INTO batches(id, tile, data) SELECT id + ?, tile, data FROM shard.batches ORDER BY id",
                             (offset,))
             self.db.execute("INSERT INTO bounds SELECT id + ?, x0, x1, y0, y1, z0, z1 FROM shard.bounds ORDER BY id",
                             (offset,))
-            self._cache_tiles.update(row[0] for row in self.db.execute("SELECT DISTINCT tile FROM shard.batches"))
+            tiles = {row[0] for row in self.db.execute("SELECT DISTINCT tile FROM shard.batches")}
             self.db.commit()
+            self._cache_tiles.update(tiles)
+            failed = False
         finally:
-            self.db.execute("DETACH DATABASE shard")
+            if failed:
+                # Undo a partial append; an open transaction would also make
+                # DETACH fail and replace the original error.
+                self.db.rollback()
+            try:
+                self.db.execute("DETACH DATABASE shard")
+            except sqlite3.Error:
+                if not failed:
+                    raise
 
     def candidates(self, xyz, radius, *, tile=None, before_tile=None):
         if not len(xyz):
