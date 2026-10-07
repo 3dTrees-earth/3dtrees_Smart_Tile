@@ -1,4 +1,4 @@
-"""Prod-merged output format selection shared by the CLI parameters and product creation."""
+"""Output format selection: prod-merged products and subsampled tile outputs."""
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -51,3 +51,30 @@ def parse_merged_output_formats(value: str) -> List[str]:
     if not parsed:
         raise ValueError("No merged output formats selected")
     return parsed
+
+
+TILE_OUTPUT_FORMATS = ("laz", "copc.laz", "ply")
+
+
+def parse_tile_outputs(value) -> List[tuple]:
+    """Parse 'resolution:format' pairs into [(resolution_m, format)].
+
+    Formats are laz, copc.laz (aliases: copc) and ply. Pairs must be unique.
+    """
+    outputs = []
+    for token in selector_tokens(value):
+        if not token:
+            continue
+        resolution, separator, output_format = token.partition(":")
+        output_format = {"copc": "copc.laz"}.get(output_format.strip().lower(), output_format.strip().lower())
+        try:
+            resolution = float(resolution)
+        except ValueError:
+            resolution = float("nan")
+        if not separator or output_format not in TILE_OUTPUT_FORMATS or not (resolution > 0 and resolution < 1e6):
+            raise ValueError(f"Tile output '{token}' must be 'resolution:format' with a positive resolution "
+                             f"in metres and one of {', '.join(TILE_OUTPUT_FORMATS)}")
+        if (resolution, output_format) in outputs:
+            raise ValueError(f"Tile output '{token}' is listed twice")
+        outputs.append((resolution, output_format))
+    return outputs

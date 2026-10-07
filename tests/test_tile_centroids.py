@@ -70,7 +70,7 @@ def make_inputs(tmp_path):
 
 
 def run(tmp_path, sources, las, tiles, workers, tag):
-    outputs = [(r, {t.label: tmp_path / tag / f"{t.label}_{i}.laz" for t in tiles}, False)
+    outputs = [(r, {t.label: tmp_path / tag / f"{t.label}_{i}.laz" for t in tiles}, "laz")
                for i, r in enumerate(RESOLUTIONS)]
     written, occupied = write_tile_centroids(sources, tiles, las[0].header, outputs, workers=workers,
                                              work_dir=tmp_path / tag, metadata_source=sources[0])
@@ -168,7 +168,7 @@ def test_tiles_with_empty_cores_are_dropped_in_the_same_read(tmp_path):
                  core=(10.5, 8.5, 11.5, 9.5))
     kept = Tile(tiles[0].label, tiles[0].bounds, tiles[0].scales, tiles[0].offsets,
                 core=(-6.0, -3.0, 0.0, 2.5))
-    outputs = [(r, {t.label: tmp_path / "o" / f"{t.label}_{i}.laz" for t in (kept, empty)}, False)
+    outputs = [(r, {t.label: tmp_path / "o" / f"{t.label}_{i}.laz" for t in (kept, empty)}, "laz")
                for i, r in enumerate(RESOLUTIONS)]
     written, occupied = write_tile_centroids(sources, [kept, empty], las[0].header, outputs, workers=2,
                                              work_dir=tmp_path / "o", metadata_source=sources[0])
@@ -179,8 +179,8 @@ def test_tiles_with_empty_cores_are_dropped_in_the_same_read(tmp_path):
 def test_copc_output_from_worker_fragments_holds_the_same_points(tmp_path):
     sources, las, tiles = make_inputs(tmp_path)
     tiles = tiles[:2]
-    outputs = [(RESOLUTIONS[0], {t.label: tmp_path / "c" / f"{t.label}.copc.laz" for t in tiles}, True),
-               (RESOLUTIONS[0], {t.label: tmp_path / "c" / f"{t.label}.laz" for t in tiles}, False)]
+    outputs = [(RESOLUTIONS[0], {t.label: tmp_path / "c" / f"{t.label}.copc.laz" for t in tiles}, "copc.laz"),
+               (RESOLUTIONS[0], {t.label: tmp_path / "c" / f"{t.label}.laz" for t in tiles}, "laz")]
     written, _ = write_tile_centroids(sources, tiles, las[0].header, outputs, workers=2,
                                       work_dir=tmp_path / "c", metadata_source=sources[0])
     for tile in tiles:
@@ -205,3 +205,40 @@ def test_sampled_density_shrinks_blocks_for_dense_hot_spots():
     size = choose_block_size(400_000_000, 16_000_000, (0.01, 0.1), sample)
     assert size < 50 and block_cells((0.01, 0.1), size)[0] == 10 * block_cells((0.01, 0.1), size)[1]
     assert choose_block_size(400_000_000, 16_000_000, (0.01, 0.1)) == 50.0
+
+
+def read_ply_xyz(path):
+    with open(path, "rb") as handle:
+        header = []
+        while (line := handle.readline().decode("ascii").rstrip("\n")) != "end_header":
+            header.append(line)
+        return header, np.frombuffer(handle.read(), dtype="<f8").reshape(-1, 3)
+
+
+def test_third_resolution_and_ply_come_from_the_same_read(tmp_path):
+    sources, las, tiles = make_inputs(tmp_path)
+    tiles = tiles[:1]
+    resolutions = (0.05, 0.5, 0.25)
+    outputs = [(0.05, {tiles[0].label: tmp_path / "x" / "a.laz"}, "laz"),
+               (0.5, {tiles[0].label: tmp_path / "x" / "b.laz"}, "laz"),
+               (0.25, {tiles[0].label: tmp_path / "x" / "c.laz"}, "laz"),
+               (0.25, {tiles[0].label: tmp_path / "x" / "c.ply"}, "ply")]
+    written, _ = write_tile_centroids(sources, tiles, las[0].header, outputs, workers=2,
+                                      work_dir=tmp_path / "x", metadata_source=sources[0])
+    for resolution, (_, paths, _) in zip(resolutions, outputs[:3]):
+        expected, _ = reference(las, tiles[0], resolution)
+        assert encoded(paths[tiles[0].label])[0] == expected
+    header, xyz = read_ply_xyz(outputs[3][1][tiles[0].label])
+    assert header[1] == "format binary_little_endian 1.0" and f"element vertex {len(xyz)}" in header
+    third = laspy.read(outputs[2][1][tiles[0].label])
+    assert np.array_equal(xyz, np.c_[third.x, third.y, third.z]) and written[tiles[0].label][3] == len(xyz)
+
+
+def test_tile_output_selector_parses_pairs_and_rejects_bad_ones():
+    import pytest
+    from product_formats import parse_tile_outputs
+    assert parse_tile_outputs("0.25:laz, 0.05:copc,0.5:ply") == [(0.25, "laz"), (0.05, "copc.laz"), (0.5, "ply")]
+    assert parse_tile_outputs(None) == [] and parse_tile_outputs("") == []
+    for bad in ("0.25", "0.25:las", "-1:laz", "x:laz", "0.25:laz,0.25:laz"):
+        with pytest.raises(ValueError):
+            parse_tile_outputs(bad)

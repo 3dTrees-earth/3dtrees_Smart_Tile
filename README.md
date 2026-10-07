@@ -641,15 +641,19 @@ The SmartTile Docker image has been validated against Untwine 1.5.1: `--dims ""`
 1. Sources are read once in parallel point ranges (`--num-spatial-chunks` workers). Each point is encoded into every buffered tile it falls in, with the tile's LAS scale and offsets, and spilled to XY blocks aligned to both voxel grids.
 2. The block edge comes from a 2 M-point sample of the sources: at most 10% of points may fall in blocks above 4 M points (edge 5–50 m, a whole number of 10 cm voxels). Larger blocks are split once while reducing.
 3. Each block is reduced independently. An output point is the exact mean of the voxel's integer LAS coordinates, rounded half-to-even once onto the same grid. Every resolution is computed from the original points, not from finer means (3DT-2203). Results do not depend on worker count, block size or point order.
-4. Workers write LAS fragments; Untwine builds each 1 cm COPC from a tile's fragments, and the 10 cm LAZ is assembled in block order.
+4. Workers write raw point-record fragments (no per-block LAS header). Each tile's output is assembled in block order with large batched writes: LAZ, COPC (one LAS per tile, then Untwine), or PLY.
+
+**Formats and extra resolutions**: resolution 1 and 2 are LAZ by default, or COPC with `--output-copc-res1/--output-copc-res2 True`. No SmartTile stage needs COPC for these tiles: merge reads the 1 cm tiles sequentially, and the 10 cm tiles come from the original points. `--extra-tile-outputs "0.25:laz,0.05:ply"` adds more outputs in `subsampled_res3/`, `subsampled_res4/`, ... from the same read (formats `laz`, `copc.laz`, `ply`; PLY is binary float64 XYZ with the CRS as `comment crs:`).
 
 Earlier versions built a full-resolution COPC per tile and read it back through ~5 m window queries. COPC's coarse octree nodes overlap every window, so each point was decoded about 25 times (dataset 3109).
 
-| Dataset (10 CPUs) | Points | COPC windows | Single read |
-|---|---|---|---|
-| 3147 (single file) | 9 M | 100 s | 22 s |
-| 3109 | 330 M | 879–1,039 s | 160 s |
-| 483 (150 GB limit) | 3.68 B | not run | 1,457 s |
+| Dataset (10 CPUs) | Points | COPC windows | Single read, 1 cm COPC | Single read, 1 cm LAZ |
+|---|---|---|---|---|
+| 3147 (single file) | 9 M | 100 s | 22 s | — |
+| 3109 | 330 M | 879–1,039 s | 160 s | — |
+| 483 (150 GB limit) | 3.68 B | not run | 1,237 s | 641 s |
+
+On 483, 1 cm COPC adds about 600 s of Untwine conversion. Peak process memory is about 10.5 GiB.
 
 **Nearest-to-centroid** still builds full-resolution COPC tiles and splits each tile into X-axis chunks processed in parallel.
 
@@ -825,6 +829,7 @@ neighbors; unrelated or already-updated layouts are not recovered this way.
 | `--resolution-2` | 0.1 | Second subsampling resolution (10cm) |
 | `--output-copc-res1` | True | Write first-resolution subsampled outputs as COPC LAZ (`*.copc.laz`) |
 | `--output-copc-res2` | False | Write second-resolution subsampled outputs as COPC LAZ; default keeps 10cm as regular LAZ |
+| `--extra-tile-outputs` | — | More tiled outputs from the same read, as `resolution:format` pairs (`laz`, `copc.laz`, `ply`), written to `subsampled_res3`, ... (center of mass only) |
 | `--subsampling-method` | center-of-mass | Subsampling method: `center-of-mass` or `nearest-to-centroid` |
 | `--chunk-size` | 20000000 | Points per chunk when reading LAZ/LAS in tiling Phase 1, multi-collection remap, and merged-COPC-to-original remap (smaller = less peak RAM; larger = fewer scans) |
 | `--tiling-threshold` | None | File size threshold in MB for skipping tiling on single small files |

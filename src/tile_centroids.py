@@ -339,29 +339,52 @@ def _ordered(executor, function, tasks, window, waited):
         yield result
 
 
+# Fragments hold raw LAS point format 0 records (no header): assembly then
+# reads them with plain file reads; thousands of LAS headers were the bottleneck.
+FRAGMENT_POINT_FORMAT = 0
+ASSEMBLY_POINTS = 5_000_000
+
+
 def _reduce_and_write(task):
-    """Reduce one block and write its outputs as LAS fragments (one per resolution).
+    """Reduce one block and write each resolution as a raw point-record fragment.
 
     Workers write their own fragments, so centers never travel through the
     parent process. Returns [(output points, represented points)] per resolution.
     """
-    block, resolutions, cells, scales, offsets, limit, template, slot_dirs, name = task
+    block, resolutions, cells, scales, offsets, limit, slot_dirs, name = task
     results = _reduce_block((block, resolutions, cells, scales, offsets, limit))
     shutil.rmtree(block)
-    with laspy.open(template) as reader:
-        header = reader.header
+    dtype = laspy.PointFormat(FRAGMENT_POINT_FORMAT).dtype()
     counts = []
     for slot, (centers, used) in enumerate(results):
         if len(centers):
-            from subsample_com import write_center_of_mass_points
-            with laspy.open(Path(slot_dirs[slot]) / f"{name}.las", mode="w", header=header) as writer:
-                write_center_of_mass_points(writer, header, centers)
+            records = np.zeros(len(centers), dtype=dtype)
+            for axis, field in enumerate(("X", "Y", "Z")):
+                # Centers lie on the output grid: this recovers the exact integers.
+                records[field] = np.round((centers[:, axis] - offsets[axis]) / scales[axis])
+            records.tofile(Path(slot_dirs[slot]) / f"{name}.bin")
         counts.append((len(centers), used))
     return counts
 
 
 def _fragments(directory):
-    return sorted(Path(directory).glob("*.las"))
+    return sorted(Path(directory).glob("*.bin"))
+
+
+def _fragment_batches(directory, header):
+    """Yield point records of all fragments in block order, about ASSEMBLY_POINTS at a time."""
+    dtype = laspy.PointFormat(FRAGMENT_POINT_FORMAT).dtype()
+    pending, size = [], 0
+    for fragment in _fragments(directory):
+        pending.append(np.fromfile(fragment, dtype=dtype))
+        size += len(pending[-1])
+        if size >= ASSEMBLY_POINTS:
+            yield laspy.ScaleAwarePointRecord(np.concatenate(pending), header.point_format,
+                                              header.scales, header.offsets)
+            pending, size = [], 0
+    if pending:
+        yield laspy.ScaleAwarePointRecord(np.concatenate(pending), header.point_format,
+                                          header.scales, header.offsets)
 
 
 def _assemble(directory, target, template, compress):
@@ -374,33 +397,45 @@ def _assemble(directory, target, template, compress):
     backend = laspy_laz_backend()
     kwargs = {"laz_backend": backend} if compress and backend is not None else {}
     with laspy.open(target, mode="w", header=header, do_compress=compress, **kwargs) as writer:
-        for fragment in _fragments(directory):
-            with laspy.open(fragment) as reader:
-                for points in reader.chunk_iterator(5_000_000):
-                    writer.write_points(points)
+        for points in _fragment_batches(directory, header):
+            writer.write_points(points)
         write_retained_evlrs(writer, header)
     shutil.rmtree(directory)
     return True
 
 
-def _fragments_to_copc(directory, target, template, metadata_source, expected):
-    """Build one COPC from a tile's fragments; untwine reads the fragment directory."""
-    from copc_metadata import srs_assignment_from_file
-    from crs_records import validate_single_crs_record
-    from subsample_outputs import convert_laz_output_to_copc
-    from tile_copc import _output_has_no_extra_dimensions, _run_untwine
+def _assemble_ply(directory, target, template, expected):
+    """Binary little-endian PLY of float64 XYZ, with the CRS as `comment crs:`."""
+    from crs_records import crs_comment_value
+    from ply_crs import add_crs_comment_to_ply
 
-    fragments = _fragments(directory)
-    converted, _ = _run_untwine([Path(directory)], target, srs_assignment_from_file(fragments[0]))
-    if converted and _output_has_no_extra_dimensions(target) and validate_single_crs_record(metadata_source, target)[0]:
-        shutil.rmtree(directory)
-    else:
-        # Same fallbacks as single-file outputs (PDAL when untwine is unavailable).
-        Path(target).unlink(missing_ok=True)
-        merged = Path(str(directory) + ".las")
-        _assemble(directory, merged, template, compress=False)
-        converted = convert_laz_output_to_copc(merged, target, source_metadata_file=metadata_source)
-        merged.unlink(missing_ok=True)
+    with laspy.open(template) as reader:
+        header = reader.header
+    crs = crs_comment_value(header)
+    written = 0
+    with open(target, "wb") as handle:
+        handle.write((f"ply\nformat binary_little_endian 1.0\nelement vertex {expected}\n"
+                      "property double x\nproperty double y\nproperty double z\nend_header\n").encode("ascii"))
+        for points in _fragment_batches(directory, header):
+            xyz = np.empty((len(points), 3), dtype="<f8")
+            xyz[:, 0], xyz[:, 1], xyz[:, 2] = points.x, points.y, points.z
+            handle.write(xyz.tobytes())
+            written += len(points)
+    if written != expected:
+        raise ValueError(f"{Path(target).name}: wrote {written:,} of {expected:,} points")
+    add_crs_comment_to_ply(target, crs)
+    shutil.rmtree(directory)
+    return True
+
+
+def _fragments_to_copc(directory, target, template, metadata_source, expected):
+    """One LAS per tile from its fragments, then the shared COPC converter (Untwine, PDAL fallback)."""
+    from subsample_outputs import convert_laz_output_to_copc
+
+    merged = Path(str(directory) + ".las")
+    _assemble(directory, merged, template, compress=False)
+    converted = convert_laz_output_to_copc(merged, target, source_metadata_file=metadata_source)
+    merged.unlink(missing_ok=True)
     if converted:
         with laspy.open(target) as reader:
             if reader.header.point_count != expected:
@@ -413,7 +448,8 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
     """Write center-of-mass outputs for every tile from one read of the sources.
 
     `tiles`: [Tile]. `header`: LAS header the tiles derive from (VLRs, CRS).
-    `outputs`: [(resolution, {label: final path}, copc)] in output order.
+    `outputs`: [(resolution, {label: final path}, format)] in output order;
+    format is laz, copc.laz or ply.
     Tiles with a `core` and no source point inside it are dropped (the layout
     is planned before reading). Returns ({label: [output point counts]},
     [occupied flag per tile]). Fails before publishing on any point-count
@@ -475,9 +511,11 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
                 templates[index] = template
                 tile_dir = spill_dir / tile.label
                 blocks = sorted(tile_dir.iterdir(), key=_block_key) if tile_dir.exists() else []
+                if out_header.point_format.id != FRAGMENT_POINT_FORMAT:
+                    raise ValueError("Center-of-mass outputs must use point format 0")
                 for block in blocks:
                     jobs.append((block, resolutions, cells, tile.scales, tile.offsets, BLOCK_POINTS,
-                                 str(template), slot_dirs, f"{len(jobs):09d}"))
+                                 slot_dirs, f"{len(jobs):09d}"))
                     owners.append(index)
             last_block = {owner: position for position, owner in enumerate(owners)}
 
@@ -494,17 +532,21 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
                     if last_block[index] != position:
                         continue
                     tile = tiles[index]
-                    for slot, (resolution, paths, copc) in enumerate(outputs):
+                    for slot, (resolution, paths, output_format) in enumerate(outputs):
                         count, used = totals[index][slot]
                         if used != tile_points[index] or not count:
                             raise ValueError(
                                 f"{tile.label} at {resolution} m: voxels represent {used:,} "
                                 f"points of {int(tile_points[index]):,}; {count:,} outputs")
                         directory = scratch / "out" / tile.label / str(slot)
-                        target = scratch / f"{tile.label}.{slot}.{'copc.laz' if copc else 'laz'}"
-                        future = (finish.submit(_fragments_to_copc, directory, target, templates[index],
-                                                metadata_source, count) if copc else
-                                  finish.submit(_assemble, directory, target, templates[index], True))
+                        target = scratch / f"{tile.label}.{slot}.{output_format}"
+                        if output_format == "copc.laz":
+                            future = finish.submit(_fragments_to_copc, directory, target, templates[index],
+                                                   metadata_source, count)
+                        elif output_format == "ply":
+                            future = finish.submit(_assemble_ply, directory, target, templates[index], count)
+                        else:
+                            future = finish.submit(_assemble, directory, target, templates[index], True)
                         finishing.append((target, paths[tile.label], future))
                     written[tile.label] = [count for count, _ in totals[index]]
                 reduced = time.monotonic()
@@ -528,9 +570,11 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
     return written, occupied.tolist()
 
 
-def subsample_tiles_single_scan(plan, output_dir, resolutions, copc_flags, *, workers, converters,
+def subsample_tiles_single_scan(plan, output_dir, resolutions, formats, *, workers, converters,
                                 output_prefix):
-    """Tile-task subsampling without full-resolution tiles: (res1_dir, res2_dir).
+    """Tile-task subsampling without full-resolution tiles: one output dir per resolution.
+
+    Output i goes to subsampled_res{i+1}; `formats` are laz, copc.laz or ply.
 
     Tiled inputs use the planned buffered tiles, each encoded with the first
     source's scales and the tile-centre offsets the COPC tiles used. A
@@ -560,9 +604,13 @@ def subsample_tiles_single_scan(plan, output_dir, resolutions, copc_flags, *, wo
                       core=(cores[label][0][0], cores[label][1][0], cores[label][0][1], cores[label][1][1]))
                  for label, bounds in sorted(jobs.items())]
     output_dirs = [Path(output_dir) / f"subsampled_res{index + 1}" for index in range(len(resolutions))]
-    outputs = [(resolution, {tile.label: directory / subsample_output_name(
-                    Path(f"{tile.label}.copc.laz"), resolution, output_prefix, copc) for tile in tiles}, copc)
-               for resolution, directory, copc in zip(resolutions, output_dirs, copc_flags)]
+    def name(tile, resolution, output_format):
+        stem = subsample_output_name(Path(f"{tile.label}.copc.laz"), resolution, output_prefix, False)
+        return stem[:-len(".laz")] + "." + output_format
+
+    outputs = [(resolution, {tile.label: directory / name(tile, resolution, output_format) for tile in tiles},
+                output_format)
+               for resolution, directory, output_format in zip(resolutions, output_dirs, formats)]
     print()
     print("=" * 60)
     print("Single-scan tile subsampling")

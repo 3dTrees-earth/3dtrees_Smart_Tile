@@ -354,7 +354,12 @@ def run_tile_task(params: Parameters):
         if (params.grid_origin_x is None) != (params.grid_origin_y is None):
             raise ValueError("Both grid-origin-x and grid-origin-y are required")
         grid_origin = None if params.grid_origin_x is None else (params.grid_origin_x, params.grid_origin_y)
-        if normalize_subsampling_method(subsampling_method) == SUBSAMPLING_METHOD_CENTER_OF_MASS:
+        from product_formats import parse_tile_outputs
+        extra_outputs, extra_dirs = parse_tile_outputs(params.extra_tile_outputs), []
+        center_of_mass = normalize_subsampling_method(subsampling_method) == SUBSAMPLING_METHOD_CENTER_OF_MASS
+        if extra_outputs and not center_of_mass:
+            raise ValueError("--extra-tile-outputs requires --subsampling-method center-of-mass")
+        if center_of_mass:
             # Center of mass needs only voxel sums: read each source point once and
             # skip the full-resolution tile COPCs (tile_centroids module docstring).
             from main_tile import plan_tiling
@@ -363,8 +368,10 @@ def run_tile_task(params: Parameters):
             plan = plan_tiling(input_dir, output_dir, tile_length, tile_buffer, tiling_threshold,
                                chunk_size, grid_origin, defer_occupancy=True)
             tiles_dir = plan.tiles_dir
-            res1_dir, res2_dir = subsample_tiles_single_scan(
-                plan, output_dir, (res1, res2), (output_copc_res1, output_copc_res2),
+            tile_outputs = [(res1, "copc.laz" if output_copc_res1 else "laz"),
+                             (res2, "copc.laz" if output_copc_res2 else "laz"), *extra_outputs]
+            res1_dir, res2_dir, *extra_dirs = subsample_tiles_single_scan(
+                plan, output_dir, [r for r, _ in tile_outputs], [f for _, f in tile_outputs],
                 workers=spatial_query_worker_count(subsampling_chunks), converters=tile_writer_workers,
                 output_prefix=f"{output_dir.name}_{int(tile_length)}m")
         else:
@@ -388,6 +395,8 @@ def run_tile_task(params: Parameters):
         print(f"Tiles: {tiles_dir}")
         print(f"Subsampled {int(res1*100)}cm: {res1_dir}")
         print(f"Subsampled {int(res2*100)}cm: {res2_dir}")
+        for (resolution, output_format), directory in zip(extra_outputs, extra_dirs):
+            print(f"Subsampled {resolution} m ({output_format}): {directory}")
 
         # Return the input_dir for use in merge task if needed
         return input_dir

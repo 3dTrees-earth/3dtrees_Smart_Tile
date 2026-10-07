@@ -133,6 +133,15 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("output-copc-res2", "output_copc_res2"),
     )
 
+    extra_tile_outputs: Optional[str] = Field(
+        None,
+        description="Additional subsampled tile outputs after resolutions 1 and 2, as "
+                    "'resolution:format' pairs (formats: laz, copc.laz, ply), e.g. '0.25:laz,0.05:ply'. "
+                    "Written to subsampled_res3, subsampled_res4, ... from the same single read. "
+                    "Center-of-mass only.",
+        validation_alias=AliasChoices("extra-tile-outputs", "extra_tile_outputs"),
+    )
+
 
     instance_dimension: str = Field(
         "PredInstance",
@@ -557,6 +566,7 @@ def print_params(params: Parameters):
     print(f"  resolution_2: {params.resolution_2}")
     print(f"  output_copc_res1: {params.output_copc_res1}")
     print(f"  output_copc_res2: {params.output_copc_res2}")
+    print(f"  extra_tile_outputs: {params.extra_tile_outputs}")
     print(f"  subsampling_method: {params.subsampling_method}")
 
     print("\nMerge Task:")
