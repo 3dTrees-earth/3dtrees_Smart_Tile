@@ -93,8 +93,9 @@ def test_worker_failure_propagates_and_pool_closes(tmp_path):
             assert len(list(queries.map([(None, np.zeros((1, 3)))]))) == 1
 
 
+@pytest.mark.parametrize("baseline", [True, False])
 @pytest.mark.parametrize("missing", [False, True])
-def test_strict_remap_processes_match_serial_outputs_and_coverage(tmp_path, monkeypatch, missing):
+def test_strict_remap_processes_match_serial_outputs_and_coverage(tmp_path, monkeypatch, missing, baseline):
     import remap_first_pipeline as pipeline
     # Use multiple bounded batches without generating a large synthetic cloud.
     monkeypatch.setattr(pipeline, "MAX_BATCH_POINTS", 8)
@@ -117,7 +118,7 @@ def test_strict_remap_processes_match_serial_outputs_and_coverage(tmp_path, monk
     reports = []
     for workers in (1, 4):
         output = tmp_path / f"out{workers}"
-        kwargs = dict(collections=collections, baseline_collections=collections,
+        kwargs = dict(collections=collections, baseline_collections=collections if baseline else None,
                       originals=originals, output=output, workers=workers)
         if missing:
             import json
@@ -132,6 +133,8 @@ def test_strict_remap_processes_match_serial_outputs_and_coverage(tmp_path, monk
                 np.testing.assert_array_equal(cloud.points.array[n], result.points.array[n])
             assert any(v.record_data_bytes() == b"preserve" for v in result.header.vlrs)
     assert reports[0]["original_coverage"] == reports[1]["original_coverage"]
+    stages = {m["stage"] for m in reports[0]["original_coverage"]}
+    assert stages == ({"unfiltered_1cm", "final_survivors"} if baseline else {"final_survivors"})
     assert reports[1]["parallelism"]["enrichment_processes"] == 4
     if not missing:
         np.testing.assert_array_equal(laspy.read(tmp_path / 'out1/a.laz').points.array,

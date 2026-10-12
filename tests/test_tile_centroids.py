@@ -239,6 +239,6 @@ def test_tile_output_selector_parses_pairs_and_rejects_bad_ones():
     from product_formats import parse_tile_outputs
     assert parse_tile_outputs("0.25:laz, 0.05:copc,0.5:ply") == [(0.25, "laz"), (0.05, "copc.laz"), (0.5, "ply")]
     assert parse_tile_outputs(None) == [] and parse_tile_outputs("") == []
-    for bad in ("0.25", "0.25:las", "-1:laz", "x:laz", "0.25:laz,0.25:laz"):
+    for bad in ("0.25", "0.25:las", "-1:laz", "x:laz", "0.25:laz,0.25:laz", "0.25:laz,0.25:ply"):
         with pytest.raises(ValueError):
             parse_tile_outputs(bad)

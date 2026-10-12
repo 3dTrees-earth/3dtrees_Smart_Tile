@@ -144,8 +144,10 @@ the resolution-dependent original-remap radius are separate checks.
 The RCT final remap preserves original point geometry and source attributes.
 For each original point:
 
-1. Require a match in the unfiltered dense baseline within the final remap
-   radius. This remains a 100% coverage requirement for every model.
+1. When baseline geometry is available (merge, or remap with
+   `--baseline-1cm-folders` or a merge manifest), require a match in the
+   unfiltered dense baseline within the final remap radius. This is a 100%
+   coverage requirement for every model.
 2. Search the filtered predictions within the same radius. When a surviving
    prediction is found, copy its prediction values, including its retained ID
    and semantics.
@@ -164,7 +166,8 @@ The 443 rejected dense positions are not a count of final background originals.
 Original and dense point counts can differ, and a removed position can still
 find a nearby surviving prediction inside the final radius. Only failed final
 matches receive fallback 0. This exception applies to RCT; other models still
-require complete final coverage. Missing baseline coverage remains an error.
+require complete final coverage. Missing baseline coverage remains an error
+whenever the baseline is checked.
 
 The coverage report records `original_radius_m`, per-file `original_coverage`
 entries for `unfiltered_1cm` and `final_survivors`, the final

@@ -24,7 +24,7 @@ _worker_radius = None
 def _query(xyz, indices, baselines, radius):
     results = []
     for index, baseline in zip(indices, baselines):
-        base_distances = baseline.nearest_distances(xyz, radius)
+        base_distances = None if baseline is None else baseline.nearest_distances(xyz, radius)
         if 'PredInstance_RCT' in index.dimensions:
             # A retained/recovered tree wins over neighboring background. This
             # affects original enrichment only; tile memberships stay intact.
@@ -46,8 +46,8 @@ def _initialize_worker(index_specs, baseline_specs, radius):
     # Spawned processes open their own connections; no SQLite handle is shared.
     _worker_indices = [PointIndex(path, dims, query_workers=1, read_only=True)
                        for path, dims in index_specs]
-    _worker_baselines = [PointIndex(path, dims, query_workers=1, read_only=True)
-                         for path, dims in baseline_specs]
+    _worker_baselines = [None if spec is None else PointIndex(*spec, query_workers=1, read_only=True)
+                         for spec in baseline_specs]
     _worker_radius = radius
 
 
@@ -66,12 +66,14 @@ def _merge(parts, length):
     merged = []
     first = parts[0][1]
     for model, (base, dist, values) in enumerate(first):
-        base_all = np.empty(length, dtype=base.dtype)
+        base_all = None if base is None else np.empty(length, dtype=base.dtype)
         dist_all = np.empty(length, dtype=dist.dtype)
         values_all = {name: np.empty((length, *data.shape[1:]), dtype=data.dtype) for name, data in values.items()}
         for positions, result in parts:
             part_base, part_dist, part_values = result[model]
-            base_all[positions], dist_all[positions] = part_base, part_dist
+            if base_all is not None:
+                base_all[positions] = part_base
+            dist_all[positions] = part_dist
             for name, data in part_values.items():
                 values_all[name][positions] = data
         merged.append((base_all, dist_all, values_all))
@@ -81,7 +83,8 @@ def _merge(parts, length):
 class RemapBatchQueries:
     """Keep records in the parent; send only XYZ and receive prediction arrays.
 
-    Indexes must be complete before entry and unchanged until exit. At most two
+    Indexes must be complete before entry and unchanged until exit. A baseline
+    may be None, which skips that model's baseline distances. At most two
     batches per worker are admitted, including completed out-of-order results.
     """
 
@@ -96,8 +99,9 @@ class RemapBatchQueries:
     def __enter__(self):
         if self.workers > 1:
             for index in [*self.indices, *self.baselines]:
-                index.flush()
-            specs = lambda indexes: [(index.path, index.dimensions) for index in indexes]
+                if index is not None:
+                    index.flush()
+            specs = lambda indexes: [None if index is None else (index.path, index.dimensions) for index in indexes]
             context = multiprocessing.get_context("spawn")
             # One single-process pool per worker: a region is always answered by
             # the same process, which keeps that region's trees cached.

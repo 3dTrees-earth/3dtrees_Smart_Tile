@@ -172,7 +172,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
     output_dir.mkdir(parents=True)
     metrics = report["original_coverage"] = []
     report["original_coverage_policy"] = {
-        "unfiltered_1cm": "100% required for every model",
+        "unfiltered_1cm": "100% required for every model with baseline geometry",
         "final_survivors": "100% required except RCT; unmatched RCT predictions become background 0",
     }
     radius = report["original_radius_m"]
@@ -190,12 +190,13 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                     raise ValueError(f"{file.name}: original already contains prediction dimensions {sorted(existing.intersection(used))}")
                 update_extra_dimensions(header, [param for dims in selected for param in dims.values()])
                 final_metrics = [_coverage_metric(file, model, "final_survivors", radius) for model in models]
-                baseline_metrics = [_coverage_metric(file, model, "unfiltered_1cm", radius) for model in models]
+                baseline_metrics = [None if baseline is None else _coverage_metric(file, model, "unfiltered_1cm", radius)
+                                    for model, baseline in zip(models, baseline_indices)]
                 for model, metric in zip(models, final_metrics):
                     if model.instance == "PredInstance_RCT":
                         metric["unmatched_policy"] = "background_zero"
                         metric["background_assigned"] = 0
-                metrics.extend(baseline_metrics + final_metrics)
+                metrics.extend([m for m in baseline_metrics if m is not None] + final_metrics)
                 source_header = reader.header
             # Query in spatial blocks so each region tree is built once, then
             # write in the original point order (original_blocks docstring).
@@ -210,7 +211,8 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                 for index, xyz, results in queries.map(block_batches(scratch / "blocks", source_header, origin)):
                     assigned += len(index)
                     for i, (base_distances, distances, values) in enumerate(results):
-                        _record_coverage(baseline_metrics[i], xyz, base_distances, origin)
+                        if base_distances is not None:
+                            _record_coverage(baseline_metrics[i], xyz, base_distances, origin)
                         _record_coverage(final_metrics[i], xyz, distances, origin)
                         if models[i].instance == "PredInstance_RCT":
                             missing = ~np.isfinite(distances)
@@ -569,7 +571,12 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
 def strict_remap(*, collections, originals, output, baseline_collections=None, target_dims=None,
                  instance_dimension="PredInstance", workers=1, resolution_1=None,
                  remap_tolerance=None):
-    """Final task gate; requires baseline geometry or a merge manifest per model."""
+    """Final task gate: 100% final coverage, plus baseline coverage where geometry is known.
+
+    Merged predictions lie on the 1 cm geometry, so full final coverage implies
+    full baseline coverage. Baseline geometry, from `baseline_collections` or a
+    merge manifest, only adds a separate tiling-versus-filtering diagnosis.
+    """
     output = Path(output)
     available_destination(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -585,15 +592,14 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
         for collection in collections:
             manifest = Path(collection) / "smarttile_merge.json"
             if not manifest.is_file():
-                if baseline_collections is None:
-                    raise ValueError(f"Baseline 1 cm geometry is required for {collection}; "
-                                     "supply --baseline-1cm-folders or preserve smarttile_merge.json")
+                inferred_baselines.append(None)
                 continue
             metadata = json.loads(manifest.read_text(encoding="utf-8"))
             if "resolution_1_m" in metadata:
                 recorded_resolutions.add(float(metadata["resolution_1_m"]))
             if baseline_collections is None:
-                inferred_baselines.append((Path(collection) / metadata["baseline"]).resolve())
+                inferred_baselines.append((Path(collection) / metadata["baseline"]).resolve()
+                                          if "baseline" in metadata else None)
         if len(recorded_resolutions) > 1:
             raise ValueError("Prediction collections declare conflicting first-stage resolutions")
         if resolution_1 is None:
@@ -629,6 +635,10 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
                                                      validate_record=validate))
                 if model.instance:
                     model.dimensions[model.instance] = instance_extra_bytes_params(model.instance, np.array([maximum], dtype=np.uint64))
+                indices.append(index)
+                if baseline is None:
+                    baselines.append(None)
+                    continue
                 baseline_index = stack.enter_context(PointIndex(work / f"baseline_{i}.sqlite", {}, query_workers=query_workers))
                 baseline_files = prediction_collection_files(baseline)
                 if not baseline_files:
@@ -641,7 +651,6 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
                                                np.arange(offset, offset + len(record)))
                             offset += len(record)
                 baseline_index.flush()
-                indices.append(index)
                 baselines.append(baseline_index)
             report.setdefault("timings", {})["indexing_seconds"] = time.monotonic() - indexing_start
             final_ids = enrich_originals(models, indices, baselines, originals, work / "originals", origin, report,

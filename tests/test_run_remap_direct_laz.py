@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -67,21 +68,32 @@ class RunRemapDirectLazTests(unittest.TestCase):
             self.assertEqual(create.call_args.kwargs["original_with_predictions_dir"], root / "out")
             self.assertEqual(create.call_args.kwargs["chunk_workers"], 3)
 
-    def test_missing_baseline_and_coverage_failure_publish_no_originals(self):
-        for missing_baseline in (True, False):
-            with self.subTest(missing_baseline=missing_baseline), tempfile.TemporaryDirectory() as tmp:
+    def test_coverage_failure_publishes_no_originals(self):
+        for has_baseline in (True, False):
+            with self.subTest(has_baseline=has_baseline), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 pred, originals, baseline = self.fixture(root)
                 params = self.params(root, pred, originals, baseline)
-                if missing_baseline:
+                if not has_baseline:
                     params.baseline_1cm_folders = None
-                else:
-                    write_cloud(originals / "bad.las", [2])
+                write_cloud(originals / "bad.las", [2])
                 with mock.patch.object(run, "_create_prod_merged_outputs") as create:
                     with self.assertRaises(SystemExit):
                         run.run_remap_task(params)
                 self.assertFalse((root / "out").exists())
                 create.assert_not_called()
+
+    def test_without_baseline_only_final_coverage_is_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pred, originals, baseline = self.fixture(root)
+            params = self.params(root, pred, originals, baseline)
+            params.baseline_1cm_folders = None
+            run.run_remap_task(params)
+            self.assertTrue((root / "out/original.las").exists())
+            report = json.loads((root / "out_coverage.json").read_text())
+            self.assertEqual({m["stage"] for m in report["original_coverage"]}, {"final_survivors"})
+            self.assertTrue(all(m["matched"] == m["total"] for m in report["original_coverage"]))
 
     def test_label_reassignment_cannot_bypass_reconciled_contract(self):
         with tempfile.TemporaryDirectory() as tmp:

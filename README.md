@@ -261,7 +261,8 @@ radius takes priority over neighboring background, preserving its attributes.
 An RCT point with no surviving prediction inside
 the matching radius receives `PredInstance_RCT=0` (and zero for any other RCT
 prediction fields). The report records unmatched counts and example coordinates.
-Unfiltered 1 cm baseline coverage remains mandatory.
+When baseline geometry is available, unfiltered 1 cm baseline coverage
+remains mandatory.
 
 Final RCT originals use **one compact ID mapping across the dataset**, sorted by
 the intermediate encoded IDs actually represented in those originals: `1..N`,
@@ -424,17 +425,21 @@ names across prediction
 collections fail early; SmartTile does not auto-rename them to `_2`, `_3`, or
 add late model suffixes during final remap.
 
-Final remap requires one shared unfiltered 1 cm baseline folder, or one baseline
-folder per collection in the same order. For locally preserved merge outputs,
-`smarttile_merge.json` resolves the sibling baseline folder automatically. Galaxy
-wrappers must pass `--baseline-1cm-folders` explicitly when packaging only the LAZ
-collection and dropping its manifest. The merge manifest records the first-stage resolution. Standalone remap reads it
+Final remap needs only the prediction collections and the originals. Merged
+predictions lie on the 1 cm geometry, so 100% final coverage implies 100%
+coverage of the 1 cm tiles, and merge has already checked those. The baseline
+check is an optional diagnosis that tells points lost in tiling apart from points
+removed by filtering: pass one shared unfiltered 1 cm baseline folder, or one per
+collection in the same order, with `--baseline-1cm-folders`. For locally preserved
+merge outputs, `smarttile_merge.json` resolves the sibling baseline folder
+automatically. Galaxy collections drop the manifest, so the Galaxy remap checks
+final coverage only. The merge manifest records the first-stage resolution. Standalone remap reads it
 when available; older manifests default to 1 cm. `--resolution-1` can specify a
 finer or coarser first-stage resolution, and `--remap-tolerance` can explicitly
-override the derived final radius. Baseline coverage still requires 100%, and a
+override the derived final radius. Baseline coverage, when checked, still requires 100%, and a
 `--min-remap-match-fraction 0.99` request is rejected.
 
-Every original file and model has separate baseline and final coverage metrics.
+Every original file and model has a final coverage metric, plus a separate baseline metric when baseline geometry is available.
 For non-RCT models, final coverage requires **100% within the 3D first-stage
 voxel diagonal** (17.32 mm at 1 cm resolution) in Euclidean XYZ. Missing
 coverage fails the entire remap before any enriched original is published.
@@ -643,7 +648,7 @@ The SmartTile Docker image has been validated against Untwine 1.5.1: `--dims ""`
 3. Each block is reduced independently. An output point is the exact mean of the voxel's integer LAS coordinates, rounded half-to-even once onto the same grid. Every resolution is computed from the original points, not from finer means (3DT-2203). Results do not depend on worker count, block size or point order.
 4. Workers write raw point-record fragments (no per-block LAS header). Each tile's output is assembled in block order with large batched writes: LAZ, COPC (one LAS per tile, then Untwine), or PLY.
 
-**Formats and extra resolutions**: resolution 1 and 2 are LAZ by default, or COPC with `--output-copc-res1/--output-copc-res2 True`. No SmartTile stage needs COPC for these tiles: merge reads the 1 cm tiles sequentially, and the 10 cm tiles come from the original points. `--extra-tile-outputs "0.25:laz,0.05:ply"` adds more outputs in `subsampled_res3/`, `subsampled_res4/`, ... from the same read (formats `laz`, `copc.laz`, `ply`; PLY is binary float64 XYZ with the CRS as `comment crs:`).
+**Resolutions and formats**: `--tile-outputs "0.1:laz,0.01:copc.laz,0.25:ply"` lists every subsampled output in order; output *i* is written to `subsampled_res{i}/`, and all of them come from the same read (formats `laz`, `copc.laz`, `ply`; PLY is binary float64 XYZ with the CRS as `comment crs:`). Without it, `--resolution-1/--resolution-2` and `--output-copc-res1/2` define two outputs as before. No SmartTile stage needs COPC for these tiles: merge reads the 1 cm tiles sequentially, and every resolution is computed from the original points.
 
 Earlier versions built a full-resolution COPC per tile and read it back through ~5 m window queries. COPC's coarse octree nodes overlap every window, so each point was decoded about 25 times (dataset 3109).
 
@@ -829,7 +834,7 @@ neighbors; unrelated or already-updated layouts are not recovered this way.
 | `--resolution-2` | 0.1 | Second subsampling resolution (10cm) |
 | `--output-copc-res1` | True | Write first-resolution subsampled outputs as COPC LAZ (`*.copc.laz`) |
 | `--output-copc-res2` | False | Write second-resolution subsampled outputs as COPC LAZ; default keeps 10cm as regular LAZ |
-| `--extra-tile-outputs` | — | More tiled outputs from the same read, as `resolution:format` pairs (`laz`, `copc.laz`, `ply`), written to `subsampled_res3`, ... (center of mass only) |
+| `--tile-outputs` | — | All tiled outputs in order, as `resolution:format` pairs (`laz`, `copc.laz`, `ply`), written to `subsampled_res1`, `subsampled_res2`, ...; replaces the four flags above. Nearest-to-centroid allows one or two LAZ/COPC outputs |
 | `--subsampling-method` | center-of-mass | Subsampling method: `center-of-mass` or `nearest-to-centroid` |
 | `--chunk-size` | 20000000 | Points per chunk when reading LAZ/LAS in tiling Phase 1, multi-collection remap, and merged-COPC-to-original remap (smaller = less peak RAM; larger = fewer scans) |
 | `--tiling-threshold` | None | File size threshold in MB for skipping tiling on single small files |
@@ -843,7 +848,7 @@ neighbors; unrelated or already-updated layouts are not recovered this way.
 | `--prediction-transfer-tolerance` | 0.1732 | Earlier model-to-dense transfer radius in XYZ metres |
 | `--overlap-threshold` | 0.3 | Required instance correspondence fraction |
 | `--disable-matching` | False | Leave IDs tile-local; shared tree points use nearest claimant core ownership |
-| `--baseline-1cm-folders` | Merge manifest | Shared baseline or folders in model order for final remap |
+| `--baseline-1cm-folders` | Merge manifest, else none | Optional shared baseline or folders in model order; adds a baseline coverage check to final remap |
 | `--remap-tolerance` | Auto: sqrt(3) × `--resolution-1` | Optional final original coverage radius override in XYZ metres |
 | `--min-remap-match-fraction` | 1.0, fixed | Required coverage for every original and model |
 | `--original-laz-input-dir` | None | Uploaded raw originals; legacy alias: original-input-dir |

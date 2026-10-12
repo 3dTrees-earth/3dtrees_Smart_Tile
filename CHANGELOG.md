@@ -3,7 +3,7 @@
 ## v2.4.0 - unreleased
 
 ### Correctness
-- Remap-first merge: predictions go to 1 cm geometry before ownership, recovery, reconciliation and deduplication. Every original point must be covered by the unfiltered 1 cm baseline and the final survivors, or the task fails without publishing (3DT-2101, 3DT-1566).
+- Remap-first merge: predictions go to 1 cm geometry before ownership, recovery, reconciliation and deduplication. Every original point must be covered by the final survivors (and by the unfiltered 1 cm baseline in merge, or in remap when baseline geometry is given), or the task fails without publishing (3DT-2101, 3DT-1566).
 - Center-of-mass tiles are exact voxel means of the original points at every resolution, rounded once onto the LAS grid. 10 cm is no longer a mean of 1 cm means (3DT-2203).
 - Tiling rejects geographic, geocentric and non-metre CRSs, inputs with different CRSs, and inputs mixing files with and without a CRS (3DT-1898).
 - One CRS record per output; instance IDs widen to uint32 instead of wrapping (3DT-2200, 3DT-2172).
@@ -13,7 +13,8 @@
 - Merge stages run in worker processes; enrichment queries originals in spatial blocks. 645: total 4 h 09 min → 46 min, enrichment 3 h → 170 s. 3109 SAT: 21,200 s → about 4,930 s. Outputs are identical for any worker count.
 
 ### Interface changes
-- New `--extra-tile-outputs "res:format,..."` for additional tiled outputs (`laz`, `copc.laz`, `ply`) from the same read.
+- New `--tile-outputs "res:format,..."`: any number of tiled outputs in order (`laz`, `copc.laz`, `ply`) from the same read, written to `subsampled_res1..N`. The Galaxy wrapper exposes them as a repeat (default: one 10 cm LAZ output) with one collection each.
+- Standalone remap no longer needs the 1 cm tiles or a merge manifest: `--baseline-1cm-folders` is optional, and without it remap checks final coverage only. The Galaxy remap form drops the resolution-1 tiles input.
 - `--num-spatial-chunks` defaults to the allocated CPUs (`GALAXY_SLOTS`, affinity, cgroup quota) instead of the host core count.
 - Removed: the v2.3 merge/filter/remap path, 15 unused parameters, and the Galaxy outputs `merge_report`, `remap_report` and `output_remap_mappings` (still written locally as evidence). The Galaxy wrapper no longer exposes a grid origin.
 

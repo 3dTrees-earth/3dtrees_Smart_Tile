@@ -201,14 +201,12 @@ def _require_tile_bounds_json(tile_bounds_json: Path | None) -> Path:
 
 def _tile_and_subsample_copc(params, input_dir, output_dir, grid_origin, workers, threads,
                              tile_writer_workers, tile_source_workers, subsampling_chunks,
-                             dimension_reduction):
+                             dimension_reduction, res1, res2, output_copc_res1, output_copc_res2):
     """Nearest-to-centroid path: full-resolution COPC tiles, then windowed subsampling."""
     from main_tile import run_tiling_pipeline
     from main_subsample import run_subsample_pipeline
 
     tile_length, tile_buffer = params.tile_length, params.tile_buffer
-    res1, res2 = params.resolution_1, params.resolution_2
-    output_copc_res1, output_copc_res2 = params.output_copc_res1, params.output_copc_res2
     subsampling_method = params.subsampling_method
     tiling_threshold, chunk_size = params.tiling_threshold, params.chunk_size
     tiles_dir = run_tiling_pipeline(
@@ -355,10 +353,14 @@ def run_tile_task(params: Parameters):
             raise ValueError("Both grid-origin-x and grid-origin-y are required")
         grid_origin = None if params.grid_origin_x is None else (params.grid_origin_x, params.grid_origin_y)
         from product_formats import parse_tile_outputs
-        extra_outputs, extra_dirs = parse_tile_outputs(params.extra_tile_outputs), []
+        tile_outputs = (parse_tile_outputs(params.tile_outputs) if params.tile_outputs else
+                        [(res1, "copc.laz" if output_copc_res1 else "laz"),
+                         (res2, "copc.laz" if output_copc_res2 else "laz")])
+        if not tile_outputs:
+            raise ValueError("--tile-outputs lists no outputs")
         center_of_mass = normalize_subsampling_method(subsampling_method) == SUBSAMPLING_METHOD_CENTER_OF_MASS
-        if extra_outputs and not center_of_mass:
-            raise ValueError("--extra-tile-outputs requires --subsampling-method center-of-mass")
+        if not center_of_mass and (len(tile_outputs) > 2 or any(f == "ply" for _, f in tile_outputs)):
+            raise ValueError("nearest-to-centroid supports one or two LAZ/COPC tile outputs")
         if center_of_mass:
             # Center of mass needs only voxel sums: read each source point once and
             # skip the full-resolution tile COPCs (tile_centroids module docstring).
@@ -368,34 +370,38 @@ def run_tile_task(params: Parameters):
             plan = plan_tiling(input_dir, output_dir, tile_length, tile_buffer, tiling_threshold,
                                chunk_size, grid_origin, defer_occupancy=True)
             tiles_dir = plan.tiles_dir
-            tile_outputs = [(res1, "copc.laz" if output_copc_res1 else "laz"),
-                             (res2, "copc.laz" if output_copc_res2 else "laz"), *extra_outputs]
-            res1_dir, res2_dir, *extra_dirs = subsample_tiles_single_scan(
+            output_dirs = list(subsample_tiles_single_scan(
                 plan, output_dir, [r for r, _ in tile_outputs], [f for _, f in tile_outputs],
                 workers=spatial_query_worker_count(subsampling_chunks), converters=tile_writer_workers,
-                output_prefix=f"{output_dir.name}_{int(tile_length)}m")
+                output_prefix=f"{output_dir.name}_{int(tile_length)}m"))
         else:
+            (first, first_format), (second, second_format) = tile_outputs[0], tile_outputs[-1]
             tiles_dir, res1_dir, res2_dir = _tile_and_subsample_copc(
                 params, input_dir, output_dir, grid_origin, workers, threads, tile_writer_workers,
-                tile_source_workers, subsampling_chunks, dimension_reduction)
+                tile_source_workers, subsampling_chunks, dimension_reduction,
+                first, second, first_format == "copc.laz", second_format == "copc.laz")
+            output_dirs = [res1_dir, res2_dir]
+            if len(tile_outputs) == 1:
+                import shutil
+                shutil.rmtree(res2_dir, ignore_errors=True)  # the pipeline always makes two
+                output_dirs = [res1_dir]
 
         # Step 7: Update tile_bounds_tindex.json with actual bounds from created tiles
         # (so remap/merge matching uses file extent instead of nominal grid)
         bounds_json = output_dir / "tile_bounds_tindex.json"
-        if bounds_json.exists():
+        las_dirs = [d for d, (_, f) in zip(output_dirs, tile_outputs) if f != "ply"]
+        if bounds_json.exists() and las_dirs:
             from tile_tindex import update_tile_bounds_json_from_files
-            num_updated = update_tile_bounds_json_from_files(bounds_json, res1_dir)
+            num_updated = update_tile_bounds_json_from_files(bounds_json, las_dirs[0])
             if num_updated > 0:
-                print(f"  Updated tile_bounds_tindex.json with bounds from {num_updated} tile(s) in {res1_dir.name}")
+                print(f"  Updated tile_bounds_tindex.json with bounds from {num_updated} tile(s) in {las_dirs[0].name}")
 
         print()
         print("=" * 60)
         print("Tile Task Complete")
         print("=" * 60)
         print(f"Tiles: {tiles_dir}")
-        print(f"Subsampled {int(res1*100)}cm: {res1_dir}")
-        print(f"Subsampled {int(res2*100)}cm: {res2_dir}")
-        for (resolution, output_format), directory in zip(extra_outputs, extra_dirs):
+        for (resolution, output_format), directory in zip(tile_outputs, output_dirs):
             print(f"Subsampled {resolution} m ({output_format}): {directory}")
 
         # Return the input_dir for use in merge task if needed
