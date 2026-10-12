@@ -257,13 +257,13 @@ product.
   on subsampled points, copy them from a real nearest source point.
 - `nearest-to-centroid` preserves the previous PDAL voxel nearest-neighbor
   behavior.
-- Tile-task center of mass reads each source point once (`tile_centroids`):
+- The tile task reads each source point once for both subsampling methods (`tile_centroids`):
   no full-resolution tiles, occupancy counted in the same read, exact integer
   voxel means rounded half-to-even once. Every resolution comes from original
   points. Outputs must not depend on worker count, block size or point order.
-- `--num-spatial-chunks` controls spatial parallelism for subsampling,
-  COPC-original remap windows, and bounded prod-merged COPC reads. It defaults
-  to the allocated CPUs, never the host core count.
+- `--workers` is the only CPU setting: tiling read/reduce processes,
+  merge/filter queries, remap enrichment processes and prod-merged chunks. It
+  defaults to the allocated CPUs, never the host core count.
 - Enrichment queries originals in spatial blocks (`original_blocks`) and writes
   them back in original point order.
 - Keep large runs memory bounded: prefer chunked COPC reads/writes, avoid one

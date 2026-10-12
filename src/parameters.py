@@ -53,8 +53,10 @@ class Parameters(BaseSettings):
     )
 
     workers: int = Field(
-        DEFAULT_FILE_WORKERS,
-        description="Worker budget (default 2): default for --tile-writer-workers in tiling; CPU-capped query threads for merge/filter and batch processes for final remap.",
+        default_factory=allocated_cpu_count,
+        description="CPUs to use in every task (default: the allocated CPUs from GALAXY_SLOTS, CPU affinity and "
+                    "cgroup quota; larger values are capped to them): tiling read/reduce processes, merge/filter "
+                    "query workers, remap enrichment processes and prod-merged product chunks.",
         validation_alias=AliasChoices("workers", "number-of-threads", "number_of_threads"),
     )
 
@@ -79,20 +81,6 @@ class Parameters(BaseSettings):
         20,
         description="Buffer overlap in meters (only for 'tile' task)",
         validation_alias=AliasChoices("tile-buffer", "tile_buffer"),
-    )
-
-    tile_writer_workers: Optional[int] = Field(
-        default=None,
-        description=(
-            "Maximum tile outputs assembled (LAZ, PLY) or converted to COPC in parallel "
-            "after the tile task's single read. Defaults to --workers when unset."
-        ),
-        validation_alias=AliasChoices(
-            "tile-writer-workers",
-            "tile_writer_workers",
-            "tile-finalize-workers",
-            "tile_finalize_workers",
-        ),
     )
 
     resolution_1: Optional[float] = Field(
@@ -139,13 +127,6 @@ class Parameters(BaseSettings):
         "centroid",
         description="Representative point used by merge/filter instance ownership on 1 cm tiles: centroid, highest_point, or lowest_point",
         validation_alias=AliasChoices("filter-anchor", "filter_anchor"),
-    )
-
-    num_spatial_chunks: Optional[int] = Field(
-        default_factory=allocated_cpu_count,
-        description="Per-file spatial/chunk parallelism. Defaults to the allocated CPUs "
-                    "(GALAXY_SLOTS, CPU affinity and cgroup quota).",
-        validation_alias=AliasChoices("num-spatial-chunks", "num_spatial_chunks"),
     )
 
     subsampling_method: str = Field(
@@ -460,8 +441,6 @@ class Parameters(BaseSettings):
 
     @field_validator(
         "workers",
-        "num_spatial_chunks",
-        "tile_writer_workers",
     )
     @classmethod
     def validate_positive_int(cls, v, info):
@@ -528,14 +507,12 @@ def print_params(params: Parameters):
     print(f"  input_dir: {params.input_dir}")
     print(f"  output_dir: {params.output_dir}")
     print(f"  workers: {params.workers}")
-    print(f"  num_spatial_chunks: {params.num_spatial_chunks}")
     print(f"  instance_dimension: {params.instance_dimension}")
     print(f"  filter_anchor: {params.filter_anchor}")
 
     print("\nTile Task:")
     print(f"  tile_length: {params.tile_length}")
     print(f"  tile_buffer: {params.tile_buffer}")
-    print(f"  tile_writer_workers: {params.tile_writer_workers}")
     print(f"  resolution_1: {params.resolution_1}")
     print(f"  resolution_2: {params.resolution_2}")
     print(f"  output_copc_res1: {params.output_copc_res1}")

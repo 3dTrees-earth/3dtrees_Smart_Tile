@@ -59,7 +59,8 @@ class RunRemapDirectLazTests(unittest.TestCase):
             fm = root / "FM"
             fm.mkdir()
             write_cloud(fm / "tile.las", [0, .1], [4, 4], instance="PredInstance_FM")
-            params = self.params(root, f"{pred},{fm}", originals, baseline, num_spatial_chunks=3)
+            params = self.params(root, f"{pred},{fm}", originals, baseline)
+            params.workers = 3
             params.transfer_original_dims_to_merged = True
             with mock.patch("main_create_merged_file.create_prod_merged_files", return_value=[]) as create:
                 run.run_remap_task(params)

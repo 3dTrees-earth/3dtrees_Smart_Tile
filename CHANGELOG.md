@@ -16,7 +16,7 @@
 ### Interface changes
 - New `--tile-outputs "res:format,..."`: any number of tiled outputs in order (`laz`, `copc.laz`, `ply`) from the same read, written to `subsampled_res1..N`. The Galaxy wrapper exposes them as a repeat (default: one 10 cm LAZ output) with one collection each.
 - Standalone remap no longer needs the 1 cm tiles or a merge manifest: `--baseline-1cm-folders` is optional, and without it remap checks final coverage only. The Galaxy remap form drops the resolution-1 tiles input.
-- `--num-spatial-chunks` defaults to the allocated CPUs (`GALAXY_SLOTS`, affinity, cgroup quota) instead of the host core count.
+- One CPU setting: `--workers` defaults to the allocated CPUs (`GALAXY_SLOTS`, affinity, cgroup quota) instead of 2 and drives every task. `--num-spatial-chunks` and `--tile-writer-workers` are removed; the tile task converts at most two outputs to COPC at once.
 - Removed: the v2.3 merge/filter/remap path, 15 unused parameters, and `--chunk-size`, `--threads` and `--tile-source-workers` (only the old full-resolution tiling read them), and the Galaxy outputs `merge_report`, `remap_report` and `output_remap_mappings` (still written locally as evidence). The Galaxy wrapper no longer exposes a grid origin.
 
 ### Operations

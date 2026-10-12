@@ -29,8 +29,7 @@ class RunCreateMergedFileTaskTests(unittest.TestCase):
                 output_dir=output_dir,
                 merged_resolutions="10cm",
                 merged_output_formats="laz,copc.laz",
-                workers=6,
-                num_spatial_chunks=12,
+                workers=12,
                 _cli_parse_args=False,
             )
 

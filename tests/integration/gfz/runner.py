@@ -106,8 +106,7 @@ def tile():
         '--grid-origin-x', '398663.428', '--grid-origin-y', '5646147.674',
         '--resolution-1', '0.01', '--resolution-2', '0.1', '--subsampling-method', 'center-of-mass',
         '--output-copc-res1', 'True', '--output-copc-res2', 'False',
-        '--workers', '2', '--tile-writer-workers', '2',
-        '--num-spatial-chunks', '10'], output='01_tiles')
+        '--workers', '10'], output='01_tiles')
 
 if __name__ == '__main__':
     tile()

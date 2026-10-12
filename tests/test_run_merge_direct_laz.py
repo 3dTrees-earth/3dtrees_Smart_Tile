@@ -83,7 +83,8 @@ class RunMergeDirectLazTests(unittest.TestCase):
             root = Path(tmp)
             source, target, originals = self.fixture(root)
             params = self.params(root, subsampled_10cm_folder=source, subsampled_target_folder=target,
-                                 original_laz_input_dir=originals, num_spatial_chunks=3)
+                                 original_laz_input_dir=originals)
+            params.workers = 3
             params.transfer_original_dims_to_merged = True
             with mock.patch("main_create_merged_file.create_prod_merged_files", return_value=[]) as create:
                 run.run_merge_task(params)

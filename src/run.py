@@ -84,8 +84,8 @@ def _create_prod_merged_outputs(
         output_format_selector=params.merged_output_formats,
         res1=params.resolution_1,
         res2=params.resolution_2,
-        num_spatial_chunks=params.num_spatial_chunks,
-        chunk_workers=params.num_spatial_chunks,
+        num_spatial_chunks=params.workers,
+        chunk_workers=params.workers,
         staged_copc_dir=params.staged_copc_dir,
         standardization_json=params.standardization_json,
     )
@@ -199,6 +199,11 @@ def _require_tile_bounds_json(tile_bounds_json: Path | None) -> Path:
     return tile_bounds_json
 
 
+# Tile outputs assembled or converted to COPC at once after the single read:
+# Untwine runs its own thread pools, so more parallel conversions oversubscribe.
+TILE_CONVERTERS = 2
+
+
 def run_tile_task(params: Parameters):
     """
     Run the tile task: index, tile layout, and one subsampled output per --tile-outputs entry.
@@ -229,9 +234,6 @@ def run_tile_task(params: Parameters):
     tile_length = params.tile_length
     tile_buffer = params.tile_buffer
     workers = params.workers
-    tile_writer_workers = params.tile_writer_workers or workers
-    num_spatial_chunks = params.num_spatial_chunks
-    subsampling_chunks = num_spatial_chunks or workers
     res1 = params.resolution_1
     res2 = params.resolution_2
     output_copc_res1 = params.output_copc_res1
@@ -246,8 +248,6 @@ def run_tile_task(params: Parameters):
     print(f"Tile length: {tile_length}m")
     print(f"Tile buffer: {tile_buffer}m")
     print(f"Workers: {workers}")
-    print(f"Tile finalization workers: {tile_writer_workers}")
-    print(f"Subsampling spatial chunks/window workers: {subsampling_chunks}")
     print("Subsampling dimensions: minimal (standard dims only)")
     print(f"Subsampling method: {subsampling_method}")
     print(f"Tile outputs: {params.tile_outputs or 'from --resolution-1/2 and --output-copc-res1/2'}")
@@ -275,7 +275,7 @@ def run_tile_task(params: Parameters):
                            grid_origin=grid_origin, defer_occupancy=True)
         output_dirs = list(subsample_tiles_single_scan(
             plan, output_dir, [r for r, _ in tile_outputs], [f for _, f in tile_outputs],
-            workers=spatial_query_worker_count(subsampling_chunks), converters=tile_writer_workers,
+            workers=spatial_query_worker_count(workers), converters=min(TILE_CONVERTERS, workers),
             output_prefix=f"{output_dir.name}_{int(tile_length)}m", nearest=not center_of_mass))
 
         # Step 7: Update tile_bounds_tindex.json with actual bounds from created tiles
@@ -562,14 +562,13 @@ def _field_cli_flags(field_name: str) -> list[str]:
 def _print_cli_help() -> None:
     """Print a compact SmartTile CLI help page."""
     option_groups = [
-        ("Common", ["task", "input_dir", "output_dir", "workers", "num_spatial_chunks"]),
+        ("Common", ["task", "input_dir", "output_dir", "workers"]),
         (
             "Tile",
             [
                 "tile_length",
                 "tile_buffer",
                 "tile_outputs",
-                "tile_writer_workers",
                 "resolution_1",
                 "resolution_2",
                 "output_copc_res1",

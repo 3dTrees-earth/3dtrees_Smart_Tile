@@ -23,11 +23,12 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
         self.assertEqual(params.subsampling_method, "center-of-mass")
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
-    def test_default_worker_policy_is_two_files_and_cpu_spatial_chunks(self):
+    def test_default_workers_are_the_allocated_cpus(self):
+        from worker_budget import allocated_cpu_count
+
         params = Parameters(_cli_parse_args=False)
 
-        self.assertEqual(params.workers, 2)
-        self.assertGreaterEqual(params.num_spatial_chunks, 1)
+        self.assertEqual(params.workers, allocated_cpu_count())
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_subsampling_method_alias_normalizes_to_nearest_to_centroid(self):
@@ -98,9 +99,9 @@ class ParameterSubsamplingMethodTests(unittest.TestCase):
             Parameters(tile_buffer=-1, _cli_parse_args=False)
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
-    def test_num_spatial_chunks_must_be_positive(self):
+    def test_workers_must_be_positive(self):
         with self.assertRaises(ValueError):
-            Parameters(num_spatial_chunks=0, _cli_parse_args=False)
+            Parameters(workers=0, _cli_parse_args=False)
 
     @unittest.skipIf(Parameters is None, "pydantic_settings is not installed")
     def test_cli_unknown_long_flags_fail_fast(self):

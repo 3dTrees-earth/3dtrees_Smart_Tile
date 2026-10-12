@@ -502,7 +502,7 @@ python src/run.py --task tile \
     --tile-buffer 20 \                     # Buffer overlap in meters (default: 20)
     --tile-outputs 0.01:laz,0.1:laz \      # Outputs in order (default: 0.01:copc.laz,0.1:laz)
     --subsampling-method center-of-mass \  # Or nearest-to-centroid
-    --num-spatial-chunks 10                # Processes for the single read (default: allocated CPUs)
+    --workers 10                           # CPUs to use (default: allocated CPUs)
 ```
 
 ### Create Merged File Task Options
@@ -517,7 +517,7 @@ python src/run.py --task create_merged_file \
     --merged-output-formats laz,copc.laz,ply \
     --staged-copc-dir /path/to/products/original_with_predictions_copc \
     --standardization-json /path/to/collection_summary.json \
-    --num-spatial-chunks 10
+    --workers 10
 ```
 
 `--merged-resolutions` accepts `res1`, `res2`, numeric meter values such as `0.05`, or centimeter labels such as `1cm,10cm`.
@@ -526,7 +526,7 @@ The task stages LAZ/LAS inputs to COPC in preservation mode with untwine when av
 `--staged-copc-dir` points to a reusable cache of already converted Original-with-predictions COPCs. This is recommended for repeat validation runs and production reruns where the enriched originals have not changed.
 `--standardization-json` points to the standardization `collection_summary.json` and validates that expected non-constant source dimensions survived into the staged COPCs and final LAS/COPC prod-merged products.
 LAZ and COPC outputs use LAS/COPC metadata forwarding. PLY outputs carry point dimensions as PLY properties, but do not preserve LAS/COPC VLR metadata. PLY has no CRS field, so every PLY SmartTile produces (prod-merged products and RCT tree meshes) records its CRS in the header as `comment crs: EPSG:<code>`, or as single-line standardized WKT when the CRS has no EPSG code. This is the convention QGIS (MDAL) reads; other readers ignore comments. PDAL's PLY writer cannot add comments, so product PLYs get the line in a header-only rewrite after writing; the binary payload is copied unchanged. PDAL's PLY reader ignores the comment: a PLY -> LAS conversion needs `readers.ply.default_srs`. Coordinates stay absolute float64; ASCII PLY written by PDAL without an explicit `precision` rounds to 6 significant digits (about 10 m for UTM northings), so SmartTile writes binary PLY.
-`--num-spatial-chunks` controls bounded COPC reads for prod-merged creation. For large UTM datasets, prefer setting it to the available CPU budget (for example `10`) instead of using a single global merge.
+`--workers` sets the number of bounded COPC product chunks for prod-merged creation; by default it is the allocated CPU count.
 For COPC output, SmartTile first writes bounded LAZ chunks and then prefers direct `untwine` chunk-to-COPC finalization. This keeps RAM bounded and avoids a giant merged temporary LAZ, but it still needs scratch disk for the chunk files and untwine hierarchy/output staging. Direct untwine output is accepted only when its point count exactly matches the source chunk total; otherwise SmartTile falls back to the PDAL merge/conversion path.
 When multiple product formats are selected for the same resolution, SmartTile generates one canonical set of nearest-to-centroid chunk LAZ files and writes all selected formats from those same chunks. This avoids repeated chunk computation and keeps LAZ, COPC LAZ, and PLY point counts aligned for a given resolution.
 Chunked nearest-to-centroid product generation is designed to preserve product metadata, CRS, scales, offsets, and dimensions. It should not be treated as a bit-for-bit reproducible operation: different chunking, PDAL/untwine versions, or parallel execution details may change the selected representative point at voxel boundaries while preserving the same spatial extent and metadata contract.
@@ -622,8 +622,7 @@ preserves enriched dimensions for final products.
 
 The SmartTile Docker image has been validated against Untwine 1.5.1: `--dims ""` is rejected; `--dims Classification` can leave prediction or source extras on enriched files; and long explicit standard-dimension lists such as `--dims Red,Green,Blue` are not used because they can crash this build. SmartTile therefore strips unwanted ExtraBytes before conversion, keeps all standard fields and retained metadata, and omits `--dims` on the reduced input. This avoids converting the complete enriched cloud twice when dimension limiting fails. Temporary staging is removed when conversion finishes.
 
-In the tile task, `--tile-writer-workers` tile outputs are assembled or converted
-concurrently.
+In the tile task, at most two tile outputs are assembled or converted at once.
 
 ### Stage 4: Multi-Resolution Subsampling
 
@@ -635,7 +634,7 @@ concurrently.
 - `nearest-to-centroid`: in the tile task, the original point nearest the voxel's exact mean (ties: lowest X, then Y, then Z), on the same single read and voxel grid as center of mass. Product downsampling (`create_merged_file`) still uses PDAL `filters.voxelcentroidnearestneighbor`.
 
 **Tile-task subsampling (single read, `src/tile_centroids.py`, both methods)**:
-1. Sources are read once in parallel point ranges (`--num-spatial-chunks` workers). Each point is encoded into every buffered tile it falls in, with the tile's LAS scale and offsets, and spilled to XY blocks aligned to both voxel grids.
+1. Sources are read once in parallel point ranges (`--workers` processes). Each point is encoded into every buffered tile it falls in, with the tile's LAS scale and offsets, and spilled to XY blocks aligned to both voxel grids.
 2. The block edge comes from a 2 M-point sample of the sources: at most 10% of points may fall in blocks above 4 M points (edge 5–50 m, a whole number of 10 cm voxels). Larger blocks are split once while reducing.
 3. Each block is reduced independently. An output point is the exact mean of the voxel's integer LAS coordinates, rounded half-to-even once onto the same grid; with nearest-to-centroid it is the original point nearest that mean. Every resolution is computed from the original points, not from finer outputs (3DT-2203). Results do not depend on worker count, block size or point order.
 4. Workers write raw point-record fragments (no per-block LAS header). Each tile's output is assembled in block order with large batched writes: LAZ, COPC (one LAS per tile, then Untwine), or PLY.
@@ -819,10 +818,8 @@ neighbors; unrelated or already-updated layouts are not recovered this way.
 |-----------|---------|-------------|
 | `--tile-length` | 100 | Tile size in meters |
 | `--tile-buffer` | 20 | Buffer overlap in meters |
-| `--workers` | 2 | Default for `--tile-writer-workers`; CPU-capped query threads for merge/filter and batch processes for final remap |
-| `--tile-writer-workers` | `--workers` | Tile outputs assembled or converted to COPC in parallel after the single read |
+| `--workers` | Allocated CPUs | The CPU setting for every task (see below); capped to the allocated CPUs |
 | `--grid-origin-x`, `--grid-origin-y` | Data extent | Optional south-west corner of the tile grid (both or neither) |
-| `--num-spatial-chunks` | `--workers` | Per-file subsampling parallelism for COM windows or stripe chunks |
 | `--resolution-1` | 0.01 | First subsampling resolution (1cm) |
 | `--resolution-2` | 0.1 | Second subsampling resolution (10cm) |
 | `--output-copc-res1` | True | Write first-resolution subsampled outputs as COPC LAZ (`*.copc.laz`) |
@@ -849,23 +846,22 @@ neighbors; unrelated or already-updated layouts are not recovered this way.
 | `--merged-resolutions` | res1,res2 | Product resolutions after strict original validation |
 | `--merged-output-formats` | copc.laz | Final product formats |
 
-### Understanding `--workers` and `--num-spatial-chunks`
+### Understanding `--workers`
 
-These parameters control different aspects of parallelism:
-
-#### `--workers` (Global Parallelism)
-
-Controls output concurrency for tiling, native queries for merge/filter, and batch processes for final remap:
+`--workers` is the one CPU setting for every task. It defaults to the allocated
+CPUs (`GALAXY_SLOTS`, CPU affinity and cgroup quota, not the host's core count),
+and larger requests are capped to them.
 
 | Task | What `--workers` Controls |
 |------|---------------------------|
-| **Tile Task** | Default for `--tile-writer-workers`: tile outputs assembled or converted to COPC in parallel. The single read itself uses `--num-spatial-chunks` |
+| **Tile Task** | Processes for the single read and the block reduction. At most two tile outputs are assembled or converted to COPC at once, because Untwine runs its own thread pools |
 | **Merge Task, dense 10 cm -> 1 cm transfer** | Tiles in separate processes (largest first); each tile answers its nearest-prediction queries in processes proportional to its share of 1 cm points, so a single or dominant tile still uses all workers. Results join the shared index in tile order |
 | **Merge / Filter Tasks, later stages** | Parallel KDTree queries within each bounded batch; model/tile order and index writes remain serial |
 | **Remap Task** | Independent query batches in worker processes, each with read-only index connections and one query thread; ordered output writer |
+| **Create Merged File Task** | Number of bounded COPC product chunks, processed with up to `--workers` processes |
 
-For example, `--workers 4` requests up to four query threads for merge/filter or
-four processes for final remap.
+For example, `--workers 4` requests four read/reduce processes for tiling, up to
+four query threads for merge/filter, or four processes for final remap.
 
 The dense transfer is process-parallel because its per-cell nearest search is
 Python and holds the GIL, so query threads alone left it on one core
@@ -890,30 +886,11 @@ Inputs with only one full batch remain serial; larger inputs require at least
 one full batch per process. `parallelism.enrichment_processes` records the actual
 process budget, and `timings` separates indexing from enrichment.
 Index construction and LAS/LAZ I/O remain serial, so total speedup depends on how
-much time the dataset spends querying. `--num-spatial-chunks` does not change
-this final-remap process budget.
+much time the dataset spends querying.
 
-#### `--num-spatial-chunks` (Subsampling Parallelism)
+The spatial-query cache budget is split across the parent and one process per
+allocated CPU, so it never assumes fewer processes than run.
 
-Controls per-file or per-product spatial chunking:
-
-- The tile task uses `--num-spatial-chunks` processes for the single read and the block reduction. The default is the allocated CPUs (`GALAXY_SLOTS`, CPU affinity, cgroup quota), not the host's core count
-- `create_merged_file` uses `--num-spatial-chunks` for bounded COPC product reads before final COPC/LAZ/PLY writing
-- Remap uses `--num-spatial-chunks` as the number of native COPC spatial-query windows when original files are COPC
-- Remap uses `--num-spatial-chunks` as the maximum number of concurrent raw LAZ/LAS original chunks when only one original file is being enriched
-- Subsampling chunks/windows are processed in parallel using `ProcessPoolExecutor`
-- Product chunks are currently processed sequentially to keep memory and disk pressure predictable
-
-```
-Example with --num-spatial-chunks=5:
-  tile.laz → [chunk/window 0..4] → parallel subsample → merge
-  original_with_predictions/*.copc.laz → [bounds 0..4] → product chunks → prod_merged_*.copc.laz
-  original.laz → [chunk 0..4] → parallel prediction remap → original_with_predictions/original.laz
-```
-
-**Memory and disk impact**: Higher values increase subsampling worker concurrency and reduce per-product read windows. Tune down if memory or storage I/O becomes the bottleneck; tune up when bounded product chunks are still too large.
-
-If not specified, this defaults to `--workers`.
 
 
 
@@ -1025,8 +1002,7 @@ python src/run.py --task tile \
     --output-dir /data/output \
     --tile-length 500 \
     --tile-buffer 30 \
-    --workers 4 \
-    --num-spatial-chunks 10
+    --workers 10
 ```
 
 ### High-Precision Processing
@@ -1054,7 +1030,6 @@ python src/run.py --task tile \
     --tile-length 100 \
     --tile-buffer 10 \
     --workers 2 \
-    --num-spatial-chunks 2 \
     --resolution-1 0.02 \
     --resolution-2 0.15
 ```
@@ -1126,14 +1101,13 @@ wrapper uses the same `run.py` task surface inside
 #### "Memory allocation failed"
 - Reduce `--tile-length` for smaller tiles
 - Decrease `--workers` to limit concurrent memory usage
-- Decrease `--num-spatial-chunks` to limit per-file subsampling workers
 - Use `--resolution-1` and `--resolution-2` with larger values
 
 #### "No space left on device" during `create_merged_file`
 - Use an output directory on local scratch storage, not network storage
 - Increase free scratch space; direct untwine COPC finalization can temporarily need many times the final COPC size
 - Reduce simultaneous jobs writing to the same disk
-- Keep `--num-spatial-chunks` enabled so SmartTile avoids one giant temporary merged LAZ
+- Keep `--workers` above 1 so SmartTile writes bounded product chunks instead of one giant temporary merged LAZ
 
 #### "Unsupported input CRS for tiling" or "Input files use N different CRSs"
 - Reproject every file to one projected CRS in metres (e.g., the local UTM zone) and upload again
@@ -1163,13 +1137,13 @@ cat output_dir/logs/c00_r00_convert.log
 #### Optimize for SSD
 ```bash
 # Use more workers when I/O is fast
-python src/run.py --task tile --workers 4 --num-spatial-chunks 16 ...
+python src/run.py --task tile --workers 16 ...
 ```
 
 #### Optimize for HDD
 ```bash
 # Reduce parallel I/O
-python src/run.py --task tile --workers 2 --num-spatial-chunks 2 ...
+python src/run.py --task tile --workers 2 ...
 ```
 
 #### Monitor resource usage
