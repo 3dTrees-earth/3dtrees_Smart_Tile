@@ -304,3 +304,28 @@ def test_tile_output_selector_parses_pairs_and_rejects_bad_ones():
     for bad in ("0.25", "0.25:las", "-1:laz", "x:laz", "0.25:laz,0.25:laz", "0.25:laz,0.25:ply"):
         with pytest.raises(ValueError):
             parse_tile_outputs(bad)
+
+
+def test_tiles_use_the_finest_source_scale(tmp_path):
+    import run
+    from parameters import Parameters
+    inputs = tmp_path / "in"
+    inputs.mkdir()
+    rng = np.random.default_rng(3)
+    for name, scale in (("coarse.las", 0.01), ("fine.las", 0.0001)):
+        header = laspy.LasHeader(point_format=3, version="1.4")
+        header.scales, header.offsets = np.full(3, scale), np.zeros(3)
+        las = laspy.LasData(header)
+        xyz = np.c_[rng.uniform(0, 20, 500), rng.uniform(0, 20, 500), rng.uniform(0, 3, 500)]
+        las.x, las.y, las.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+        las.write(inputs / name)
+    fine = laspy.read(inputs / "fine.las")
+    params = Parameters(task="tile", input_dir=inputs, output_dir=tmp_path / "out", tile_length=50,
+                        tile_buffer=5, tile_outputs="0.0001:laz", workers=2, _cli_parse_args=False)
+    run.run_tile_task(params)
+    (output,) = (tmp_path / "out/subsampled_res1").glob("*.laz")
+    tile = laspy.read(output)
+    assert np.allclose(tile.header.scales, 0.0001)
+    # Every fine-source point survives unchanged at a 0.1 mm voxel size.
+    got = {tuple(np.round(p, 4)) for p in np.c_[tile.x, tile.y, tile.z]}
+    assert {tuple(np.round(p, 4)) for p in np.c_[fine.x, fine.y, fine.z]} <= got

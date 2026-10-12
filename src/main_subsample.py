@@ -650,10 +650,18 @@ def subsample_simple(
         return (input_file.name, False, str(e), 0)
 
 
+def resolution_label(resolution: float) -> str:
+    """Rounded resolution label: whole centimetres ("29cm"), else millimetres ("5mm")."""
+    centimetres = resolution * 100
+    if abs(centimetres - round(centimetres)) < 1e-6 and round(centimetres) >= 1:
+        return f"{round(centimetres)}cm"
+    return f"{round(resolution * 1000)}mm"
+
+
 def subsample_output_name(input_file: Path, resolution: float, output_prefix: Optional[str],
                           output_copc: bool) -> str:
     """Output file name for one subsampled input, shared by every subsampling path."""
-    res_cm = int(resolution * 100)
+    res_label = resolution_label(resolution)
     output_ext = ".copc.laz" if output_copc else ".laz"
     # Generate output filename
     stem = input_file.stem
@@ -667,7 +675,7 @@ def subsample_output_name(input_file: Path, resolution: float, output_prefix: Op
 
     # Remove resolution suffix patterns from previous subsampling stages.
     base_name = re.sub(r'_subsampled[\d.]+m$', '', base_name)
-    base_name = re.sub(r'_subsampled_\d+(?:\.\d+)?cm$', '', base_name)
+    base_name = re.sub(r'_subsampled_\d+(?:\.\d+)?(?:cm|mm)$', '', base_name)
     base_name = re.sub(r'_\d+cm$', '', base_name)
 
     # Remove output_prefix if present at the start (e.g., "output_dir_100m_")
@@ -690,16 +698,16 @@ def subsample_output_name(input_file: Path, resolution: float, output_prefix: Op
         if base_before_tile:
             base_before_tile = re.sub(r'^[^_]+_\d+m_', '', base_before_tile)
             if base_before_tile:
-                output_name = f"{base_before_tile}_{tile_id}_subsampled_{res_cm}cm{output_ext}"
+                output_name = f"{base_before_tile}_{tile_id}_subsampled_{res_label}{output_ext}"
             else:
-                output_name = f"{tile_id}_subsampled_{res_cm}cm{output_ext}"
+                output_name = f"{tile_id}_subsampled_{res_label}{output_ext}"
         else:
-            output_name = f"{tile_id}_subsampled_{res_cm}cm{output_ext}"
+            output_name = f"{tile_id}_subsampled_{res_label}{output_ext}"
     else:
         # Single file or no tile ID - use clean base name
         # Remove any remaining prefix patterns
         base_name = re.sub(r'^[^_]+_\d+m_', '', base_name)
-        output_name = f"{base_name}_subsampled_{res_cm}cm{output_ext}"
+        output_name = f"{base_name}_subsampled_{res_label}{output_ext}"
     return output_name
 
 

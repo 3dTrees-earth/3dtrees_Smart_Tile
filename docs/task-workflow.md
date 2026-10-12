@@ -94,7 +94,7 @@ and the real 488/94 conflict example.
 
 | Task | Required input | Processing | Main output |
 | --- | --- | --- | --- |
-| `tile` | Source point clouds | Spatial indexing, core/buffer layout, COPC tiling and two resolutions of subsampling. A single-cloud bypass records the actual single extent. | Buffered tiles, `subsampled_res1/`, `subsampled_res2/`, tile-bounds JSON. |
+| `tile` | Source point clouds | Spatial indexing, core/buffer layout, then one read of every source point that counts core occupancy and writes every subsampled resolution directly (no full-resolution tiles). A single-cloud bypass records the actual single extent. | `subsampled_res1/` … `subsampled_resN/` (one per `--tile-outputs` entry; default 1 cm COPC and 10 cm LAZ), tile-bounds JSON, job list, tindex, overview. |
 | `merge` | Prediction collection(s), matching dense targets unless already dense, and tile-bounds JSON. RCT also requires both tree tables per tile. | Dense transfer, ownership, recovery and model-specific processing shown above. Optional original enrichment. | Processed tiles, `instance_metadata.csv`, `smarttile_merge.json`, effective `tile_bounds.json`, sibling `*_unfiltered_1cm/`, `remap_first_report.json`; RCT `segmented_filtered/` tables; optional enriched originals. |
 | `filter` | One already-dense prediction collection and tile-bounds JSON; RCT tree tables where applicable. | Same ownership, recovery and model-specific processing, without a coarse prediction transfer. | Processed tiles, baseline, manifest, report and RCT tables where applicable. |
 | `remap` | Processed prediction collection(s) and uploaded raw LAS/LAZ originals; unfiltered baseline geometry optional. | Coverage validation and bounded nearest-point attribute transfer to the original points. | One enriched file per original and an original-coverage report. |
@@ -102,7 +102,7 @@ and the real 488/94 conflict example.
 
 The baseline path and first-stage resolution are recorded in the merge manifest.
 Merge always checks baseline coverage. Remap checks it too when the manifest is
-preserved or `--baseline-1cm-folders` is given; otherwise it checks final
+preserved and its baseline folder still exists, or `--baseline-1cm-folders` is given; otherwise it checks final
 coverage only, which implies baseline coverage for merged predictions (they lie on
 the 1 cm geometry). The baseline only tells a tiling gap apart from a filtering gap.
 
@@ -139,8 +139,9 @@ metadata come from the uploaded raw originals.
 ## Implementation entry points
 
 - Task routing: [`src/run.py`](../src/run.py).
-- Tile preparation: [`src/main_tile.py`](../src/main_tile.py) and
-  [`src/main_subsample.py`](../src/main_subsample.py).
+- Tile preparation: [`src/main_tile.py`](../src/main_tile.py) (`plan_tiling`) and
+  [`src/tile_centroids.py`](../src/tile_centroids.py) (single read and subsampling);
+  [`src/main_subsample.py`](../src/main_subsample.py) supplies output names.
 - Merge, filter and original enrichment:
   [`src/remap_first_pipeline.py`](../src/remap_first_pipeline.py).
 - RCT recovery gate: [`src/raycloud_recovery.py`](../src/raycloud_recovery.py).

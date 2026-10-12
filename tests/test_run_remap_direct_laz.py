@@ -84,6 +84,18 @@ class RunRemapDirectLazTests(unittest.TestCase):
                 self.assertFalse((root / "out").exists())
                 create.assert_not_called()
 
+    def test_manifest_baseline_that_was_not_kept_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pred, originals, baseline = self.fixture(root)
+            (pred / "smarttile_merge.json").write_text(json.dumps(
+                {"baseline": "../missing_unfiltered_1cm", "resolution_1_m": 0.01}))
+            params = self.params(root, pred, originals, baseline)
+            params.baseline_1cm_folders = None
+            run.run_remap_task(params)
+            report = json.loads((root / "out_coverage.json").read_text())
+            self.assertEqual({m["stage"] for m in report["original_coverage"]}, {"final_survivors"})
+
     def test_without_baseline_only_final_coverage_is_checked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

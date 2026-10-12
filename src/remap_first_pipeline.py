@@ -598,8 +598,9 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
             if "resolution_1_m" in metadata:
                 recorded_resolutions.add(float(metadata["resolution_1_m"]))
             if baseline_collections is None:
-                inferred_baselines.append((Path(collection) / metadata["baseline"]).resolve()
-                                          if "baseline" in metadata else None)
+                # An inferred baseline is only a diagnosis: skip it when it was not kept.
+                baseline = (Path(collection) / metadata["baseline"]).resolve() if "baseline" in metadata else None
+                inferred_baselines.append(baseline if baseline is not None and baseline.is_dir() else None)
         if len(recorded_resolutions) > 1:
             raise ValueError("Prediction collections declare conflicting first-stage resolutions")
         if resolution_1 is None:

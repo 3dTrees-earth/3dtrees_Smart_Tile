@@ -2,19 +2,19 @@
 \noindent
 \begin{tabular}{@{}p{0.28\linewidth}p{0.68\linewidth}@{}}
 \textbf{Main developers} & Kilian Gerberding \\
-\textbf{Current version} & v1.0.0 \\
+\textbf{Current version} & v2.4.0 \\
 \textbf{Galaxy tool ID}  & \texttt{3dtrees\_smart\_tile} \\
 \textbf{Access on Galaxy} & \url{https://...} \\
 \textbf{GitHub repository} & \url{https://github.com/3dTrees-earth/3dtrees} (tools/tool\_smart\_tile) \\
 \textbf{Scope} &
-Subsampling, tiling, and merging of point clouds for the 3DTrees segmentation pipeline. \textbf{Tile} task: converts LAZ/LAS to COPC, builds a spatial index, computes overlapping tile bounds, creates tiles, and subsamples each tile at two resolutions (e.g.\ 1\,cm and 10\,cm) for segmentation and downstream use. \textbf{Merge} task: remaps predictions from coarser (e.g.\ 10\,cm segmented) to target resolution (e.g.\ 1\,cm), merges overlapping tiles with cross-tile instance matching, and optionally remaps to original input resolution. Implemented in Python (laspy, PDAL/untwine subprocesses, scipy cKDTree). \\
+Subsampling, tiling, and merging of point clouds for the 3DTrees segmentation pipeline. \textbf{Tile} task: builds a spatial index, computes overlapping tile bounds, and reads every source point once to write each tile directly at every requested resolution (default 1\,cm COPC and 10\,cm LAZ); no full-resolution tiles are written. \textbf{Merge} task: transfers predictions from coarser (e.g.\ 10\,cm segmented) to the 1\,cm tiles, filters whole instances by core ownership, reconciles instance IDs across overlapping tiles, deduplicates buffer points, and optionally enriches the uploaded originals. \textbf{Remap} enriches uploaded originals from processed prediction collections; \textbf{create\_merged\_file} builds prod-merged products from them. Implemented in Python (laspy, PDAL/untwine subprocesses, scipy cKDTree, disk-backed SQLite spatial index). \\
 
 \end{tabular}
 
 
 \noindent\textbf{Run order} \\
-\textbf{Tile task.} \texttt{run.py} loads \texttt{parameters.py} (Pydantic), then calls \texttt{run\_tile\_task}. \texttt{main\_tile.run\_tiling\_pipeline} converts input LAZ/LAS to COPC via \texttt{untwine} with \texttt{--dims Classification}, validates that no extra byte dimensions remain, and falls back to PDAL standard-dimension COPC output when needed. It then builds a tindex with PDAL, computes tile bounds via \texttt{prepare\_tile\_jobs} and \texttt{get\_bounds\_from\_tindex} (tile length and buffer). If a single file is below \texttt{tiling\_threshold} (MB), tiling is skipped and the COPC is used as a single ``tile''. \texttt{plot\_tiles\_and\_copc} writes \texttt{overview\_copc\_tiles.png}. Tiles are created with PDAL. \texttt{main\_subsample.run\_subsample\_pipeline} subsamples each tile to resolution 1 and resolution 2 (PDAL subprocess per tile), writing to \texttt{subsampled\_res1} and \texttt{subsampled\_res2}. \\
-\textbf{Merge task.} \texttt{run.py} calls \texttt{run\_merge\_task}. If \texttt{--subsampled-segmented-folder} is provided, segmented predictions are first filtered with \texttt{filter\_buffer\_instances.filter\_buffer\_instances\_dir}. \texttt{main\_remap.remap\_all\_tiles} then transfers those filtered prediction attributes to the target-resolution subsampled files. Finally \texttt{main\_merge.run\_merge} invokes \texttt{merge\_tiles.merge\_tiles}: assign global instance IDs, perform cross-tile instance matching (overlap and centroid criteria), merge and deduplicate, apply small-volume instance merging, and retile to original tile layout. If uploaded originals are provided, \texttt{prediction\_collection\_remap.remap\_prediction\_collections\_to\_original\_files} writes Original-with-predictions from the post-merge 1 cm per-tile outputs. Per-tile LAZ is always written; the single processed merged LAZ can be skipped. \\
+\textbf{Tile task.} \texttt{run.py} loads \texttt{parameters.py} (Pydantic), then calls \texttt{run\_tile\_task}. \texttt{main\_tile.plan\_tiling} rejects non-metric or mixed CRSs, builds a tindex with PDAL and computes tile bounds and the job list (\texttt{get\_bounds\_from\_tindex}, \texttt{prepare\_tile\_jobs}; tile length and buffer). If a single file is below \texttt{tiling\_threshold} (MB), it is planned as one whole-cloud tile without buffer. \texttt{tile\_centroids.subsample\_tiles\_single\_scan} then reads every source point once in parallel point ranges, counts tile-core occupancy in the same read (tiles with empty cores are dropped), spills each point to XY blocks of every buffered tile it falls in, and reduces the blocks in parallel to every resolution (voxel center of mass, or the original point nearest it with nearest-to-centroid). Outputs are written to \texttt{subsampled\_res1}, \texttt{subsampled\_res2}, \ldots\ (COPC via \texttt{untwine} with PDAL fallback, LAZ or PLY). \texttt{plot\_tiles\_and\_copc} writes \texttt{overview\_copc\_tiles.png}. \\
+\textbf{Merge task.} \texttt{run.py} calls \texttt{run\_merge\_task}, which requires \texttt{--tile-bounds-json} and runs \texttt{remap\_first\_pipeline.merge\_collections}: each model's coarse predictions are transferred to its 1\,cm tiles (\texttt{merge\_stages}), whole instances outside the owning core are removed (\texttt{dense\_instance\_ownership}), rejected instances supplying unsupported core geometry are recovered (\texttt{orphan\_instance\_recovery}), retained IDs are reconciled across declared overlaps, shared points are assigned to the nearest claimant core and label-consistent duplicates are removed. RayCloudTools predictions with tree tables keep whole-tree membership with tile-prefixed IDs instead. If uploaded originals are provided, \texttt{enrich\_originals} writes Original-with-predictions from the final 1\,cm tiles after original coverage validation. Per-tile LAZ is always written; the single processed merged LAZ can be skipped. The \textbf{remap} task (\texttt{strict\_remap}) performs the same enrichment from finished prediction collections. \\
 
 
 \begingroup
@@ -44,28 +44,32 @@ Tiling preview image \texttt{overview\_copc\_tiles.png} showing COPC extents and
 
 \noindent\textbf{Parameters}
 \begin{longtable}{@{}p{0.28\linewidth}p{0.68\linewidth}@{}}
+\textbf{\texttt{--task}} &
+\texttt{tile} for this pipeline. \\
 \textbf{\texttt{--input-dir}} &
 Directory containing input LAZ/LAS files (Galaxy: \texttt{input\_dir}). \\
 \textbf{\texttt{--output-dir}} &
-Directory for tiles and subsampled outputs (default: \texttt{output\_dir}). \\
-\textbf{\texttt{--task}} &
-\texttt{tile} for this pipeline. \\
+Directory for subsampled outputs, tile layout and overview (Galaxy: \texttt{output\_dir}). \\
 \textbf{\texttt{--tile-length}} &
-Tile size in meters (default: \texttt{300}). \\
+Tile size in meters (default: \texttt{100}). \\
 \textbf{\texttt{--tile-buffer}} &
 Overlap between tiles in meters (default: \texttt{20}). \\
+\textbf{\texttt{--grid-origin-x}} / \textbf{\texttt{--grid-origin-y}} &
+Optional south-west corner of the tile grid; both or neither (default: data extent). \\
 \textbf{\texttt{--tiling-threshold}} &
 Optional. If a single file is below this size in MB, tiling is skipped. \\
+\textbf{\texttt{--tile-outputs}} &
+Optional. All subsampled outputs in order as \texttt{resolution:format} pairs (\texttt{laz}, \texttt{copc.laz}, \texttt{ply}), written to \texttt{subsampled\_res1}, \texttt{subsampled\_res2}, \ldots; replaces the next four parameters. \\
 \textbf{\texttt{--resolution-1}} &
 First subsampling resolution in meters (default: \texttt{0.01}). \\
 \textbf{\texttt{--resolution-2}} &
 Second subsampling resolution in meters (default: \texttt{0.1}). \\
+\textbf{\texttt{--output-copc-res1}} / \textbf{\texttt{--output-copc-res2}} &
+Write the first / second resolution as COPC LAZ (defaults: \texttt{True} / \texttt{False}). \\
+\textbf{\texttt{--subsampling-method}} &
+\texttt{center-of-mass} (default) or \texttt{nearest-to-centroid}. \\
 \textbf{\texttt{--workers}} &
-Number of parallel workers (Galaxy may pass \texttt{\${GALAXY\_SLOTS:-4}}). \\
-\textbf{\texttt{--num-spatial-chunks}} &
-Spatial chunks for subsampling, bounded prod-merged creation, COPC remap windows, and single-file raw-original remap chunk workers (default: workers). \\
-\textbf{\texttt{--threads}} &
-Threads per COPC writer (Galaxy: \texttt{\${GALAXY\_SLOTS:-4}}). \\
+CPUs to use in every task (default: the allocated CPUs from \texttt{GALAXY\_SLOTS}, CPU affinity and cgroup quota; larger values are capped to them). \\
 \end{longtable}
 
 \paragraph{Interface specifications — Merge}
@@ -92,44 +96,58 @@ Single merged LAZ file \texttt{merged.laz}. \\
 \noindent\textbf{Parameters}
 \begin{longtable}{@{}p{0.28\linewidth}p{0.68\linewidth}@{}}
 \textbf{\texttt{--subsampled-segmented-folder}} &
-Folder with segmented (e.g.\ 10\,cm) LAZ files; Galaxy: \texttt{input\_segmented} copied to \texttt{input\_segmented/}. \\
+Folder with segmented (e.g.\ 10\,cm) LAZ files (alias \texttt{--subsampled-10cm-folder}); Galaxy: \texttt{input\_segmented} copied to \texttt{input\_segmented/}. \\
 \textbf{\texttt{--subsampled-target-folder}} &
-Folder with target-resolution LAZ for remap; Galaxy: \texttt{input\_res1} copied to \texttt{input\_res1/}. \\
+Folder with the 1\,cm target LAZ/COPC tiles; Galaxy: \texttt{input\_res1} copied to \texttt{input\_res1/} (default: \texttt{subsampled\_res1} beside the segmented folder). \\
+\textbf{\texttt{--segmented-folders}} &
+Comma-separated prediction collections, one per model (merge or final remap). Prediction extra dimensions are copied as named by the producing model; duplicate dimension names across collections fail instead of being auto-suffixed. \\
+\textbf{\texttt{--segmented-remapped-folder}} &
+Predictions already on the dense geometry; skips the coarse-to-dense transfer. \\
+\textbf{\texttt{--tile-bounds-json}} &
+Required. \texttt{tile\_bounds\_tindex.json} from the tile task (declared cores and buffers). \\
 \textbf{\texttt{--original-laz-input-dir}} &
-Optional. Directory of uploaded original LAZ/LAS files for final remap; Galaxy: \texttt{input\_original\_laz}. Legacy \texttt{--original-input-dir} is still accepted as the same raw-LAZ lane. \\
+Optional. Directory of uploaded original LAZ/LAS files to enrich; Galaxy: \texttt{input\_original\_laz}. Legacy \texttt{--original-input-dir} is still accepted as the same raw-LAZ lane. \\
 \textbf{\texttt{--original-copc-input-dir}} &
 Optional directory of matching original COPC LAZ files for validation/source matching; Galaxy: \texttt{input\_original\_copc}. \\
-\textbf{\texttt{--segmented-folders}} &
-For final multi-collection remap, comma-separated finalized prediction collections. Prediction extra dimensions are copied as named by the producing model; duplicate dimension names across collections fail instead of being auto-suffixed. \\
-\textbf{\texttt{--remap-dims}} &
-Optional comma-separated allowlist of prediction extra dimensions to transfer during multi-collection remap. If omitted, all prediction extra dimensions are transferred. \\
-\textbf{\texttt{--chunk-size}} &
-Points per streaming chunk for tiling Phase 1 and multi-collection remap. Larger values reduce repeated prediction-window scans but increase peak memory; one large tiling source is split into point-range workers and each worker uses a reduced chunk size to keep peak memory bounded. Single-file raw-original remap may process several chunks concurrently up to \texttt{--num-spatial-chunks}. \\
-\textbf{\texttt{--merged-resolutions}} / \textbf{\texttt{--merged-output-formats}} &
-Optional prod-merged products from Original-with-predictions files. Use \texttt{--produce-merged-file} or \texttt{--no-produce-merged-file} to control creation in the remap task. COPC output preserves CRS and extra dimensions as far as LAS/COPC allows, but final direct \texttt{untwine} creation needs local scratch space for temporary hierarchy/output staging and is not guaranteed bit-for-bit point-count reproducible across chunking/tool versions. \\
-\textbf{\texttt{--staged-copc-dir}} &
-Optional directory with already converted Original-with-predictions COPCs. Matching readable COPCs are reused instead of restaging raw LAZ/LAS inputs. \\
+\textbf{\texttt{--original-laz-output-dir}} &
+Output directory for enriched originals (default: \texttt{original\_with\_predictions} in the merge work root). \\
+\textbf{\texttt{--output-folder}} &
+Merge work root (default: parent of \texttt{--output-tiles-folder}, else of \texttt{--output-merged-laz}, else of the segmented folder). \\
 \textbf{\texttt{--output-tiles-folder}} &
-Output folder for per-tile results (default: \texttt{output\_dir/output\_tiles}). \\
-\textbf{\texttt{--buffer}} &
-Buffer distance in meters for filtering (default: \texttt{30.0}). \\
+Output folder for processed tiles (default: \texttt{output\_tiles} in the work root); the unfiltered baseline is written beside it as \texttt{output\_tiles\_unfiltered\_1cm}. \\
+\textbf{\texttt{--output-merged-laz}} / \textbf{\texttt{--skip-merged-file}} &
+Path of the processed intermediate merged LAZ (default: \texttt{merged.laz} in the work root, single collection only), or skip it (required for multiple collections and RayCloudTools). \\
+\textbf{\texttt{--instance-dimension}} &
+Instance ID dimension (default: \texttt{PredInstance}, fallback \texttt{treeID}). \\
+\textbf{\texttt{--prediction-transfer-tolerance}} &
+Maximum XYZ distance in meters from each 1\,cm point to its tile's coarse prediction; 100\,\% assignment required (default: \texttt{0.1732}). \\
+\textbf{\texttt{--filter-anchor}} &
+Instance ownership anchor: \texttt{centroid} (default), \texttt{highest\_point} or \texttt{lowest\_point}. \\
 \textbf{\texttt{--overlap-threshold}} &
 Overlap ratio threshold for instance matching, 0--1 (default: \texttt{0.3}). \\
-\textbf{\texttt{--max-centroid-distance}} &
-Max centroid distance in meters to merge instances (default: \texttt{3.0}). \\
-\textbf{\texttt{--correspondence-tolerance}} &
-Max distance for point correspondence in meters (default: \texttt{0.05}). \\
+\textbf{\texttt{--disable-matching}} &
+If set, disable cross-tile instance matching. \\
 \textbf{\texttt{--reassign-small-instances}} &
 If set, give small instances the ID of the nearest remaining instance by XY centroid (within 5~m) after deduplication; not for RayCloudTools. \\
 \textbf{\texttt{--max-cluster-size}} &
 Instances with fewer points are checked for reassignment (default: \texttt{3000}). \\
 \textbf{\texttt{--max-volume-for-merge}} &
 Max axis-aligned bounding-box volume in m$^3$ of a small instance (default: \texttt{4.0}). \\
-\textbf{\texttt{--border-zone-width}} &
-Width of border zone in meters for instance matching (default: \texttt{10.0}). \\
-\textbf{\texttt{--disable-matching}} &
-If set, disable cross-tile instance matching. \\
+\textbf{\texttt{--remap-tolerance}} &
+Optional final original coverage radius in meters (default: $\sqrt{3}\times$ \texttt{--resolution-1}, 17.32\,mm for 1\,cm). \\
+\textbf{\texttt{--remap-dims}} &
+Optional comma-separated allowlist of prediction extra dimensions to transfer to the originals. If omitted, all prediction extra dimensions are transferred. \\
+\textbf{\texttt{--baseline-1cm-folders}} &
+Remap only. Optional unfiltered 1\,cm baseline (one shared folder or one per model) for a separate baseline coverage check. \\
+\textbf{\texttt{--produce-merged-file}} &
+Create prod-merged products from the enriched originals after merge/remap (alias \texttt{--transfer-original-dims-to-merged}; \texttt{--no-produce-merged-file} disables; default: off). \\
+\textbf{\texttt{--merged-resolutions}} / \textbf{\texttt{--merged-output-formats}} &
+Prod-merged product resolutions (default: \texttt{res1,res2}) and formats (default: \texttt{copc.laz}). COPC output preserves CRS and extra dimensions as far as LAS/COPC allows, but final direct \texttt{untwine} creation needs local scratch space for temporary hierarchy/output staging and is not guaranteed bit-for-bit point-count reproducible across chunking/tool versions. \\
+\textbf{\texttt{--staged-copc-dir}} &
+Optional directory with already converted Original-with-predictions COPCs. Matching readable COPCs are reused instead of restaging raw LAZ/LAS inputs. \\
+\textbf{\texttt{--standardization-json}} &
+Optional tool\_standard \texttt{collection\_summary.json}; validates that the expected standardized source dimensions survive into staged COPCs and LAS/COPC products. \\
 \textbf{\texttt{--workers}} &
-Number of workers (Galaxy uses \texttt{2} for merge). \\
+CPUs to use (default: the allocated CPUs; larger values are capped to them). \\
 \end{longtable}
 \endgroup

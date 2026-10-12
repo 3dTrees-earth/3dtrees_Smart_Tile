@@ -6,7 +6,8 @@ and parameter validation.
 
 Usage:
     python run.py --task tile --input-dir /path/to/input --output-dir /path/to/output
-    python run.py --task merge --subsampled-10cm-folder /path/to/10cm --original-input-dir /path/to/input
+    python run.py --task merge --subsampled-10cm-folder /path/to/10cm --subsampled-target-folder /path/to/1cm \
+        --tile-bounds-json /path/to/tile_bounds_tindex.json --output-folder /path/to/merge
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -91,7 +92,7 @@ class Parameters(BaseSettings):
 
     resolution_2: Optional[float] = Field(
         0.1,
-        description="Second subsampling resolution in meters (10cm) (only for 'tile' task)",
+        description="Second resolution in meters (default 10cm): legacy tile output 2 when --tile-outputs is not given; also the res2 label of --merged-resolutions",
         validation_alias=AliasChoices("resolution-2", "resolution_2"),
     )
 
@@ -137,7 +138,7 @@ class Parameters(BaseSettings):
 
     tiling_threshold: Optional[float] = Field(
         default=None,
-        description="File size threshold in MB. If input folder has single file below this size, skip tiling (only for 'tile' task)",
+        description="File size threshold in MB: a single input below it becomes one whole-cloud tile without buffer (only for 'tile' task)",
         validation_alias=AliasChoices("tiling-threshold", "tiling_threshold"),
     )
 
@@ -165,13 +166,13 @@ class Parameters(BaseSettings):
 
     original_tiles_dir: Optional[Path] = Field(
         default=None,
-        description="Directory with original tile files for retiling (for 'merge' task)",
+        description="Alias for --subsampled-target-folder: the high-resolution tiles for merge",
         validation_alias=AliasChoices("original-tiles-dir", "original_tiles_dir"),
     )
 
     tile_bounds_json: Optional[Path] = Field(
         default=None,
-        description="Path to tile_bounds_tindex.json for neighbor graph and remap matching (merge task). If set, used instead of auto-derived paths.",
+        description="Required for merge and filter: tile_bounds_tindex.json from the same tile run (tile cores and buffers)",
         validation_alias=AliasChoices("tile-bounds-json", "tile_bounds_json"),
     )
 
@@ -245,7 +246,7 @@ class Parameters(BaseSettings):
 
     output_folder: Optional[Path] = Field(
         default=None,
-        description="Output folder for remapped files (auto-derived if not specified)",
+        description="Merge/filter work root for output_tiles and the report (default: next to the first input collection)",
         validation_alias=AliasChoices("output-folder", "output_folder"),
     )
 
@@ -392,7 +393,7 @@ class Parameters(BaseSettings):
 
     skip_merged_file: bool = Field(
         False,
-        description="Skip creating merged LAZ file (only create retiled outputs)",
+        description="Skip the single merged LAZ of all processed tiles (use for RCT or several models)",
         validation_alias=AliasChoices("skip-merged-file", "skip_merged_file"),
     )
 

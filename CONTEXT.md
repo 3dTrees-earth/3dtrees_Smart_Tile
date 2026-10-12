@@ -69,12 +69,16 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
   in the coverage report. Other sampling gaps, conflicts and missing predictions
   still fail before publication; the earlier 99% fallback is not used.
 - Preserve unfiltered dense geometry and its manifest for the separate final
-  remap task; Galaxy wrappers must carry the baseline collection explicitly if
-  they do not preserve the manifest. See the README for flags and diagnostics.
-- `--workers` controls native spatial-query threads in strict merge/filter,
+  remap task. The baseline check in remap is an optional diagnosis: the Galaxy
+  remap no longer passes a baseline collection and checks final coverage only,
+  and a manifest-inferred baseline folder that no longer exists is skipped.
+  See the README for flags and diagnostics.
+- `--workers` sets the merge/filter worker processes: per-tile processes for
+  dense transfer, core filtering, reconciliation and shared-point ownership,
+  plus query processes within tiles (dense transfer, recovery, deduplication),
   bounded by scheduler slots, affinity and detected cgroup CPU quotas. Small
   queries stay serial; index writes and model/tile ordering stay deterministic.
-  Record the requested and effective query budget in `parallelism`.
+  Record the requested and effective budget in `parallelism`.
 - Standalone strict remap and original enrichment during merge/filter share
   CPU-capped batch processes after serial indexing.
   Each process opens completed indexes read-only and uses one query thread.
@@ -163,9 +167,11 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 
 ## Task Modes
 
-- `tile`: converts uploaded LAZ/LAS/COPC inputs into spatial COPC tiles, then
-  creates subsampled products. The default first resolution is 1cm COPC LAZ; the
-  default second resolution is 10cm regular LAZ.
+- `tile`: indexes uploaded LAZ/LAS/COPC inputs, plans buffered tiles and reads
+  every source point once to write the subsampled tiles directly
+  (`subsampled_res1..N` from `--tile-outputs`); no full-resolution tiles are
+  written. Without `--tile-outputs` the first output is 1cm COPC LAZ and the
+  second 10cm regular LAZ.
 - `merge`: transfers predictions to dense 1 cm tiles before reconciling IDs and
   deduplicating label-consistent cross-tile points; can strictly enrich originals.
 - `filter`: runs the same reconciliation/deduplication on already-dense tiles.
@@ -212,10 +218,10 @@ product.
   is configured, then enrich the uploaded LAZ/LAS originals directly from the
   prediction collections. The COPC lane must not produce an intermediate
   COPC-enriched original.
-- For merged-COPC-to-original remap, stream uploaded LAZ/LAS originals in chunks
-  and query the merged COPC by each chunk's spatial bounds before building a
-  local KDTree. Do not load a full uploaded original or full merged COPC when a
-  bounded spatial query can produce the same enriched original output.
+- For remap, index every prediction collection (LAS/LAZ/COPC, including a
+  merged file) sequentially into a disk-backed `PointIndex`, then stream the
+  uploaded LAZ/LAS originals in bounded batches against it. No COPC spatial
+  queries are used, and no full original or prediction cloud is loaded at once.
 - Create prod-merged `copc.laz`, `laz`, and `ply` outputs from the enriched LAZ
   originals rather than from COPC-original processing outputs.
 - COPC output must preserve CRS metadata, including GeoTIFF/GeoKeyDirectory and
@@ -243,11 +249,13 @@ product.
 
 ## Tiling process safety
 
-- Core occupancy decodes compressed sources in the parent before tile creation.
-  Both source distribution and COPC finalization must use explicit `spawn`
-  process contexts: Linux `fork` inherits lazrs/Rayon locks without their threads
-  and can deadlock on the first worker read. Keep the compressed multi-chunk
-  occupancy-to-COPC regression; uncompressed or single-chunk fixtures miss this.
+- The single-read tile path decodes a compressed XY sample in the parent before
+  its read/reduce workers start, and counts core occupancy in the workers' read.
+  Every SmartTile process pool must use an explicit `spawn` context: Linux `fork`
+  inherits lazrs/Rayon locks without their threads and can deadlock on the first
+  worker read. Keep the compressed multi-chunk regression
+  (`tests/test_tiling_process_start.py`, which exercises the older pre-scan
+  occupancy-to-COPC path); uncompressed or single-chunk fixtures miss this.
 
 ## Subsampling Contract
 
@@ -255,8 +263,10 @@ product.
   each populated voxel.
 - Non-coordinate attributes must not be averaged. When attributes need to remain
   on subsampled points, copy them from a real nearest source point.
-- `nearest-to-centroid` preserves the previous PDAL voxel nearest-neighbor
-  behavior.
+- `nearest-to-centroid` in the tile task keeps the original point nearest each
+  voxel's exact mean, on the same single read and fixed voxel grid as center of
+  mass. PDAL `filters.voxelcentroidnearestneighbor` is used only for
+  `create_merged_file` products.
 - The tile task reads each source point once for both subsampling methods (`tile_centroids`):
   no full-resolution tiles, occupancy counted in the same read, exact integer
   voxel means rounded half-to-even once. Every resolution comes from original
@@ -280,10 +290,12 @@ aligned with `src/run.py` and the strict pipeline when task behavior changes.
 
 - `src/run.py`: CLI entry point and task routing; `src/parameters.py`: settings.
 - `src/main_tile.py`, `src/tile_*.py` (`tile_crs`, `tile_tindex`, `tile_copc`,
-  `tile_spatial`, `tile_bounds_graph`, `tile_core_occupancy`,
-  `tile_file_matching`): tile task and tile geometry/matching helpers.
-- `src/main_subsample.py`, `src/subsample_*.py`: subsampling; `src/tile_centroids.py`:
-  single-read center-of-mass tiles; `src/original_blocks.py`: block-ordered enrichment input.
+  `tile_bounds_graph`, `tile_core_occupancy`, `tile_file_matching`): tile
+  planning (`plan_tiling`), occupancy publication and tile geometry/matching helpers.
+- `src/tile_centroids.py`: the tile task's single read for both subsampling
+  methods; `src/main_subsample.py`: output names/labels and bounds helpers (its
+  older pipeline is not called by `run.py`); `src/subsample_*.py`: COM headers,
+  COPC output conversion; `src/original_blocks.py`: block-ordered enrichment input.
 - `src/remap_first_pipeline.py`: merge/filter/remap orchestration and original
   enrichment; stages in `src/merge_stages.py` (dense transfer, reconciliation,
   deduplication), `src/dense_instance_ownership.py` (core filter, shared-point
@@ -291,8 +303,9 @@ aligned with `src/run.py` and the strict pipeline when task behavior changes.
 - `src/parallel_tiles.py`, `src/parallel_index_queries.py`,
   `src/parallel_remap.py`: worker processes; results always in tile/input order.
 - `src/raycloud_*.py`, `src/instance_finalization.py`: RCT and final IDs.
-- `src/prediction_collection_remap.py`, `src/dimension_transfer.py`: collection
-  discovery, streaming onto originals, dimension transfer.
+- `src/prediction_collections.py`: collection discovery and dimension schemas;
+  enrichment itself is `remap_first_pipeline.enrich_originals` with
+  `src/parallel_remap.py`.
 - `src/main_create_merged_file.py`: prod-merged product creation.
 - `src/copc_*.py`, `src/crs_records.py`, `src/ply_crs.py`,
   `src/point_cloud_metadata.py`: metadata, CRS records and COPC staging.
@@ -327,7 +340,7 @@ Fast local validation:
 /home/kg281/anaconda3/bin/python -m py_compile src/*.py
 /home/kg281/anaconda3/bin/python -m pytest
 git diff --check
-docker run --rm ghcr.io/3dtrees-earth/3dtrees_smart_tile:v2.2 python /src/run.py --show-params
+docker run --rm ghcr.io/3dtrees-earth/3dtrees_smart_tile:2.4.0 python -u /src/run.py --show-params
 ```
 
 Important test areas:
@@ -340,8 +353,8 @@ Important test areas:
 - one-pass multi-collection remap behavior
 - prediction label dtype rules
 - scale/offset preservation during remap
-- CPU/file worker budget wiring: file-level workers default to two; spatial
-  chunking uses available CPUs/Galaxy slots
+- CPU worker budget wiring: `--workers` defaults to the allocated CPUs
+  (Galaxy slots, affinity, cgroup quota) and larger requests are capped
 - tree sidecar pruning and disabling cross-tile matching/small-cluster
   reassignment when tree sidecars are present
 - COPC conversion dimension policy: prefer Untwine, strip extra dimensions for

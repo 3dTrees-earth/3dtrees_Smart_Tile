@@ -606,9 +606,9 @@ def subsample_tiles_single_scan(plan, output_dir, resolutions, formats, *, worke
 
     Output i goes to subsampled_res{i+1}; `formats` are laz, copc.laz or ply.
 
-    Tiled inputs use the planned buffered tiles, each encoded with the first
-    source's scales and the tile-centre offsets the COPC tiles used. A
-    single-cloud plan is one unbounded tile in the source's own encoding.
+    Tiled inputs use the planned buffered tiles, each encoded with the finest
+    scale of all sources per axis and tile-centre offsets. A single-cloud plan
+    is one unbounded tile in the source's own encoding.
     """
     from main_subsample import subsample_output_name
     from main_tile import plot_overview, read_tile_jobs
@@ -617,7 +617,12 @@ def subsample_tiles_single_scan(plan, output_dir, resolutions, formats, *, worke
     sources = [Path(source) for source in plan.source_files]
     with laspy.open(sources[0]) as reader:
         header = reader.header
-    scales = tuple(float(v) for v in header.scales)
+    # The finest scale of all sources, per axis, so no source loses precision.
+    source_scales = []
+    for source in sources:
+        with laspy.open(source) as reader:
+            source_scales.append(tuple(float(v) for v in reader.header.scales))
+    scales = tuple(min(axis) for axis in zip(*source_scales))
     if plan.skip_tiling:
         stem = sources[0].name[:-len(".copc.laz")] if sources[0].name.endswith(".copc.laz") else sources[0].stem
         tiles = [Tile(stem, (-math.inf, -math.inf, math.inf, math.inf), scales,

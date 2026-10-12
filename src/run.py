@@ -3,7 +3,7 @@
 Main orchestrator script for the 3DTrees smart tiling pipeline.
 
 Routes to appropriate task modules based on --task parameter:
-- tile: XYZ reduction, COPC conversion, tiling, and subsampling (1cm and 10cm)
+- tile: tile layout, then one read of every source point into subsampled tiles (default 1cm and 10cm)
 - merge: Remap predictions and merge tiles with instance matching
 - filter: Remove non-owned dense instances, then reconcile and deduplicate
 - remap: Remap merged file dimensions to original input files
@@ -11,8 +11,8 @@ Routes to appropriate task modules based on --task parameter:
 
 Usage:
     python src/run.py --task tile --input-dir /path/to/input --output-dir /path/to/output
-    python src/run.py --task merge --subsampled-10cm-folder /path/to/10cm --original-input-dir /path/to/input
-    python src/run.py --task filter --input-dir /path/to/segmented_remapped --output-dir /path/to/filtered
+    python src/run.py --task merge --subsampled-10cm-folder /path/to/10cm --tile-bounds-json /path/to/tile_bounds_tindex.json --original-laz-input-dir /path/to/input
+    python src/run.py --task filter --input-dir /path/to/segmented_remapped --output-dir /path/to/filtered --tile-bounds-json /path/to/tile_bounds_tindex.json
     python src/run.py --task remap --merged-laz /path/to/merged.laz --original-laz-input-dir /path/to/originals --original-laz-output-dir /path/to/output
     python src/run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output
 """
@@ -20,6 +20,8 @@ Usage:
 import sys
 import argparse
 from pathlib import Path
+
+from worker_budget import spatial_query_worker_count
 
 # Add src directory to path for imports when run from project root
 _src_dir = Path(__file__).parent.resolve()
@@ -84,8 +86,8 @@ def _create_prod_merged_outputs(
         output_format_selector=params.merged_output_formats,
         res1=params.resolution_1,
         res2=params.resolution_2,
-        num_spatial_chunks=params.workers,
-        chunk_workers=params.workers,
+        num_spatial_chunks=spatial_query_worker_count(params.workers),
+        chunk_workers=spatial_query_worker_count(params.workers),
         staged_copc_dir=params.staged_copc_dir,
         standardization_json=params.standardization_json,
     )
@@ -270,7 +272,6 @@ def run_tile_task(params: Parameters):
         # skip the full-resolution tile COPCs (tile_centroids module docstring).
         from main_tile import plan_tiling
         from tile_centroids import subsample_tiles_single_scan
-        from worker_budget import spatial_query_worker_count
         plan = plan_tiling(input_dir, output_dir, tile_length, tile_buffer, tiling_threshold,
                            grid_origin=grid_origin, defer_occupancy=True)
         output_dirs = list(subsample_tiles_single_scan(
@@ -463,7 +464,6 @@ def preprocess_boolean_flags(args_list):
         '--output-copc-res2', '--output_copc_res2',
         '--skip-merged-file', '--skip_merged_file',
         '--transfer-original-dims-to-merged', '--transfer_original_dims_to_merged',
-        '--verbose', '-v'
     ]
 
     processed = []
@@ -562,12 +562,14 @@ def _field_cli_flags(field_name: str) -> list[str]:
 def _print_cli_help() -> None:
     """Print a compact SmartTile CLI help page."""
     option_groups = [
-        ("Common", ["task", "input_dir", "output_dir", "workers"]),
+        ("Common", ["task", "input_dir", "output_dir", "workers", "instance_dimension"]),
         (
             "Tile",
             [
                 "tile_length",
                 "tile_buffer",
+                "grid_origin_x",
+                "grid_origin_y",
                 "tile_outputs",
                 "resolution_1",
                 "resolution_2",
@@ -580,14 +582,18 @@ def _print_cli_help() -> None:
         (
             "Merge",
             [
+                "tile_bounds_json",
                 "subsampled_10cm_folder",
                 "subsampled_target_folder",
                 "segmented_remapped_folder",
+                "prediction_transfer_tolerance",
                 "original_raw_input_dir",
                 "original_raw_output_dir",
                 "original_copc_input_dir",
-                "output_merged_laz",
+                "output_folder",
                 "output_tiles_folder",
+                "output_merged_laz",
+                "skip_merged_file",
             ],
         ),
         (
@@ -595,6 +601,9 @@ def _print_cli_help() -> None:
             [
                 "segmented_folders",
                 "merged_laz",
+                "baseline_1cm_folders",
+                "remap_tolerance",
+                "remap_dims",
                 "original_with_predictions_dir",
                 "staged_copc_dir",
                 "standardization_json",
@@ -606,7 +615,7 @@ def _print_cli_help() -> None:
         (
             "Filtering / Matching",
             [
-                "instance_dimension",
+                "filter_anchor",
                 "overlap_threshold",
                 "max_volume_for_merge",
                 "reassign_small_instances",
@@ -620,10 +629,10 @@ def _print_cli_help() -> None:
     print()
     print("Usage:")
     print("  python src/run.py --task tile --input-dir INPUT --output-dir OUTPUT")
-    print("  python src/run.py --task merge --subsampled-10cm-folder SEGMENTED_10CM --output-dir OUTPUT")
+    print("  python src/run.py --task merge --subsampled-10cm-folder SEGMENTED_10CM --tile-bounds-json TILE_BOUNDS_JSON --output-folder OUTPUT")
     print("  python src/run.py --task remap --segmented-folders COLLECTIONS --original-laz-input-dir ORIGINALS --original-laz-output-dir OUTPUT")
     print("  python src/run.py --task create_merged_file --original-with-predictions-dir INPUT --output-dir OUTPUT")
-    print("  python src/run.py --task filter --input-dir INPUT --output-dir OUTPUT")
+    print("  python src/run.py --task filter --input-dir INPUT --output-dir OUTPUT --tile-bounds-json TILE_BOUNDS_JSON")
     print()
     print("Tasks: tile, merge, filter, remap, create_merged_file")
     print("Use --show-params to print resolved defaults and environment overrides.")
@@ -705,9 +714,9 @@ def main():
     if not params.task:
         print("Error: --task is required (unless using --show-params)")
         print("Usage: python run.py --task tile --input-dir /path/to/input --output-dir /path/to/output")
-        print("       python run.py --task merge --subsampled-10cm-folder /path/to/10cm")
-        print("       python run.py --task filter --input-dir /path/to/segmented_remapped --output-dir /path/to/filtered")
-        print("       python run.py --task remap --merged-laz /path/to/merged.laz --original-input-dir /path/to/originals")
+        print("       python run.py --task merge --subsampled-10cm-folder /path/to/10cm --tile-bounds-json /path/to/tile_bounds_tindex.json")
+        print("       python run.py --task filter --input-dir /path/to/segmented_remapped --output-dir /path/to/filtered --tile-bounds-json /path/to/tile_bounds_tindex.json")
+        print("       python run.py --task remap --merged-laz /path/to/merged.laz --original-laz-input-dir /path/to/originals")
         print("       python run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output")
         print("       python run.py --show-params")
         sys.exit(1)

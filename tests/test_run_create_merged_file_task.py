@@ -43,8 +43,10 @@ class RunCreateMergedFileTaskTests(unittest.TestCase):
             _, kwargs = create_prod.call_args
             self.assertEqual(kwargs["original_with_predictions_dir"], original_with_predictions)
             self.assertEqual(kwargs["output_dir"], output_dir)
-            self.assertEqual(kwargs["num_spatial_chunks"], 12)
-            self.assertEqual(kwargs["chunk_workers"], 12)
+            # Larger requests are capped to the allocated CPUs, as in every task.
+            from worker_budget import spatial_query_worker_count
+            self.assertEqual(kwargs["num_spatial_chunks"], spatial_query_worker_count(12))
+            self.assertEqual(kwargs["chunk_workers"], spatial_query_worker_count(12))
 
 
 if __name__ == "__main__":
