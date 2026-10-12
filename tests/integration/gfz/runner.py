@@ -105,9 +105,9 @@ def tile():
         '--output-dir', '/run/01_tiles', '--tile-length', '60', '--tile-buffer', '20', '--tiling-threshold', '0',
         '--grid-origin-x', '398663.428', '--grid-origin-y', '5646147.674',
         '--resolution-1', '0.01', '--resolution-2', '0.1', '--subsampling-method', 'center-of-mass',
-        '--output-copc-res1', 'True', '--output-copc-res2', 'False', '--chunk-size', '1000000',
-        '--workers', '2', '--tile-source-workers', '2', '--tile-writer-workers', '2',
-        '--num-spatial-chunks', '10', '--threads', '5'], output='01_tiles')
+        '--output-copc-res1', 'True', '--output-copc-res2', 'False',
+        '--workers', '2', '--tile-writer-workers', '2',
+        '--num-spatial-chunks', '10'], output='01_tiles')
 
 if __name__ == '__main__':
     tile()

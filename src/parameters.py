@@ -54,7 +54,7 @@ class Parameters(BaseSettings):
 
     workers: int = Field(
         DEFAULT_FILE_WORKERS,
-        description="Worker budget (default 2): file parallelism for tiling; CPU-capped query threads for merge/filter and batch processes for final remap.",
+        description="Worker budget (default 2): default for --tile-writer-workers in tiling; CPU-capped query threads for merge/filter and batch processes for final remap.",
         validation_alias=AliasChoices("workers", "number-of-threads", "number_of_threads"),
     )
 
@@ -81,25 +81,11 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("tile-buffer", "tile_buffer"),
     )
 
-    threads: Optional[int] = Field(
-        10,
-        description="Threads per COPC writer (only for 'tile' task)",
-    )
-
-    tile_source_workers: Optional[int] = Field(
-        default=None,
-        description=(
-            "Maximum source files processed in parallel during tile Phase 1. "
-            "Defaults to --workers when unset."
-        ),
-        validation_alias=AliasChoices("tile-source-workers", "tile_source_workers"),
-    )
-
     tile_writer_workers: Optional[int] = Field(
         default=None,
         description=(
-            "Maximum tiles finalized to COPC in parallel during tile Phase 2. "
-            "Defaults to --workers when unset."
+            "Maximum tile outputs assembled (LAZ, PLY) or converted to COPC in parallel "
+            "after the tile task's single read. Defaults to --workers when unset."
         ),
         validation_alias=AliasChoices(
             "tile-writer-workers",
@@ -172,12 +158,6 @@ class Parameters(BaseSettings):
         default=None,
         description="File size threshold in MB. If input folder has single file below this size, skip tiling (only for 'tile' task)",
         validation_alias=AliasChoices("tiling-threshold", "tiling_threshold"),
-    )
-
-    chunk_size: Optional[int] = Field(
-        default=20_000_000,
-        description="Points per chunk when reading LAZ/LAS in tiling Phase 1 or multi-collection remap (smaller = less peak RAM, more overhead)",
-        validation_alias=AliasChoices("chunk-size", "chunk_size"),
     )
 
     # ==========================================================================
@@ -443,8 +423,6 @@ class Parameters(BaseSettings):
         "tile_length",
         "resolution_1",
         "resolution_2",
-        "threads",
-        "chunk_size",
     )
     @classmethod
     def validate_tile_params(cls, v, info):
@@ -483,7 +461,6 @@ class Parameters(BaseSettings):
     @field_validator(
         "workers",
         "num_spatial_chunks",
-        "tile_source_workers",
         "tile_writer_workers",
     )
     @classmethod
@@ -558,10 +535,7 @@ def print_params(params: Parameters):
     print("\nTile Task:")
     print(f"  tile_length: {params.tile_length}")
     print(f"  tile_buffer: {params.tile_buffer}")
-    print(f"  threads: {params.threads}")
-    print(f"  tile_source_workers: {params.tile_source_workers}")
     print(f"  tile_writer_workers: {params.tile_writer_workers}")
-    print(f"  chunk_size: {params.chunk_size}")
     print(f"  resolution_1: {params.resolution_1}")
     print(f"  resolution_2: {params.resolution_2}")
     print(f"  output_copc_res1: {params.output_copc_res1}")
@@ -606,14 +580,12 @@ def print_params(params: Parameters):
 TILE_PARAMS = {
     'tile_length': 100,
     'tile_buffer': 20,
-    'threads': 10,
     'workers': DEFAULT_FILE_WORKERS,
     'resolution_1': 0.01,
     'resolution_2': 0.1,
     'output_copc_res1': True,
     'output_copc_res2': False,
     'subsampling_method': 'center-of-mass',
-    'chunk_size': 20_000_000,
 }
 
 if __name__ == "__main__":

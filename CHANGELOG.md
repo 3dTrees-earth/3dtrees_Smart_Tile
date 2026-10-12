@@ -17,7 +17,7 @@
 - New `--tile-outputs "res:format,..."`: any number of tiled outputs in order (`laz`, `copc.laz`, `ply`) from the same read, written to `subsampled_res1..N`. The Galaxy wrapper exposes them as a repeat (default: one 10 cm LAZ output) with one collection each.
 - Standalone remap no longer needs the 1 cm tiles or a merge manifest: `--baseline-1cm-folders` is optional, and without it remap checks final coverage only. The Galaxy remap form drops the resolution-1 tiles input.
 - `--num-spatial-chunks` defaults to the allocated CPUs (`GALAXY_SLOTS`, affinity, cgroup quota) instead of the host core count.
-- Removed: the v2.3 merge/filter/remap path, 15 unused parameters, and the Galaxy outputs `merge_report`, `remap_report` and `output_remap_mappings` (still written locally as evidence). The Galaxy wrapper no longer exposes a grid origin.
+- Removed: the v2.3 merge/filter/remap path, 15 unused parameters, and `--chunk-size`, `--threads` and `--tile-source-workers` (only the old full-resolution tiling read them), and the Galaxy outputs `merge_report`, `remap_report` and `output_remap_mappings` (still written locally as evidence). The Galaxy wrapper no longer exposes a grid origin.
 
 ### Operations
 - Scratch disk in the job directory: tiling spills about 16 B per source point (plus buffer overlap) and about 20 B per output point before assembly; 483 spilled 56 GiB. Enrichment spills 16 B per original point per file.

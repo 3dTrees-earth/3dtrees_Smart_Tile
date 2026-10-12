@@ -30,7 +30,7 @@ flowchart TD
     MERGE -. "RCT" .-> KEPT["Filtered tree and treeinfo files with matching IDs"]
     FILTER -. "RCT" .-> KEPT
     FINAL --> REMAP["remap: validate coverage and enrich original points"]
-    BASE --> REMAP
+    BASE -. "optional diagnosis" .-> REMAP
     ORIGINAL["Uploaded raw LAS / LAZ originals"] --> REMAP
     REMAP --> ENRICHED["original_with_predictions: original XYZ and fields plus predictions"]
     ENRICHED --> PRODUCT["create_merged_file: combine originals at selected resolutions"]
@@ -97,13 +97,14 @@ and the real 488/94 conflict example.
 | `tile` | Source point clouds | Spatial indexing, core/buffer layout, COPC tiling and two resolutions of subsampling. A single-cloud bypass records the actual single extent. | Buffered tiles, `subsampled_res1/`, `subsampled_res2/`, tile-bounds JSON. |
 | `merge` | Prediction collection(s), matching dense targets unless already dense, and tile-bounds JSON. RCT also requires both tree tables per tile. | Dense transfer, ownership, recovery and model-specific processing shown above. Optional original enrichment. | Processed tiles, `instance_metadata.csv`, `smarttile_merge.json`, effective `tile_bounds.json`, sibling `*_unfiltered_1cm/`, `remap_first_report.json`; RCT `segmented_filtered/` tables; optional enriched originals. |
 | `filter` | One already-dense prediction collection and tile-bounds JSON; RCT tree tables where applicable. | Same ownership, recovery and model-specific processing, without a coarse prediction transfer. | Processed tiles, baseline, manifest, report and RCT tables where applicable. |
-| `remap` | Processed prediction collection(s), uploaded raw LAS/LAZ originals, and unfiltered baseline geometry. | Coverage validation and bounded nearest-point attribute transfer to the original points. | One enriched file per original and an original-coverage report. |
+| `remap` | Processed prediction collection(s) and uploaded raw LAS/LAZ originals; unfiltered baseline geometry optional. | Coverage validation and bounded nearest-point attribute transfer to the original points. | One enriched file per original and an original-coverage report. |
 | `create_merged_file` | Enriched originals, or source files for a source-file union. Optional staged COPC cache and standardization JSON. | Preservation-mode COPC staging, combining files and selecting real source points at requested product resolutions. | `prod_merged_1cm` / `prod_merged_10cm` by default, in selected `copc.laz`, `laz` and/or `ply` formats. |
 
 The baseline path and first-stage resolution are recorded in the merge manifest.
-Preserve that relative directory relationship, or supply baseline collections
-explicitly with `--baseline-1cm-folders` during remap. The baseline contains
-unfiltered geometry so removal of predictions cannot hide an original input gap.
+Merge always checks baseline coverage. Remap checks it too when the manifest is
+preserved or `--baseline-1cm-folders` is given; otherwise it checks final
+coverage only, which implies baseline coverage for merged predictions (they lie on
+the 1 cm geometry). The baseline only tells a tiling gap apart from a filtering gap.
 
 ## Matching distances and final coverage
 
@@ -112,7 +113,7 @@ unfiltered geometry so removal of predictions cannot hide an original input gap.
 | Coarse prediction to dense tile | `--prediction-transfer-tolerance`, default **0.1732 m = 17.32 cm**; every target point must match. |
 | Tree support, RCT recovery conflicts and dense duplicate checks | **0.01 m = 1 cm**, measured in XYZ. |
 | Original point to dense prediction | Default **sqrt(3) × res1**; for 1 cm voxels this is **0.0173205 m = 1.732 cm**. Override with `--remap-tolerance` in metres. |
-| Original to unfiltered baseline | **100% required for every model.** A missing baseline match fails publication. |
+| Original to unfiltered baseline | **100% required for every model** whenever the baseline is checked (merge; remap with baseline geometry). A missing baseline match fails publication. |
 | Original to final non-RCT predictions | **100% required.** Missing matches fail publication. |
 | Original to final RCT predictions | Prefer the nearest positive tree within the remap radius over background. If no surviving prediction matches, write **0 to every RCT prediction field** and report the fallback. |
 

@@ -228,9 +228,7 @@ def run_tile_task(params: Parameters):
     # Get parameters from Pydantic model
     tile_length = params.tile_length
     tile_buffer = params.tile_buffer
-    threads = params.threads
     workers = params.workers
-    tile_source_workers = params.tile_source_workers or workers
     tile_writer_workers = params.tile_writer_workers or workers
     num_spatial_chunks = params.num_spatial_chunks
     subsampling_chunks = num_spatial_chunks or workers
@@ -240,7 +238,6 @@ def run_tile_task(params: Parameters):
     output_copc_res2 = params.output_copc_res2
     subsampling_method = params.subsampling_method
     tiling_threshold = params.tiling_threshold
-    chunk_size = params.chunk_size
     print("=" * 60)
     print("Running Tile Task (Python Pipeline)")
     print("=" * 60)
@@ -249,8 +246,6 @@ def run_tile_task(params: Parameters):
     print(f"Tile length: {tile_length}m")
     print(f"Tile buffer: {tile_buffer}m")
     print(f"Workers: {workers}")
-    print(f"Threads per writer: {threads}")
-    print(f"Tile source file workers: {tile_source_workers}")
     print(f"Tile finalization workers: {tile_writer_workers}")
     print(f"Subsampling spatial chunks/window workers: {subsampling_chunks}")
     print("Subsampling dimensions: minimal (standard dims only)")
@@ -258,7 +253,6 @@ def run_tile_task(params: Parameters):
     print(f"Tile outputs: {params.tile_outputs or 'from --resolution-1/2 and --output-copc-res1/2'}")
     if tiling_threshold is not None:
         print(f"Tiling threshold: {tiling_threshold} MB")
-    print(f"Chunk size: {chunk_size:,} points")
     print()
 
     try:
@@ -278,8 +272,7 @@ def run_tile_task(params: Parameters):
         from tile_centroids import subsample_tiles_single_scan
         from worker_budget import spatial_query_worker_count
         plan = plan_tiling(input_dir, output_dir, tile_length, tile_buffer, tiling_threshold,
-                           chunk_size, grid_origin, defer_occupancy=True)
-        tiles_dir = plan.tiles_dir
+                           grid_origin=grid_origin, defer_occupancy=True)
         output_dirs = list(subsample_tiles_single_scan(
             plan, output_dir, [r for r, _ in tile_outputs], [f for _, f in tile_outputs],
             workers=spatial_query_worker_count(subsampling_chunks), converters=tile_writer_workers,
@@ -299,7 +292,6 @@ def run_tile_task(params: Parameters):
         print("=" * 60)
         print("Tile Task Complete")
         print("=" * 60)
-        print(f"Tiles: {tiles_dir}")
         for (resolution, output_format), directory in zip(tile_outputs, output_dirs):
             print(f"Subsampled {resolution} m ({output_format}): {directory}")
 
@@ -570,13 +562,14 @@ def _field_cli_flags(field_name: str) -> list[str]:
 def _print_cli_help() -> None:
     """Print a compact SmartTile CLI help page."""
     option_groups = [
-        ("Common", ["task", "input_dir", "output_dir", "workers", "num_spatial_chunks", "chunk_size"]),
+        ("Common", ["task", "input_dir", "output_dir", "workers", "num_spatial_chunks"]),
         (
             "Tile",
             [
                 "tile_length",
                 "tile_buffer",
-                "threads",
+                "tile_outputs",
+                "tile_writer_workers",
                 "resolution_1",
                 "resolution_2",
                 "output_copc_res1",

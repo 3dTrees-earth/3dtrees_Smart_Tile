@@ -801,12 +801,6 @@ def main():
         default=None,
         help="Maximum source files processed in parallel during Phase 1 (default: --num_workers)",
     )
-    parser.add_argument(
-        "--chunk_size",
-        type=int,
-        default=TILE_PARAMS.get("chunk_size", 20_000_000),
-        help="Points per chunk when reading LAZ/LAS (default: 2_000_000; smaller = less peak RAM)",
-    )
     args = parser.parse_args()
 
     # Validate input
@@ -825,7 +819,6 @@ def main():
             threads=args.threads,
             max_tile_procs=args.max_tile_procs,
             source_file_workers=args.source_file_workers,
-            chunk_size=args.chunk_size,
         )
         print(f"\nTiles ready for subsampling: {tiles_dir}")
     except Exception as e:
