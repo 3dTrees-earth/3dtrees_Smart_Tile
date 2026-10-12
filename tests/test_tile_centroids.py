@@ -126,6 +126,64 @@ def test_exact_rounding_is_half_to_even_and_order_independent():
     assert np.array_equal(centers, shuffled)
 
 
+def nearest_reference(sources, tile, resolution):
+    """Per voxel, the encoded source point closest to the voxel mean (ties: lowest X, Y, Z)."""
+    xs = []
+    for las in sources:
+        x, y, z = np.asarray(las.x), np.asarray(las.y), np.asarray(las.z)
+        xmin, ymin, xmax, ymax = tile.bounds
+        keep = (x >= xmin) & (x <= xmax) & (y >= ymin) & (y <= ymax)
+        xs.append(np.stack([np.round((v[keep] - tile.offsets[i]) / tile.scales[i])
+                            for i, v in enumerate((x, y, z))], axis=1))
+    ints = np.concatenate(xs).astype(np.int64)
+    keys = np.floor((ints * np.array(tile.scales) + np.array(tile.offsets)) / resolution).astype(np.int64)
+    groups = {}
+    for key, raw in zip(map(tuple, keys), ints.tolist()):
+        groups.setdefault(key, []).append(raw)
+    chosen = set()
+    for points in groups.values():
+        mean = np.mean(np.array(points, dtype=float), axis=0)
+        chosen.add(min(map(tuple, points), key=lambda p: (
+            float(np.sum(((np.array(p) - mean) * np.array(tile.scales)) ** 2)), p)))
+    return chosen
+
+
+def test_nearest_to_centroid_keeps_the_original_point_nearest_each_voxel_mean(tmp_path, monkeypatch):
+    import tile_centroids
+    sources, las, tiles = make_inputs(tmp_path)
+    runs = []
+    for workers, chunk in ((1, tile_centroids.CHUNK_POINTS), (4, 700)):
+        monkeypatch.setattr(tile_centroids, "CHUNK_POINTS", chunk)
+        outputs = [(r, {t.label: tmp_path / f"n{workers}" / f"{t.label}_{i}.laz" for t in tiles}, "laz")
+                   for i, r in enumerate(RESOLUTIONS)]
+        written, _ = write_tile_centroids(sources, tiles, las[0].header, outputs, workers=workers,
+                                          work_dir=tmp_path / f"n{workers}", metadata_source=sources[0],
+                                          nearest=True)
+        runs.append(outputs)
+    for index, (resolution, paths, _) in enumerate(runs[0]):
+        for tile in tiles:
+            got, count = encoded(paths[tile.label])
+            assert got == nearest_reference(las, tile, resolution) and count == len(got)
+            same = laspy.read(runs[1][index][1][tile.label])
+            assert np.array_equal(laspy.read(paths[tile.label]).points.array, same.points.array)
+
+
+def test_nearest_to_centroid_ties_and_order_independence():
+    scales, offsets = (0.001, 0.001, 0.001), (0.0, 0.0, 0.0)
+
+    def nearest_x(xs):
+        records = np.zeros(len(xs), dtype=RECORD)
+        records["X"], records["m"] = xs, 1
+        (centers, _), = reduce_records(records, (1.0,), scales, offsets, nearest=True)
+        (shuffled, _), = reduce_records(records[::-1].copy(), (1.0,), scales, offsets, nearest=True)
+        assert np.array_equal(centers, shuffled)
+        return int(np.round(centers[0, 0] / 0.001))
+
+    assert nearest_x([400, 600, 499, 501]) == 499  # mean 500: 499 and 501 tie, lowest X wins
+    assert nearest_x([400, 600, 500, 900]) == 600  # mean 600 is a point
+    assert nearest_x([0, 10, 990]) == 10  # mean 333.3: a real point, not the mean
+
+
 def test_route_puts_each_point_once_per_resolution_in_its_voxels_block():
     rng = np.random.default_rng(5)
     # Multiples of the coarse resolution hit IEEE floor disagreements between grids.
@@ -159,6 +217,10 @@ def test_oversized_block_split_matches_unsplit_reduction(tmp_path):
         assert used_a == used_b == len(records)
         assert {tuple(r) for r in np.round(a, 9)} == {tuple(r) for r in np.round(b, 9)}
     assert not (block / "split").exists()
+    whole = reduce_records(records, RESOLUTIONS, scales, offsets, nearest=True)
+    split = _reduce_block((block, RESOLUTIONS, (80, 8), scales, offsets, 5000, True))
+    for (a, _), (b, _) in zip(whole, split):
+        assert {tuple(r) for r in np.round(a, 9)} == {tuple(r) for r in np.round(b, 9)}
 
 
 def test_tiles_with_empty_cores_are_dropped_in_the_same_read(tmp_path):

@@ -11,8 +11,9 @@ re-encoded into every tile it falls in (inclusive buffered bounds) exactly as
 the tile COPC stored it, and spilled to XY blocks aligned to each output voxel
 grid. Blocks are reduced independently: every output point is the mean of the
 original points in its voxel at that resolution (3DT-2203), not a mean of finer
-means. Sums follow a canonical point order, so results do not depend on the
-worker count or on how the sources were split.
+means, or with nearest-to-centroid the original point closest to that mean.
+Sums follow a canonical point order, so results do not depend on the worker
+count or on how the sources were split.
 """
 from __future__ import annotations
 
@@ -214,14 +215,36 @@ def _round_half_even(numerator, denominator):
     return quotient + up
 
 
-def reduce_records(records, resolutions, scales, offsets):
-    """Mean of the points in each voxel, per resolution, in voxel-key order.
+def _nearest_to_mean(xyz, starts, counts, sums, scales):
+    """Index of each voxel's point nearest its mean; `xyz` is grouped by voxel.
+
+    Distances depend only on the point and its voxel, so the choice does not
+    depend on point order. Exact distance ties (rare) go to the lowest X, Y, Z.
+    """
+    voxel = np.repeat(np.arange(len(starts)), counts)
+    offset = (xyz - sums[voxel] / counts[voxel, None]) * np.asarray(scales, dtype=float)
+    distance = np.einsum("ij,ij->i", offset, offset)
+    candidates = np.flatnonzero(distance == np.minimum.reduceat(distance, starts)[voxel])
+    owners = voxel[candidates]  # non-decreasing; every voxel has a candidate
+    chosen = candidates[np.r_[0, np.flatnonzero(np.diff(owners)) + 1]]
+    tied = np.flatnonzero(np.bincount(owners, minlength=len(starts)) > 1)
+    if len(tied):
+        rows = candidates[np.isin(owners, tied)]
+        rows = rows[np.lexsort((xyz[rows, 2], xyz[rows, 1], xyz[rows, 0], voxel[rows]))]
+        chosen[tied] = rows[np.r_[0, np.flatnonzero(np.diff(voxel[rows])) + 1]]
+    return chosen
+
+
+def reduce_records(records, resolutions, scales, offsets, nearest=False):
+    """One point per voxel, per resolution, in voxel-key order.
 
     Voxels use the scaled float coordinates (floor(x / r)), as before. Each
     center is the exact mean of the voxel's integer LAS coordinates, rounded
     half-to-even once onto the same LAS grid: no float summation, so results
-    do not depend on point order or worker count. Returns
-    [(centers, represented_points)]; centers are on the output LAS grid.
+    do not depend on point order or worker count. With `nearest`, the voxel
+    keeps instead its point closest to that mean in metres (ties: lowest X,
+    then Y, then Z). Returns [(centers, represented_points)]; centers are on
+    the output LAS grid.
     """
     results = []
     for index, resolution in enumerate(resolutions):
@@ -242,10 +265,13 @@ def reduce_records(records, resolutions, scales, offsets):
             keys = keys[order]
             starts = np.flatnonzero(np.r_[True, np.any(keys[1:] != keys[:-1], axis=1)])
         counts = np.diff(np.r_[starts, len(order)]).astype(np.int64)
-        centers = np.empty((len(starts), 3))
-        for axis, name in enumerate(("X", "Y", "Z")):
-            sums = np.add.reduceat(selected[name][order].astype(np.int64), starts)
-            centers[:, axis] = _round_half_even(sums, counts) * scales[axis] + offsets[axis]
+        xyz = np.stack([selected[name][order] for name in ("X", "Y", "Z")], axis=1).astype(np.int64)
+        sums = np.add.reduceat(xyz, starts, axis=0)
+        if nearest:
+            points = xyz[_nearest_to_mean(xyz, starts, counts, sums, scales)]
+        else:
+            points = _round_half_even(sums, counts[:, None])
+        centers = points * np.asarray(scales, dtype=float) + np.asarray(offsets, dtype=float)
         results.append((centers, len(selected)))
     return results
 
@@ -256,7 +282,8 @@ def _block_files(block):
 
 def _reduce_block(task):
     """Reduce one spilled block, splitting it first when it exceeds BLOCK_POINTS."""
-    block, resolutions, cells, scales, offsets, limit = task
+    block, resolutions, cells, scales, offsets, limit, *rest = task
+    nearest = bool(rest and rest[0])
     block = Path(block)
     files = _block_files(block)
     total = sum(path.stat().st_size for path in files) // RECORD.itemsize
@@ -266,7 +293,7 @@ def _reduce_block(task):
     if total <= limit or finer == cells:
         records = np.concatenate([np.fromfile(path, dtype=RECORD) for path in files]) if files else \
             np.empty(0, dtype=RECORD)
-        return reduce_records(records, resolutions, scales, offsets)
+        return reduce_records(records, resolutions, scales, offsets, nearest)
     # Skewed density: re-route into finer blocks without loading the whole block.
     children = block / "split"
     for path in files:
@@ -279,7 +306,7 @@ def _reduce_block(task):
     parts = [[] for _ in resolutions]
     represented = [0] * len(resolutions)
     for child in sorted(children.iterdir(), key=_block_key):
-        for index, (centers, used) in enumerate(_reduce_block((child, resolutions, finer, scales, offsets, limit))):
+        for index, (centers, used) in enumerate(_reduce_block((child, resolutions, finer, scales, offsets, limit, nearest))):
             parts[index].append(centers)
             represented[index] += used
     shutil.rmtree(children)
@@ -351,8 +378,8 @@ def _reduce_and_write(task):
     Workers write their own fragments, so centers never travel through the
     parent process. Returns [(output points, represented points)] per resolution.
     """
-    block, resolutions, cells, scales, offsets, limit, slot_dirs, name = task
-    results = _reduce_block((block, resolutions, cells, scales, offsets, limit))
+    block, resolutions, cells, scales, offsets, limit, slot_dirs, name, nearest = task
+    results = _reduce_block((block, resolutions, cells, scales, offsets, limit, nearest))
     shutil.rmtree(block)
     dtype = laspy.PointFormat(FRAGMENT_POINT_FORMAT).dtype()
     counts = []
@@ -444,8 +471,11 @@ def _fragments_to_copc(directory, target, template, metadata_source, expected):
 
 
 def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, metadata_source,
-                         converters=2):
+                         converters=2, nearest=False):
     """Write center-of-mass outputs for every tile from one read of the sources.
+
+    With `nearest`, each voxel keeps the original point nearest its mean
+    (nearest-to-centroid) instead of the mean.
 
     `tiles`: [Tile]. `header`: LAS header the tiles derive from (VLRs, CRS).
     `outputs`: [(resolution, {label: final path}, format)] in output order;
@@ -515,7 +545,7 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
                     raise ValueError("Center-of-mass outputs must use point format 0")
                 for block in blocks:
                     jobs.append((block, resolutions, cells, tile.scales, tile.offsets, BLOCK_POINTS,
-                                 slot_dirs, f"{len(jobs):09d}"))
+                                 slot_dirs, f"{len(jobs):09d}", nearest))
                     owners.append(index)
             last_block = {owner: position for position, owner in enumerate(owners)}
 
@@ -571,7 +601,7 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
 
 
 def subsample_tiles_single_scan(plan, output_dir, resolutions, formats, *, workers, converters,
-                                output_prefix):
+                                output_prefix, nearest=False):
     """Tile-task subsampling without full-resolution tiles: one output dir per resolution.
 
     Output i goes to subsampled_res{i+1}; `formats` are laz, copc.laz or ply.
@@ -618,7 +648,7 @@ def subsample_tiles_single_scan(plan, output_dir, resolutions, formats, *, worke
     print(f"  Tiles: {len(tiles)}; resolutions: {', '.join(f'{r} m' for r in resolutions)}; "
           "full-resolution tiles are not written")
     _, occupied = write_tile_centroids(sources, tiles, header, outputs, workers=workers, work_dir=output_dir,
-                                       metadata_source=sources[0], converters=converters)
+                                       metadata_source=sources[0], converters=converters, nearest=nearest)
     if not plan.skip_tiling:
         by_label = dict(zip((tile.label for tile in tiles), occupied))
         layout = json.loads(Path(plan.bounds_json).read_text())["tiles"]

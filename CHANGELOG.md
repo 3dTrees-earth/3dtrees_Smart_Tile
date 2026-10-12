@@ -4,6 +4,7 @@
 
 ### Correctness
 - Remap-first merge: predictions go to 1 cm geometry before ownership, recovery, reconciliation and deduplication. Every original point must be covered by the final survivors (and by the unfiltered 1 cm baseline in merge, or in remap when baseline geometry is given), or the task fails without publishing (3DT-2101, 3DT-1566).
+- Nearest-to-centroid tiling uses the same single read and fixed voxel grid as center of mass: each voxel keeps the original point nearest its exact mean, at any number of resolutions and in every format. It was not reproducible before (PDAL's grid followed the input point order, so repeated runs gave different point counts), and the second resolution was derived from the first. 3109 (330 M points, 10 CPUs): 62 s, the same as center of mass (63 s).
 - Center-of-mass tiles are exact voxel means of the original points at every resolution, rounded once onto the LAS grid. 10 cm is no longer a mean of 1 cm means (3DT-2203).
 - Tiling rejects geographic, geocentric and non-metre CRSs, inputs with different CRSs, and inputs mixing files with and without a CRS (3DT-1898).
 - One CRS record per output; instance IDs widen to uint32 instead of wrapping (3DT-2200, 3DT-2172).

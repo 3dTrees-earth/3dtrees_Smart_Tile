@@ -88,7 +88,7 @@ when no retained or recovered tree claims any candidate point within 1 cm.
 
 ### Multi-Resolution Processing
 - **Dual subsampling** - generates both 1cm and 10cm resolution outputs (configurable)
-- **Selectable voxel subsampling** - defaults to SmartTile `center-of-mass` XYZ averaging; `nearest-to-centroid` preserves the previous PDAL voxel centroid nearest-neighbor behavior
+- **Selectable voxel subsampling** - defaults to SmartTile `center-of-mass` XYZ averaging; `nearest-to-centroid` keeps the original point nearest each voxel's mean
 - **Explicit dimension policy** - intermediate COPC conversion strips extra dimensions by default, streaming standard fields to temporary LAS before Untwine when the input contains extras; prod-merged creation preserves enriched dimensions
 
 ### Smart Instance Merging
@@ -115,10 +115,9 @@ show their model-specific branches.
 |-------|-----------|-------------|
 | 1 | **Spatial Index** | Creates a GeoPackage tindex using `pdal tindex` for efficient spatial queries across all input files. |
 | 2 | **Tile Bounds** | Calculates optimal tile grid based on data extent, tile size (default: 100m), and buffer (default: 20m) parameters. |
-| 3 | **Single read** (center of mass, default) | Reads every source point once, in parallel point ranges. Each point is encoded into every buffered tile it falls in and spilled to XY blocks; tile-core occupancy is counted in the same read. |
-| 4 | **Block reduction** | Workers reduce blocks in parallel to both resolutions (default 1 cm and 10 cm) and write LAS fragments. No full-resolution tiles are written. |
+| 3 | **Single read** | Reads every source point once, in parallel point ranges. Each point is encoded into every buffered tile it falls in and spilled to XY blocks; tile-core occupancy is counted in the same read. |
+| 4 | **Block reduction** | Workers reduce blocks in parallel to every resolution (voxel mean, or with nearest-to-centroid the original point nearest it) and write LAS fragments. No full-resolution tiles are written. |
 | 5 | **Outputs** | 1 cm: Untwine builds one COPC per tile from its fragments. 10 cm: fragments are concatenated into LAZ. |
-| — | **Nearest-to-centroid** | Builds full-resolution COPC tiles (laspy crop + Untwine) and subsamples them as before. |
 
 #### MERGE TASK: Result Integration
 
@@ -640,12 +639,12 @@ The SmartTile Docker image has been validated against Untwine 1.5.1: `--dims ""`
 **Algorithm**: Voxel-based downsampling using the selected `--subsampling-method`.
 
 - `center-of-mass` (default): averages only X/Y/Z within each populated voxel. Non-coordinate dimensions are copied from the real point nearest to that averaged XYZ when dimensions are preserved; they are never averaged.
-- `nearest-to-centroid`: uses PDAL `filters.voxelcentroidnearestneighbor`, preserving the previous SmartTile behavior.
+- `nearest-to-centroid`: in the tile task, the original point nearest the voxel's exact mean (ties: lowest X, then Y, then Z), on the same single read and voxel grid as center of mass. Product downsampling (`create_merged_file`) still uses PDAL `filters.voxelcentroidnearestneighbor`.
 
-**Center of mass in the tile task (single read, `src/tile_centroids.py`)**:
+**Tile-task subsampling (single read, `src/tile_centroids.py`, both methods)**:
 1. Sources are read once in parallel point ranges (`--num-spatial-chunks` workers). Each point is encoded into every buffered tile it falls in, with the tile's LAS scale and offsets, and spilled to XY blocks aligned to both voxel grids.
 2. The block edge comes from a 2 M-point sample of the sources: at most 10% of points may fall in blocks above 4 M points (edge 5–50 m, a whole number of 10 cm voxels). Larger blocks are split once while reducing.
-3. Each block is reduced independently. An output point is the exact mean of the voxel's integer LAS coordinates, rounded half-to-even once onto the same grid. Every resolution is computed from the original points, not from finer means (3DT-2203). Results do not depend on worker count, block size or point order.
+3. Each block is reduced independently. An output point is the exact mean of the voxel's integer LAS coordinates, rounded half-to-even once onto the same grid; with nearest-to-centroid it is the original point nearest that mean. Every resolution is computed from the original points, not from finer outputs (3DT-2203). Results do not depend on worker count, block size or point order.
 4. Workers write raw point-record fragments (no per-block LAS header). Each tile's output is assembled in block order with large batched writes: LAZ, COPC (one LAS per tile, then Untwine), or PLY.
 
 **Resolutions and formats**: `--tile-outputs "0.1:laz,0.01:copc.laz,0.25:ply"` lists every subsampled output in order; output *i* is written to `subsampled_res{i}/`, and all of them come from the same read (formats `laz`, `copc.laz`, `ply`; PLY is binary float64 XYZ with the CRS as `comment crs:`). Without it, `--resolution-1/--resolution-2` and `--output-copc-res1/2` define two outputs as before. No SmartTile stage needs COPC for these tiles: merge reads the 1 cm tiles sequentially, and every resolution is computed from the original points.
@@ -660,7 +659,7 @@ Earlier versions built a full-resolution COPC per tile and read it back through 
 
 On 483, 1 cm COPC adds about 600 s of Untwine conversion. Peak process memory is about 10.5 GiB.
 
-**Nearest-to-centroid** still builds full-resolution COPC tiles and splits each tile into X-axis chunks processed in parallel.
+Nearest-to-centroid used to build full-resolution COPC tiles and run PDAL's `filters.voxelcentroidnearestneighbor` on X-axis chunks. That filter places its voxel grid by the input points (their order and extent), so each chunk had its own grid, repeated runs gave different point counts, and the second resolution was derived from the first. It now shares the single read and the fixed voxel grid.
 
 **Outputs**:
 - `subsampled_res1/`: Resolution_1 files, default 1cm COPC LAZ (`*.copc.laz`)
@@ -834,7 +833,7 @@ neighbors; unrelated or already-updated layouts are not recovered this way.
 | `--resolution-2` | 0.1 | Second subsampling resolution (10cm) |
 | `--output-copc-res1` | True | Write first-resolution subsampled outputs as COPC LAZ (`*.copc.laz`) |
 | `--output-copc-res2` | False | Write second-resolution subsampled outputs as COPC LAZ; default keeps 10cm as regular LAZ |
-| `--tile-outputs` | — | All tiled outputs in order, as `resolution:format` pairs (`laz`, `copc.laz`, `ply`), written to `subsampled_res1`, `subsampled_res2`, ...; replaces the four flags above. Nearest-to-centroid allows one or two LAZ/COPC outputs |
+| `--tile-outputs` | — | All tiled outputs in order, as `resolution:format` pairs (`laz`, `copc.laz`, `ply`), written to `subsampled_res1`, `subsampled_res2`, ...; replaces the four flags above |
 | `--subsampling-method` | center-of-mass | Subsampling method: `center-of-mass` or `nearest-to-centroid` |
 | `--chunk-size` | 20000000 | Points per chunk when reading LAZ/LAS in tiling Phase 1, multi-collection remap, and merged-COPC-to-original remap (smaller = less peak RAM; larger = fewer scans) |
 | `--tiling-threshold` | None | File size threshold in MB for skipping tiling on single small files |
@@ -916,8 +915,7 @@ Controls tiling/COPC writer threading. It does not control subsampling paralleli
 
 Controls per-file or per-product spatial chunking:
 
-- Tile-task `center-of-mass` uses `--num-spatial-chunks` processes for the single read and the block reduction. The default is the allocated CPUs (`GALAXY_SLOTS`, CPU affinity, cgroup quota), not the host's core count
-- Nearest-to-centroid splits each tile into `--num-spatial-chunks` spatial chunks along the X-axis
+- The tile task uses `--num-spatial-chunks` processes for the single read and the block reduction. The default is the allocated CPUs (`GALAXY_SLOTS`, CPU affinity, cgroup quota), not the host's core count
 - `create_merged_file` uses `--num-spatial-chunks` for bounded COPC product reads before final COPC/LAZ/PLY writing
 - Remap uses `--num-spatial-chunks` as the number of native COPC spatial-query windows when original files are COPC
 - Remap uses `--num-spatial-chunks` as the maximum number of concurrent raw LAZ/LAS original chunks when only one original file is being enriched
