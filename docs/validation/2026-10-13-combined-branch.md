@@ -300,3 +300,62 @@ Commands, checks, source/runtime identity, artifact paths and hashes are recorde
 in [`2026-10-13-full-gfz.json`](2026-10-13-full-gfz.json). The original failed filter
 reports and diagnostic reproductions are retained. These results do not change
 the earlier remap/export defects or certify the three downstream workflows.
+
+
+## Full GFZ boundary fix — 2026-10-13
+
+The reproduced buffered-overlap defect is fixed at `6cc386a`. Bound conversion
+now carries the precision of global XY coordinates and the common origin into
+the local overlap bounds. This is a localized change in `tile_overlaps`, with
+positive-area intersection still required before the precision allowance.
+Matching radii, core ownership and the common local-bound check are unchanged.
+
+The new regressions reproduced **7 failures out of 12 cases** before the fix.
+Afterward, all **19 new and existing overlap tests passed**. They cover four XY
+edges, points outside the bounds, disjoint and edge-only tile pairs, varying Z
+and batch composition, cached/disk queries, workers 1/4, and the real GFZ FM
+coordinate/score case. The complete frozen-source suite passed **443 tests and
+91 subtests**, with zero failures, errors or skips, in **120.72 seconds**.
+
+Both complete GFZ filters were rerun with the same inputs, parameters and pinned
+scientific runtime as the failed runs above: all eight originals contain
+**16,426,961 points**, and each model supplies **53,265,082 buffered records**.
+Real cached SAT and ForestMamba results were reused without fresh inference.
+Each filter used 8 CPUs, 32 GiB including swap, SSD scratch, read-only inputs and
+disabled networking. Both exited 0 without OOM or memory-limit events.
+
+| Fixed standalone filter | SAT | FM |
+| --- | ---: | ---: |
+| Independent checks passed | 31/31 | 31/31 |
+| Final points | 15,916,148 | 15,916,194 |
+| Positive instance IDs | 100 | 114 |
+| CLI wall time | 621.08 s | 925.29 s |
+| Peak cgroup memory | 7.02 GiB | 7.83 GiB |
+| Exact-coordinate positive-label conflicts | 0 | 0 |
+| Duplicate-coordinate extra records | 0 | 0 |
+| Original points missing within the 1 cm voxel diagonal | 0 | 0 |
+| Explained record removals relative to the failed run | 498 | 524 |
+| Added records | 0 | 0 |
+
+The unchanged independent validator checks every record, including source
+provenance/multiplicity, all retained attributes, metadata/CRS, stage accounting,
+reconciliation groups and one output file per positive ID. All original points
+remain covered within the historical 1 cm center-of-mass voxel diagonal, and
+all positive dense core records retain positive geometry within 1 cm plus the
+documented numerical allowance. Separate probes confirm that all **30 SAT and
+1 FM previously conflicting locations** now retain exactly the expected source
+tile's positive record, including ForestMamba score bits.
+
+An exhaustive multiset comparison normalizes IDs by their complete source
+reconciliation groups. Groups are unchanged; no records were added. Every
+removed record is independently traced to an exact-coordinate surviving winner
+under the existing ownership or tree-over-background rule, with old/new overlap
+eligibility demonstrated from original LAS coordinates. There are **zero
+unexplained changes**. This closes the reproduced GFZ filter blocker.
+
+All **281** source/snapshot/input checks and **72** prior-run artifact checks
+passed. The earlier failed reports are retained. Commands, resource measurements,
+validator results and artifact hashes are in
+[`2026-10-13-gfz-boundary-fix.json`](2026-10-13-gfz-boundary-fix.json).
+This local acceptance does not establish an arbitrary-density memory bound or
+close the earlier remap/export and downstream release-certification gaps.
