@@ -210,3 +210,93 @@ and 16 subtests** in 6.64 seconds. Three CLI-parsing regression cases cover
 omitted/empty/selected optional attributes and coexistence with ordinary outputs.
 The tests ran under 4 CPUs/12 GiB with read-only source and no network. Commands
 and artifact hashes are recorded in `2026-10-13-scenarios.json`.
+
+## Full GFZ filtering and instance tiles — 2026-10-13
+
+The uncropped GFZ runs at source commit `39b8791` close the missing full-size
+test coverage, but **standalone buffered-tile filtering fails independent
+acceptance for both SAT and FM**. The separate `--instance-tiles` route passes.
+No SmartTile algorithm was changed during this validation pass.
+
+All eight original files contain **16,426,961 points**. The complete historical
+GFZ cache supplies four dense 1 cm tiles per model, **53,265,082 buffered records
+per model**, with matching 60 m cores and 20 m buffers. Both real SAT and FM
+predictions were reused; no inference or production services ran. The historical
+dense geometry uses center-of-mass voxels, so original coverage is checked at
+the 1 cm voxel diagonal rather than requiring original-coordinate identity.
+The incomplete October 12 dense cache was explicitly excluded.
+
+Each filter ran in the previously identified scientific runtime with 8 CPUs,
+32 GiB memory including swap, SSD scratch, read-only sources/inputs, and network
+disabled. The two filter jobs ran concurrently. CPU measurements include worker
+processes; scratch peaks are sampled every 10 seconds.
+
+| Standalone filter | SAT | FM |
+| --- | ---: | ---: |
+| CLI result | Exit 0 | Exit 0 |
+| Final points | 15,916,646 | 15,916,718 |
+| Positive instance IDs | 100 | 114 |
+| CLI wall time | 607.68 s | 908.31 s |
+| Cgroup CPU time | 1,658.81 s | 2,181.96 s |
+| Peak cgroup memory | 7.17 GiB | 7.93 GiB |
+| Sampled scratch peak | 3.61 GiB | 4.45 GiB |
+| Missing original points within 17.321 mm | 0 | 0 |
+| Maximum original-to-output distance | 11.314 mm | 14.457 mm |
+| Exact coordinate locations with conflicting positive IDs | **30** | **1** |
+| Independent acceptance | **Failed** | **Failed** |
+
+Independent validation uses laspy, NumPy and SciPy without SmartTile imports.
+It checks every output record and its multiplicity against the cached source,
+including all retained attributes and the declared instance-ID mapping. All
+metadata/CRS checks, stage accounting, reconciliation graph checks, one output
+file per positive ID, and exhaustive original coverage passed. All 36,256,804 SAT
+and 37,148,305 FM positive dense core records have positive final geometry within
+1 cm, plus the documented 1e-8 m numerical allowance. Spatial matching scores and
+biological segmentation quality are not independently certified.
+
+### Blocking outer-boundary defect
+
+The conflicting points have bit-identical decoded XYZ and distinct positive IDs
+from different source tiles. They are neither quantization aliases introduced by
+the validator nor existing same-tile label ambiguity. Both records survive while
+the CLI reports no conflicts. For example, SAT retains IDs 66 and 94 at
+`(398739.999, 5646206.642, 409.683)`.
+
+The overlap bound conversion in `src/remap_first_pipeline.py:299` yields local
+upper X `46.570999999996275`, whereas the LAS integer-coordinate conversion yields
+`46.571`. The difference, `3.723e-12` m, exceeds `inside_xy`'s local-coordinate
+allowance of `5.684e-14` m (`src/bounded_point_index.py:511`). Consequently, valid
+boundary points are excluded before ownership resolution and conflict checks.
+A two-record reproduction detects the zero-distance conflict without the overlap
+mask, misses it with the current bounds, and detects it with an experimental
+guard derived from the global-coordinate precision. That experiment is diagnostic
+evidence, **not an implemented or fully validated repair**. The bounds conversion
+needs a regression-tested fix and both full GFZ filter runs must pass afterward.
+
+### Whole-instance route
+
+The full original-with-predictions collection was also tiled with
+`--instance-tiles PredInstance_SAT,PredInstance_FM` at 1 cm and 10 cm, using 10 m
+cores, 2 m buffers, and eleven optional source/model/species attributes. The
+required instance attribute is carried automatically. All **34 independent
+checks passed** across 26 occupied output tiles per collection:
+
+- All selected records match source coordinates, instance labels and raw
+  attribute values; CRS and missing-value declarations are preserved.
+- All 100 SAT and 114 FM positive instances have one correct centroid owner.
+- Every original point has retained geometry of the same instance within the
+  respective voxel diagonal; zero uncovered points at either resolution.
+- SAT selected 15,918,455 / 2,484,151 points at 1 / 10 cm; FM selected
+  15,918,439 / 2,481,853 points. Subsampling preserves representation and ownership,
+  not every original record.
+
+The tile command took 68.00 s under 4 CPUs/20 GiB, with peak cgroup memory
+2.91 GiB and sampled scratch 1.44 GiB. Exhaustive verification took a further
+597.45 s. All original/source hashes remained unchanged. No completed SSD run
+had an OOM or memory-limit event. Earlier HDD attempts were interrupted because
+of storage stalls and are excluded from pass/fail and performance evidence.
+
+Commands, checks, source/runtime identity, artifact paths and hashes are recorded
+in [`2026-10-13-full-gfz.json`](2026-10-13-full-gfz.json). The original failed filter
+reports and diagnostic reproductions are retained. These results do not change
+the earlier remap/export defects or certify the three downstream workflows.
