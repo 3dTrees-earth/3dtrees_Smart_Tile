@@ -28,12 +28,13 @@ def read_ply(path):
         return header, np.fromfile(stream, dtype=dtype, count=count)
 
 
-def write_source(path):
-    header = laspy.LasHeader(point_format=7, version="1.4")
+def write_source(path, *, version="1.4"):
+    header = laspy.LasHeader(point_format=3 if version == "1.2" else 7, version=version)
     header.scales, header.offsets = np.full(3, 0.001), np.array([400000.0, 5600000.0, 0.0])
     for name, kind in (("treeID", np.uint32), ("PredSemantic", np.uint8),
                        ("semantic_seg", np.uint8), ("NirChannel", np.float32)):
         header.add_extra_dim(laspy.ExtraBytesParams(name=name, type=kind))
+    header.add_extra_dim(laspy.ExtraBytesParams(name="Amplitude", type=np.int16, no_data=[-1]))
     las = laspy.LasData(header)
     las.x = 400000.0 + np.array([1.5, 2.25, 3.0])
     las.y = 5600000.0 + np.array([4.0, 5.5, 6.75])
@@ -43,6 +44,7 @@ def write_source(path):
     las.PredSemantic = np.array([1, 2, 0], dtype=np.uint8)
     las.semantic_seg = np.array([3, 3, 1], dtype=np.uint8)
     las.NirChannel = np.array([0.25, 0.5, 0.75], dtype=np.float32)
+    las.Amplitude = np.array([-1, 42, 7], dtype=np.int16)
     las.write(path)
     return las
 
@@ -83,14 +85,15 @@ def test_pdal_ply_gets_exact_names_and_values_back(tmp_path, dims):
 
 @pytest.mark.skipif(shutil.which("pdal") is None, reason="needs the PDAL executable")
 @pytest.mark.parametrize("generate_index", [True, False])
-def test_full_ply_has_uint32_index_and_preserves_source_values(tmp_path, generate_index):
+@pytest.mark.parametrize("las_version", ["1.2", "1.4"])
+def test_full_ply_has_uint32_index_and_preserves_source_values(tmp_path, generate_index, las_version):
     from full_resolution_merge import ORIGINAL_POINT_INDEX
     from main_create_merged_file import create_prod_merged_files
 
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     source = source_dir / "input.laz"
-    original = write_source(source)
+    original = write_source(source, version=las_version)
     expected_index = np.arange(len(original.points), dtype=np.uint32)
     if not generate_index:
         original.add_extra_dim(laspy.ExtraBytesParams(name=ORIGINAL_POINT_INDEX, type=np.uint64))
@@ -103,9 +106,31 @@ def test_full_ply_has_uint32_index_and_preserves_source_values(tmp_path, generat
     _, data = read_ply(ply_path)
     assert data.dtype[ORIGINAL_POINT_INDEX] == np.dtype("<u4")
     np.testing.assert_array_equal(data[ORIGINAL_POINT_INDEX], expected_index)
-    for name in ("treeID", "PredSemantic", "semantic_seg", "NirChannel", "x", "y", "z",
+    for name in ("treeID", "PredSemantic", "semantic_seg", "NirChannel", "Amplitude", "x", "y", "z",
                  "red", "green", "blue"):
         np.testing.assert_array_equal(data[name], np.asarray(original[name]))
     laz = laspy.read(next(path for path in products if path.suffix == ".laz"))
     assert laz[ORIGINAL_POINT_INDEX].dtype == np.dtype(np.uint64)
     np.testing.assert_array_equal(laz[ORIGINAL_POINT_INDEX], expected_index)
+
+
+@pytest.mark.skipif(shutil.which("pdal") is None, reason="needs the PDAL executable")
+@pytest.mark.parametrize("las_version", ["1.2", "1.4"])
+def test_subsampled_ply_preserves_legacy_and_modern_extra_bytes(tmp_path, las_version):
+    from main_create_merged_file import create_prod_merged_files
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    original = write_source(source_dir / "input.laz", version=las_version)
+    before = (source_dir / "input.laz").read_bytes()
+    products = create_prod_merged_files(source_dir, tmp_path / "out", "10cm", "ply", 0.01, 0.1,
+                                       num_spatial_chunks=1, chunk_workers=1)
+    _, data = read_ply(products[0])
+    # Each source point occupies a distinct 10cm voxel; all must survive exactly.
+    assert len(data) == len(original.points)
+    order = np.argsort(data["x"])
+    for name in ("treeID", "PredSemantic", "semantic_seg", "NirChannel", "Amplitude", "x", "y", "z",
+                 "red", "green", "blue"):
+        np.testing.assert_array_equal(data[name][order], np.asarray(original[name]), err_msg=name)
+    assert "OriginalPointIndex" not in data.dtype.names
+    assert (source_dir / "input.laz").read_bytes() == before

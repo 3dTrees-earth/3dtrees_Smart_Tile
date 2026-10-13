@@ -182,7 +182,9 @@ def create_full_resolution_product(inputs: List[Path], output_file: Path, output
 
             candidate = Path(work) / "merged.ply"
             pdal = shutil.which("pdal") or "pdal"
+            # LAS 1.2/1.3 can carry ExtraBytes VLRs, which PDAL ignores by default.
             result = subprocess.run([pdal, "translate", str(merged), str(candidate),
+                                     "--readers.las.use_eb_vlr=true",
                                      "--writers.ply.storage_mode=little endian"],
                                     capture_output=True, text=True, check=False)
             if result.returncode != 0:
