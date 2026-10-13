@@ -496,6 +496,56 @@ than LAS 1.4 (GeoTIFF keys only) are left unchanged.
 python src/run.py --show-params
 ```
 
+### Instance tiles: inputs that already carry predictions
+
+For originals that already hold instance predictions (for example originals with
+predictions from a merge or remap), a per-instance tool such as DetailView needs
+tiles in which every instance appears once and whole. No buffer filtering,
+reconciliation or deduplication is needed, so the tile task does it directly.
+This is a command-line feature; the Galaxy wrapper does not expose it.
+
+```bash
+python src/run.py --task tile --input-dir /path/to/originals_with_predictions --output-dir /path/to/products \
+    --instance-tiles PredInstance_SAT,PredInstance_FM --instance-resolutions 0.01,0.1 \
+    --instance-tile-dims intensity     # optional extra attributes (default: XYZ + instance only)
+```
+
+- One collection per dimension and resolution: `instance_tiles_<dimension>_<resolution>/c00_r00.laz`,
+  e.g. `instance_tiles_PredInstance_SAT_1cm/`. All resolutions come from the same two reads.
+  Without `--tile-outputs`, only instance tiles are written.
+- Each instance belongs to the tile whose core holds its XY centroid and is written
+  there whole, so a tile extends as far as its instances reach. Background (ID 0)
+  stays with the tile whose core holds each point.
+- Voxels are keyed by (instance, voxel) and keep the original point nearest the voxel
+  mean: touching trees are never blended, and the instance ID and carried attributes
+  are real values. Every source point is represented exactly once (checked).
+- Instance IDs must be unique across all input files. Separately segmented files that
+  each number from 1 reuse IDs at unrelated places: an ID found in several files whose
+  boxes for it lie more than 5 m apart is a suspected reuse, and more than max(10, 5%
+  of the IDs) fail the run (`--allow-reused-instance-ids` skips the check). One tree
+  split across files under one ID (touching boxes) is fine, and so are wide instances
+  within one file: segmentation models produce scattered instances (dataset 645:
+  SegmentAnyTree labels up to 313 m wide). Instances wider than `--max-instance-extent`
+  (default 50 m) only print a warning.
+- The inputs are read twice (instance statistics, then the spill).
+
+After the per-instance tool has added its per-point fields (e.g. `species_id`,
+`species_prob`), remap them with `--match-instances`:
+
+```bash
+python src/run.py --task remap --segmented-folders /path/to/species_tiles_sat,/path/to/species_tiles_fm \
+    --original-laz-input-dir /path/to/originals_with_predictions --original-laz-output-dir /path/to/out \
+    --match-instances --resolution-1 0.01 --remap-dims species_id_sat,species_prob_sat,species_id_fm,species_prob_fm
+```
+
+Each collection is matched on the one `PredInstance*` dimension it carries: every
+original point takes the values of the nearest prediction point **of its own
+instance**, so points at a crown contact never take the neighbour's species. The
+originals' instance IDs are neither changed nor transferred. Use the instance tile
+resolution as `--resolution-1`; every original point then has a representative of
+its own (instance, voxel) within the voxel diagonal, so the 100% coverage gate holds.
+No high-resolution tiles, tile bounds or merge manifest are needed.
+
 ---
 
 ## Detailed Usage
@@ -851,6 +901,11 @@ neighbors; unrelated or already-updated layouts are not recovered this way.
 | `--tile-outputs` | — | All tiled outputs in order, as `resolution:format` pairs (`laz`, `copc.laz`, `ply`), written to `subsampled_res1`, `subsampled_res2`, ...; replaces the four flags above |
 | `--subsampling-method` | center-of-mass | Subsampling method: `center-of-mass` or `nearest-to-centroid` |
 | `--tiling-threshold` | None | File size threshold in MB for skipping tiling on single small files |
+| `--instance-tiles` | — | Comma-separated instance dimensions: one `instance_tiles_<dimension>/` collection each, every instance whole in one tile |
+| `--instance-resolutions` | 0.01 | Comma-separated instance tile voxel sizes in metres, one collection each (per instance; nearest point to the voxel mean) |
+| `--max-instance-extent` | 50 | Warn about instances wider than this many metres (warning only) |
+| `--instance-tile-dims` | — | Extra dimensions carried into instance tiles |
+| `--allow-reused-instance-ids` | False | Skip the check that fails when many instance IDs occur in several input files more than 5 m apart |
 
 ### Merge, Filter and Remap Parameters
 
@@ -876,6 +931,7 @@ neighbors; unrelated or already-updated layouts are not recovered this way.
 | `--baseline-1cm-folders` | Merge manifest, else none | Optional shared baseline or folders in model order; adds a baseline coverage check to final remap. A manifest baseline that no longer exists is skipped |
 | `--remap-tolerance` | Auto: sqrt(3) × `--resolution-1` | Optional final original coverage radius override in XYZ metres |
 | `--remap-dims` | All prediction dims | Optional comma-separated allowlist of prediction dimensions to transfer |
+| `--match-instances` | False | Remap instance tiles: each original point takes the values of the nearest prediction point of its own instance (each collection's `PredInstance*`); instance IDs stay unchanged |
 | `--original-laz-input-dir` | None | Uploaded raw originals; legacy alias: original-input-dir |
 | `--original-laz-output-dir` | Derived | Enriched raw originals |
 | `--original-copc-input-dir` | None | Optional twin validation, not product geometry |

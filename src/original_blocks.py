@@ -37,8 +37,9 @@ def block_size(point_count, extent):
 
 
 def _spill(task):
-    task_id, path, start, count, origin, size, directory = task
+    task_id, path, start, count, origin, size, directory, label_stores = task
     os.environ["RAYON_NUM_THREADS"] = "1"
+    stores = {name: np.load(store, mmap_mode="r+") for name, store in label_stores.items()}
     with laspy.open(path) as reader:
         header = reader.header
         reader.seek(start)
@@ -49,6 +50,8 @@ def _spill(task):
                 raise ValueError(f"{path}: expected {count} points from {start}, read {done}")
             records = np.empty(len(points), dtype=SPILL)
             records["i"] = np.arange(start + done, start + done + len(points), dtype=np.uint32)
+            for name, store in stores.items():
+                store[start + done:start + done + len(points)] = np.asarray(points[name])
             for axis in ("X", "Y", "Z"):
                 records[axis] = np.asarray(points[axis])
             done += len(points)
@@ -67,19 +70,28 @@ def _spill(task):
                     handle.write(records[order[first:end]].tobytes())
 
 
-def spill_original(path, origin, directory, workers):
-    """Write every point of `path` to its XY block under `directory`; return the block edge."""
+def spill_original(path, origin, directory, workers, labels=(), label_dir=None):
+    """Write every point of `path` to its XY block under `directory`; return the block edge.
+
+    ``labels`` names dimensions of the original whose values are also stored,
+    by point index, as ``label_dir/<name>.npy`` (read with ``np.load(..., mmap_mode="r")``).
+    """
     with laspy.open(path) as reader:
         header = reader.header
         count = int(header.point_count)
         extent = (header.x_min, header.x_max, header.y_min, header.y_max)
+        label_types = {name: header.point_format.dimension_by_name(name).dtype for name in labels}
     if count >= 2**32:
         raise ValueError(f"{path}: more than 2^32 points per original are not supported")
     size = block_size(count, extent)
+    stores = {}
+    for name, dtype in label_types.items():
+        stores[name] = str(Path(label_dir) / f"{name}.npy")
+        np.lib.format.open_memmap(stores[name], mode="w+", dtype=dtype, shape=(count,)).flush()
     if not count:
         return size
     chunk = max(READ_POINTS, math.ceil(count / max(1, 2 * workers)))
-    tasks = [(index, str(path), start, min(chunk, count - start), tuple(origin), size, str(directory))
+    tasks = [(index, str(path), start, min(chunk, count - start), tuple(origin), size, str(directory), stores)
              for index, start in enumerate(range(0, count, chunk))]
     with ProcessPoolExecutor(max_workers=max(1, min(workers, len(tasks))),
                              mp_context=multiprocessing.get_context("spawn")) as pool:

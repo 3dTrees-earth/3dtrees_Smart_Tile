@@ -264,10 +264,15 @@ def run_tile_task(params: Parameters):
             raise ValueError("Both grid-origin-x and grid-origin-y are required")
         grid_origin = None if params.grid_origin_x is None else (params.grid_origin_x, params.grid_origin_y)
         from product_formats import parse_tile_outputs
-        tile_outputs = (parse_tile_outputs(params.tile_outputs) if params.tile_outputs else
-                        [(res1, "copc.laz" if output_copc_res1 else "laz"),
-                         (res2, "copc.laz" if output_copc_res2 else "laz")])
-        if not tile_outputs:
+        instance_dimensions = _parse_csv(params.instance_tiles) if params.instance_tiles else []
+        if params.tile_outputs:
+            tile_outputs = parse_tile_outputs(params.tile_outputs)
+        elif instance_dimensions:
+            tile_outputs = []  # instance tiles only
+        else:
+            tile_outputs = [(res1, "copc.laz" if output_copc_res1 else "laz"),
+                            (res2, "copc.laz" if output_copc_res2 else "laz")]
+        if not tile_outputs and not instance_dimensions:
             raise ValueError("--tile-outputs lists no outputs")
         center_of_mass = normalize_subsampling_method(subsampling_method) == SUBSAMPLING_METHOD_CENTER_OF_MASS
         # Both methods need only each voxel's points: read each source point once and
@@ -279,7 +284,17 @@ def run_tile_task(params: Parameters):
         output_dirs = list(subsample_tiles_single_scan(
             plan, output_dir, [r for r, _ in tile_outputs], [f for _, f in tile_outputs],
             workers=spatial_query_worker_count(workers), converters=min(TILE_CONVERTERS, workers),
-            output_prefix=f"{output_dir.name}_{int(tile_length)}m", nearest=not center_of_mass))
+            output_prefix=f"{output_dir.name}_{int(tile_length)}m", nearest=not center_of_mass)) if tile_outputs else []
+        instance_results = {}
+        if instance_dimensions:
+            from instance_tiles import instance_tiles_from_plan
+            instance_results = instance_tiles_from_plan(
+                plan, output_dir, instance_dimensions,
+                resolutions=[float(r) for r in _parse_csv(params.instance_resolutions)],
+                wide=params.max_instance_extent,
+                attributes=_parse_csv(params.instance_tile_dims) if params.instance_tile_dims else [],
+                check_ids=not params.allow_reused_instance_ids, workers=spatial_query_worker_count(workers),
+                publish_occupancy=not tile_outputs)
 
         # Step 7: Update tile_bounds_tindex.json with actual bounds from created tiles
         # (so remap/merge matching uses file extent instead of nominal grid)
@@ -297,6 +312,10 @@ def run_tile_task(params: Parameters):
         print("=" * 60)
         for (resolution, output_format), directory in zip(tile_outputs, output_dirs):
             print(f"Subsampled {resolution} m ({output_format}): {directory}")
+        for dimension, result in instance_results.items():
+            for resolution, output in result["outputs"].items():
+                print(f"Instance tiles {dimension} at {resolution} m: {output['tiles']} tiles, "
+                      f"{result['instances']} instances, {output['points']:,} points: {output['directory']}")
 
         # Return the input_dir for use in merge task if needed
         return input_dir
@@ -404,6 +423,7 @@ def run_remap_task(params: Parameters):
             remap_tolerance=params.remap_tolerance,
             instance_dimension=params.instance_dimension,
             target_dims=set(_parse_csv(params.remap_dims)) if params.remap_dims else None,
+            match_instances=params.match_instances,
         )
         if params.transfer_original_dims_to_merged:
             _create_prod_merged_outputs(output, output.parent, params)
@@ -486,6 +506,8 @@ def preprocess_boolean_flags(args_list):
         '--output-copc-res2', '--output_copc_res2',
         '--skip-merged-file', '--skip_merged_file',
         '--skip-unfiltered-tiles', '--skip_unfiltered_tiles',
+        '--match-instances', '--match_instances',
+        '--allow-reused-instance-ids', '--allow_reused_instance_ids',
         '--original-point-index', '--original_point_index',
         '--transfer-original-dims-to-merged', '--transfer_original_dims_to_merged',
     ]
@@ -597,6 +619,11 @@ def _print_cli_help() -> None:
                 "grid_origin_x",
                 "grid_origin_y",
                 "tile_outputs",
+                "instance_tiles",
+                "instance_resolutions",
+                "max_instance_extent",
+                "instance_tile_dims",
+                "allow_reused_instance_ids",
                 "resolution_1",
                 "resolution_2",
                 "output_copc_res1",
@@ -629,6 +656,7 @@ def _print_cli_help() -> None:
                 "segmented_folders",
                 "merged_laz",
                 "baseline_1cm_folders",
+                "match_instances",
                 "remap_tolerance",
                 "remap_dims",
                 "original_with_predictions_dir",

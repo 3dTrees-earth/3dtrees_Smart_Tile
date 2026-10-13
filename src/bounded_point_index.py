@@ -290,6 +290,45 @@ class PointIndex:
                 values[name][group] = found_values[name]
         return distances, values, refs
 
+    def nearest_matching(self, xyz, radius, dimension, labels):
+        """Nearest within radius among indexed points whose ``dimension`` equals the query's label.
+
+        Used to remap per-point values (e.g. species) from instance tiles onto
+        originals that carry the same instance IDs: a point never takes values
+        from a neighbouring instance. Ties resolve by tile insertion and point
+        order, as in ``nearest``.
+        """
+        labels = np.asarray(labels)
+        distances = np.full(len(xyz), np.inf)
+        values = {name: np.zeros(len(xyz), dtype=dtype) for name, dtype in self.dimensions.items()}
+        refs = np.full((len(xyz), 2), -1, dtype=np.int64)
+        for group in spatial_batches(xyz):
+            pts, lab = xyz[group], labels[group]
+            limit = distance_limit(pts, radius)
+            for tile_id, data in self.candidates(pts, radius):
+                candidate_labels = data["values"][dimension]
+                for label in np.unique(lab):
+                    queries = np.flatnonzero(lab == label)
+                    selected = candidate_labels == label
+                    if not np.any(selected):
+                        continue
+                    sub = select_data(data, selected)
+                    d, nearest, _ = self.nearest_in_tree(cKDTree(sub["xyz"]), pts[queries], sub["indices"], limit)
+                    rows = group[queries]
+                    nearest = np.minimum(nearest, len(sub["indices"]) - 1)
+                    ref = sub["indices"][nearest]
+                    old, old_refs = distances[rows], refs[rows]
+                    later = (old_refs[:, 0] >= 0) & ((tile_id > old_refs[:, 0]) |
+                                                     ((tile_id == old_refs[:, 0]) & (ref > old_refs[:, 1])))
+                    better = np.isfinite(d) & (d <= limit) & ((d < old) | ((d == old) & ~later))
+                    chosen = rows[better]
+                    distances[chosen] = d[better]
+                    refs[chosen, 0] = tile_id
+                    refs[chosen, 1] = ref[better]
+                    for name in values:
+                        values[name][chosen] = sub["values"][name][nearest[better]]
+        return distances, values, refs
+
     def _nearest_batches(self, xyz, radius, *, tile=None, before_tile=None, overlaps=None, positive_dimension=None):
         """Nearest within radius; ties resolve by tile insertion/point order."""
         distances = np.full(len(xyz), np.inf)

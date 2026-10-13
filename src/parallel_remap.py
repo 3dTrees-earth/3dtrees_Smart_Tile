@@ -19,13 +19,22 @@ from spatial_query_cache import REGION_SIZE
 _worker_indices = None
 _worker_baselines = None
 _worker_radius = None
+_worker_matches = None
 
 
-def _query(xyz, indices, baselines, radius):
+def _query(xyz, indices, baselines, radius, matches=None, labels=None):
+    """Per model: (baseline distances, distances, values).
+
+    ``matches[i]`` names an instance dimension: model i then only matches
+    prediction points with the query's own label (``labels[name]``).
+    """
     results = []
-    for index, baseline in zip(indices, baselines):
+    matches = matches or [None] * len(indices)
+    for index, baseline, match in zip(indices, baselines, matches):
         base_distances = None if baseline is None else baseline.nearest_distances(xyz, radius)
-        if 'PredInstance_RCT' in index.dimensions:
+        if match is not None:
+            distances, values, _ = index.nearest_matching(xyz, radius, match, labels[match])
+        elif 'PredInstance_RCT' in index.dimensions:
             # A retained/recovered tree wins over neighboring background. This
             # affects original enrichment only; tile memberships stay intact.
             distances, values, _ = index.nearest(xyz, radius, positive_dimension='PredInstance_RCT')
@@ -41,18 +50,19 @@ def _query(xyz, indices, baselines, radius):
     return results
 
 
-def _initialize_worker(index_specs, baseline_specs, radius):
-    global _worker_indices, _worker_baselines, _worker_radius
+def _initialize_worker(index_specs, baseline_specs, radius, matches=None):
+    global _worker_indices, _worker_baselines, _worker_radius, _worker_matches
     # Spawned processes open their own connections; no SQLite handle is shared.
     _worker_indices = [PointIndex(path, dims, query_workers=1, read_only=True)
                        for path, dims in index_specs]
     _worker_baselines = [None if spec is None else PointIndex(*spec, query_workers=1, read_only=True)
                          for spec in baseline_specs]
     _worker_radius = radius
+    _worker_matches = matches
 
 
-def _worker_query(xyz):
-    return _query(xyz, _worker_indices, _worker_baselines, _worker_radius)
+def _worker_query(xyz, labels=None):
+    return _query(xyz, _worker_indices, _worker_baselines, _worker_radius, _worker_matches, labels)
 
 
 def region_owners(xyz, workers):
@@ -88,10 +98,11 @@ class RemapBatchQueries:
     batches per worker are admitted, including completed out-of-order results.
     """
 
-    def __init__(self, indices, baselines, *, workers, radius):
+    def __init__(self, indices, baselines, *, workers, radius, matches=None):
         if workers < 1 or len(indices) != len(baselines):
             raise ValueError("Positive workers and paired remap indexes are required")
         self.indices, self.baselines = indices, baselines
+        self.matches = matches
         self.workers, self.radius = workers, radius
         self.max_pending = 2 * workers
         self.pools = []
@@ -106,7 +117,8 @@ class RemapBatchQueries:
             # One single-process pool per worker: a region is always answered by
             # the same process, which keeps that region's trees cached.
             self.pools = [ProcessPoolExecutor(max_workers=1, mp_context=context, initializer=_initialize_worker,
-                                              initargs=(specs(self.indices), specs(self.baselines), self.radius))
+                                              initargs=(specs(self.indices), specs(self.baselines), self.radius,
+                                                        self.matches))
                           for _ in range(self.workers)]
         return self
 
@@ -116,10 +128,14 @@ class RemapBatchQueries:
             pool.shutdown(wait=True, cancel_futures=True)
 
     def map(self, batches):
-        """Yield (record, XYZ, per-model results) in original input order."""
+        """Yield (record, XYZ, per-model results) in original input order.
+
+        Batches are (record, XYZ) or, with ``matches``, (record, XYZ, labels).
+        """
         if not self.pools:
-            for record, xyz in batches:
-                yield record, xyz, _query(xyz, self.indices, self.baselines, self.radius)
+            for record, xyz, *labels in batches:
+                yield record, xyz, _query(xyz, self.indices, self.baselines, self.radius, self.matches,
+                                          labels[0] if labels else None)
             return
         pending = deque()
         iterator = iter(batches)
@@ -128,12 +144,15 @@ class RemapBatchQueries:
             while pending or not exhausted:
                 while not exhausted and len(pending) < self.max_pending:
                     try:
-                        record, xyz = next(iterator)
+                        record, xyz, *labels = next(iterator)
                     except StopIteration:
                         exhausted = True
                         break
+                    labels = labels[0] if labels else None
                     owners = region_owners(xyz, self.workers)
-                    parts = [(positions, self.pools[worker].submit(_worker_query, xyz[positions]))
+                    parts = [(positions, self.pools[worker].submit(
+                                 _worker_query, xyz[positions],
+                                 None if labels is None else {n: v[positions] for n, v in labels.items()}))
                              for worker in np.unique(owners)
                              for positions in [np.flatnonzero(owners == worker)]]
                     pending.append((record, xyz, parts))

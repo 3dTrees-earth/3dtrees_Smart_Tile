@@ -141,8 +141,14 @@ ORIGINAL_WRITE_POINTS = 1_000_000
 
 
 def enrich_originals(models, indices, baseline_indices, originals, output_dir, origin, report, *,
-                     target_dims=None):
-    """Stage all originals and measure every model independently before failing."""
+                     target_dims=None, matches=None):
+    """Stage all originals and measure every model independently before failing.
+
+    ``matches[i]`` (an instance dimension the originals already carry) makes
+    model i match only prediction points of the same instance; that dimension
+    is then not transferred.
+    """
+    matches = list(matches or [None] * len(models))
     files = raw_point_cloud_files(originals)
     if not files:
         raise ValueError(f"No raw LAS/LAZ originals found in {originals}")
@@ -162,8 +168,9 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
     selected = []
     ids_by_dimension = {}
     used = set()
-    for model in models:
-        dims = {n: p for n, p in model.dimensions.items() if target_dims is None or n in target_dims}
+    for model, match in zip(models, matches):
+        dims = {n: p for n, p in model.dimensions.items()
+                if (target_dims is None or n in target_dims) and n != match}
         if not dims:
             raise ValueError(f"No selected prediction dimensions for model {model.name}")
         if used.intersection(dims):
@@ -179,8 +186,9 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
     radius = report["original_radius_m"]
     enrichment_start = time.monotonic()
     phases = {"spill": 0.0, "query": 0.0, "write": 0.0}
+    labels = sorted({m for m in matches if m is not None})
     with RemapBatchQueries(indices, baseline_indices, workers=process_workers,
-                          radius=radius) as queries:
+                          radius=radius, matches=matches if labels else None) as queries:
         for file in files:
             file_ids = {model.instance: set() for model, dims in zip(models, selected)
                         if model.instance and model.instance in dims}
@@ -193,8 +201,10 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                 final_metrics = [_coverage_metric(file, model, "final_survivors", radius) for model in models]
                 baseline_metrics = [None if baseline is None else _coverage_metric(file, model, "unfiltered_1cm", radius)
                                     for model, baseline in zip(models, baseline_indices)]
-                for model, metric in zip(models, final_metrics):
-                    if model.instance == "PredInstance_RCT":
+                for model, metric, match in zip(models, final_metrics, matches):
+                    if match is not None:
+                        metric["match_instance_dimension"] = match
+                    elif model.instance == "PredInstance_RCT":
                         metric["unmatched_policy"] = "background_zero"
                         metric["background_assigned"] = 0
                 metrics.extend([m for m in baseline_metrics if m is not None] + final_metrics)
@@ -204,18 +214,23 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
             with tempfile.TemporaryDirectory(prefix=".enrich-", dir=output_dir.parent) as scratch:
                 scratch = Path(scratch)
                 tick = time.monotonic()
-                spill_original(file, origin, scratch / "blocks", process_workers)
+                spill_original(file, origin, scratch / "blocks", process_workers, labels=labels, label_dir=scratch)
+                label_stores = {name: np.load(scratch / f"{name}.npy", mmap_mode="r") for name in labels}
+                batches = block_batches(scratch / "blocks", source_header, origin)
+                if labels:
+                    batches = ((i, xyz, {n: np.asarray(v[i]) for n, v in label_stores.items()})
+                               for i, xyz in batches)
                 phases["spill"] += time.monotonic() - tick
                 tick = time.monotonic()
                 total = int(source_header.point_count)
                 store, assigned = {}, 0
-                for index, xyz, results in queries.map(block_batches(scratch / "blocks", source_header, origin)):
+                for index, xyz, results in queries.map(batches):
                     assigned += len(index)
                     for i, (base_distances, distances, values) in enumerate(results):
                         if base_distances is not None:
                             _record_coverage(baseline_metrics[i], xyz, base_distances, origin)
                         _record_coverage(final_metrics[i], xyz, distances, origin)
-                        if models[i].instance == "PredInstance_RCT":
+                        if models[i].instance == "PredInstance_RCT" and matches[i] is None:
                             missing = ~np.isfinite(distances)
                             final_metrics[i]["background_assigned"] += int(np.count_nonzero(missing))
                             if np.any(missing):
@@ -245,7 +260,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                         writer.write_points(out)
                         position += len(record)
                     write_retained_evlrs(writer, header)
-                del store
+                del store, label_stores
                 phases["write"] += time.monotonic() - tick
                 for dimension, ids in file_ids.items():
                     ids_by_dimension.setdefault(dimension, {})[file.name] = ids
@@ -650,8 +665,13 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
 
 def strict_remap(*, collections, originals, output, baseline_collections=None, target_dims=None,
                  instance_dimension="PredInstance", workers=1, resolution_1=None,
-                 remap_tolerance=None):
+                 remap_tolerance=None, match_instances=False):
     """Final task gate: 100% final coverage, plus baseline coverage where geometry is known.
+
+    With ``match_instances`` (instance tiles of originals that already carry
+    each collection's instance dimension), every original point takes the
+    values of the nearest prediction point of its own instance; the instance
+    IDs stay as they are.
 
     Merged predictions lie on the 1 cm geometry, so full final coverage implies
     full baseline coverage. Baseline geometry, from `baseline_collections` or a
@@ -707,8 +727,11 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
                                                        query_workers=query_workers))
                 maximum = 0
                 prediction_files = prediction_collection_files(collection)
+                if match_instances and not model.instance:
+                    raise ValueError(f"{collection}: matching instances needs one PredInstance* dimension per collection")
                 namespaces = (validate_rct_remap_sources(prediction_files)
-                              if model.instance == "PredInstance_RCT" else [None] * len(prediction_files))
+                              if model.instance == "PredInstance_RCT" and not match_instances
+                              else [None] * len(prediction_files))
                 for tile, (file, namespace) in enumerate(zip(prediction_files, namespaces)):
                     validate = (lambda record: validate_namespaced_labels(record[model.instance], namespace)
                                 ) if namespace is not None else None
@@ -735,7 +758,8 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
                 baselines.append(baseline_index)
             report.setdefault("timings", {})["indexing_seconds"] = time.monotonic() - indexing_start
             final_ids = enrich_originals(models, indices, baselines, originals, work / "originals", origin, report,
-                                      target_dims=target_dims)
+                                      target_dims=target_dims,
+                                      matches=[m.instance for m in models] if match_instances else None)
             rct_ids = final_ids.get("PredInstance_RCT", {})
             if rct_ids:
                 rct_collection = next(collection for collection, model in zip(collections, models)

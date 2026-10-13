@@ -108,6 +108,53 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("output-copc-res2", "output_copc_res2"),
     )
 
+    match_instances: bool = Field(
+        False,
+        description="Remap of instance tiles: the originals already carry each collection's instance dimension "
+                    "(e.g. PredInstance_SAT); every original point takes the values of the nearest prediction "
+                    "point of its own instance. Instance IDs are neither changed nor transferred.",
+        validation_alias=AliasChoices("match-instances", "match_instances"),
+    )
+
+    instance_tiles: Optional[str] = Field(
+        None,
+        description="Tile task: comma-separated instance dimensions (e.g. PredInstance_SAT,PredInstance_FM) of inputs "
+                    "that already carry predictions. Writes instance_tiles_<dimension>/ per dimension, in which every "
+                    "instance is whole in exactly one tile (the tile whose core holds its centroid); background "
+                    "follows core ownership. Without --tile-outputs, only instance tiles are written.",
+        validation_alias=AliasChoices("instance-tiles", "instance_tiles"),
+    )
+
+    instance_resolutions: str = Field(
+        "0.01",
+        description="Instance tiles: comma-separated voxel sizes in metres (e.g. 0.01,0.1), all from the same "
+                    "reads; one collection instance_tiles_<dimension>_<resolution> per dimension and resolution. "
+                    "Each (instance, voxel) keeps its original point nearest the voxel mean.",
+        validation_alias=AliasChoices("instance-resolutions", "instance_resolutions",
+                                      "instance-resolution", "instance_resolution"),
+    )
+
+    max_instance_extent: float = Field(
+        50.0, gt=0, allow_inf_nan=False,
+        description="Instance tiles: warn about instances wider than this many metres in X or Y (their tiles "
+                    "extend accordingly).",
+        validation_alias=AliasChoices("max-instance-extent", "max_instance_extent"),
+    )
+
+    instance_tile_dims: Optional[str] = Field(
+        None,
+        description="Instance tiles: comma-separated extra dimensions to carry (default: XYZ and the instance "
+                    "dimension only). Point format 0 dimensions stay standard; others are ExtraBytes.",
+        validation_alias=AliasChoices("instance-tile-dims", "instance_tile_dims"),
+    )
+
+    allow_reused_instance_ids: bool = Field(
+        False,
+        description="Instance tiles: skip the check that fails when many instance IDs occur in several input "
+                    "files more than 5 m apart (IDs reused by separately segmented files).",
+        validation_alias=AliasChoices("allow-reused-instance-ids", "allow_reused_instance_ids"),
+    )
+
     tile_outputs: Optional[str] = Field(
         None,
         description="All subsampled tile outputs in order, as 'resolution:format' pairs (formats: "
