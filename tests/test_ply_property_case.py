@@ -79,3 +79,33 @@ def test_pdal_ply_gets_exact_names_and_values_back(tmp_path, dims):
     np.testing.assert_allclose(data["NirChannel"], las.NirChannel)
     np.testing.assert_allclose(data["x"], las.x)  # georeferenced float64 XYZ
     np.testing.assert_array_equal(data["red"], las.red)
+
+
+@pytest.mark.skipif(shutil.which("pdal") is None, reason="needs the PDAL executable")
+@pytest.mark.parametrize("generate_index", [True, False])
+def test_full_ply_has_uint32_index_and_preserves_source_values(tmp_path, generate_index):
+    from full_resolution_merge import ORIGINAL_POINT_INDEX
+    from main_create_merged_file import create_prod_merged_files
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source = source_dir / "input.laz"
+    original = write_source(source)
+    expected_index = np.arange(len(original.points), dtype=np.uint32)
+    if not generate_index:
+        original.add_extra_dim(laspy.ExtraBytesParams(name=ORIGINAL_POINT_INDEX, type=np.uint64))
+        expected_index = np.array([0, 7, np.iinfo(np.uint32).max], dtype=np.uint32)
+        original[ORIGINAL_POINT_INDEX] = expected_index.astype(np.uint64)
+        original.write(source)
+    products = create_prod_merged_files(source_dir, tmp_path / "out", "full", "laz,ply",
+                                       0.01, 0.1, original_point_index=generate_index)
+    ply_path = next(path for path in products if path.suffix == ".ply")
+    _, data = read_ply(ply_path)
+    assert data.dtype[ORIGINAL_POINT_INDEX] == np.dtype("<u4")
+    np.testing.assert_array_equal(data[ORIGINAL_POINT_INDEX], expected_index)
+    for name in ("treeID", "PredSemantic", "semantic_seg", "NirChannel", "x", "y", "z",
+                 "red", "green", "blue"):
+        np.testing.assert_array_equal(data[name], np.asarray(original[name]))
+    laz = laspy.read(next(path for path in products if path.suffix == ".laz"))
+    assert laz[ORIGINAL_POINT_INDEX].dtype == np.dtype(np.uint64)
+    np.testing.assert_array_equal(laz[ORIGINAL_POINT_INDEX], expected_index)

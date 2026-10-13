@@ -271,10 +271,11 @@ class PointIndex:
                 break
         return found
 
-    def nearest(self, xyz, radius, *, tile=None, before_tile=None, overlaps=None, positive_dimension=None):
+    def nearest(self, xyz, radius, *, tile=None, before_tile=None, overlaps=None,
+                positive_dimension=None, matching=None):
         from spatial_query_cache import nearest_region
         options = dict(tile=tile, before_tile=before_tile, overlaps=overlaps,
-                       positive_dimension=positive_dimension)
+                       positive_dimension=positive_dimension, matching=matching)
         if not self._cache_ready or not self.query_cache.max_bytes:
             return self._nearest_batches(xyz, radius, **options)
         distances = np.full(len(xyz), np.inf)
@@ -295,41 +296,23 @@ class PointIndex:
 
         Used to remap per-point values (e.g. species) from instance tiles onto
         originals that carry the same instance IDs: a point never takes values
-        from a neighbouring instance. Ties resolve by tile insertion and point
-        order, as in ``nearest``.
+        from a neighbouring instance. Delegate each label to ``nearest`` so
+        cached and disk queries share its globally anchored numerical tie policy.
         """
         labels = np.asarray(labels)
         distances = np.full(len(xyz), np.inf)
         values = {name: np.zeros(len(xyz), dtype=dtype) for name, dtype in self.dimensions.items()}
         refs = np.full((len(xyz), 2), -1, dtype=np.int64)
-        for group in spatial_batches(xyz):
-            pts, lab = xyz[group], labels[group]
-            limit = distance_limit(pts, radius)
-            for tile_id, data in self.candidates(pts, radius):
-                candidate_labels = data["values"][dimension]
-                for label in np.unique(lab):
-                    queries = np.flatnonzero(lab == label)
-                    selected = candidate_labels == label
-                    if not np.any(selected):
-                        continue
-                    sub = select_data(data, selected)
-                    d, nearest, _ = self.nearest_in_tree(cKDTree(sub["xyz"]), pts[queries], sub["indices"], limit)
-                    rows = group[queries]
-                    nearest = np.minimum(nearest, len(sub["indices"]) - 1)
-                    ref = sub["indices"][nearest]
-                    old, old_refs = distances[rows], refs[rows]
-                    later = (old_refs[:, 0] >= 0) & ((tile_id > old_refs[:, 0]) |
-                                                     ((tile_id == old_refs[:, 0]) & (ref > old_refs[:, 1])))
-                    better = np.isfinite(d) & (d <= limit) & ((d < old) | ((d == old) & ~later))
-                    chosen = rows[better]
-                    distances[chosen] = d[better]
-                    refs[chosen, 0] = tile_id
-                    refs[chosen, 1] = ref[better]
-                    for name in values:
-                        values[name][chosen] = sub["values"][name][nearest[better]]
+        for label in np.unique(labels):
+            rows = np.flatnonzero(labels == label)
+            distances[rows], selected, refs[rows] = self.nearest(
+                xyz[rows], radius, matching=(dimension, label.item()))
+            for name in values:
+                values[name][rows] = selected[name]
         return distances, values, refs
 
-    def _nearest_batches(self, xyz, radius, *, tile=None, before_tile=None, overlaps=None, positive_dimension=None):
+    def _nearest_batches(self, xyz, radius, *, tile=None, before_tile=None, overlaps=None,
+                         positive_dimension=None, matching=None):
         """Nearest within radius; ties resolve by tile insertion/point order."""
         distances = np.full(len(xyz), np.inf)
         values = {name: np.zeros(len(xyz), dtype=dtype)
@@ -340,6 +323,11 @@ class PointIndex:
             pts = xyz[group]
             limit = distance_limit(pts, radius)
             for tile_id, data in self.candidates(pts, radius, tile=tile, before_tile=before_tile):
+                if matching is not None:
+                    dimension, label = matching
+                    data = select_data(data, data['values'][dimension] == label)
+                    if not len(data['xyz']):
+                        continue
                 if positive_dimension is not None:
                     data = select_data(data, data['values'][positive_dimension] > 0)
                     if not len(data['xyz']):
@@ -373,12 +361,12 @@ class PointIndex:
                     values[name][chosen] = data["values"][name][nearest[better]]
         self.resolve_numerical_ties(xyz, radius, numerical_ties, distances, values, refs,
                                     tile=tile, before_tile=before_tile, overlaps=overlaps,
-                                    positive_dimension=positive_dimension)
+                                    positive_dimension=positive_dimension, matching=matching)
         return distances, values, refs
 
     def resolve_numerical_ties(self, xyz, radius, ambiguous, distances, values, refs,
                                *, tile=None, before_tile=None, overlaps=None,
-                               positive_dimension=None):
+                               positive_dimension=None, matching=None):
         """Resolve rare non-exact ties against the global minimum in two passes.
 
         A chain of pairwise-close distances is not an equivalence relation.
@@ -410,7 +398,8 @@ class PointIndex:
                         continue
                     entry = None
                     if self._cache_ready and self.query_cache.max_bytes:
-                        entry = region_entry(self, source, cell, limit, positive_dimension, bounds)
+                        entry = region_entry(self, source, cell, limit, positive_dimension, bounds,
+                                             matching=matching)
                     if entry is not None:
                         tree, payload = entry
                         if tree is not None:
@@ -422,6 +411,9 @@ class PointIndex:
                         selected = np.ones(len(data['xyz']), dtype=bool)
                         if positive_dimension is not None:
                             selected &= data['values'][positive_dimension] > 0
+                        if matching is not None:
+                            dimension, label = matching
+                            selected &= data['values'][dimension] == label
                         if bounds is not None:
                             selected &= inside_xy(data['xyz'], bounds)
                         if np.any(selected):

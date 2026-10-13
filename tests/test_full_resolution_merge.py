@@ -163,3 +163,85 @@ def test_index_is_never_a_prediction_dimension(tmp_path):
     write_cloud(folder / "c00_r00.las", np.array([[500000.0, 5000000.0, 1.0]]), index=True)
     model = describe_model(folder, "PredInstance")
     assert ORIGINAL_POINT_INDEX not in model.dimensions and "PredInstance_SAT" in model.dimensions
+
+
+@pytest.mark.parametrize("bad_index", [2 ** 32, -1])
+def test_ply_index_overflow_rolls_back_all_requested_products(tmp_path, bad_index):
+    folder = tmp_path / "input"
+    folder.mkdir()
+    source = folder / "indexed.las"
+    original = write_cloud(source, np.array([[500000.0, 5000000.0, 1.0]]))
+    original.add_extra_dim(laspy.ExtraBytesParams(name=ORIGINAL_POINT_INDEX, type=np.int64))
+    original[ORIGINAL_POINT_INDEX] = [bad_index]
+    original.write(source)
+    before = source.read_bytes()
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="OriginalPointIndex.*uint32 range"):
+        create_prod_merged_files(folder, out, "full", "laz,ply", 0.01, 0.1,
+                                 original_point_index=False)
+    assert source.read_bytes() == before
+    assert not list(out.iterdir())
+
+
+@pytest.mark.parametrize("dtype", [np.uint64, np.int64])
+def test_ply_rejects_other_64_bit_integer_attributes_without_truncation(tmp_path, dtype):
+    source = tmp_path / "input.las"
+    original = write_cloud(source, np.array([[500000.0, 5000000.0, 1.0]]))
+    original.add_extra_dim(laspy.ExtraBytesParams(name="wide_value", type=dtype))
+    original.wide_value = [2 ** 40]
+    original.write(source)
+    output = tmp_path / "full.ply"
+    with pytest.raises(ValueError, match="64-bit integer attribute wide_value"):
+        create_full_resolution_product([source], output, "ply", original_point_index=True)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("dtype,scales,offsets", [
+    (np.float64, None, None), (np.uint64, [0.5], [0]), (np.uint64, [1], [2]),
+])
+def test_ply_rejects_noninteger_index_interpretations(tmp_path, dtype, scales, offsets):
+    source = tmp_path / "input.las"
+    original = write_cloud(source, np.array([[500000.0, 5000000.0, 1.0]]))
+    original.add_extra_dim(laspy.ExtraBytesParams(name=ORIGINAL_POINT_INDEX, type=dtype,
+                                               scales=scales, offsets=offsets))
+    original.write(source)
+    output = tmp_path / "full.ply"
+    with pytest.raises(ValueError, match="unscaled scalar integer"):
+        create_full_resolution_product([source], output, "ply", original_point_index=False)
+    assert not output.exists()
+
+
+def test_ply_conversion_failure_does_not_publish_partial_file(tmp_path, monkeypatch):
+    import full_resolution_merge
+    from types import SimpleNamespace
+
+    source = tmp_path / "input.las"
+    write_cloud(source, np.array([[500000.0, 5000000.0, 1.0]]))
+    output = tmp_path / "full.ply"
+
+    def fail_after_write(command, **kwargs):
+        Path(command[3]).write_bytes(b"partial PLY")
+        return SimpleNamespace(returncode=1, stderr="injected writer failure")
+
+    monkeypatch.setattr(full_resolution_merge.subprocess, "run", fail_after_write)
+    with pytest.raises(RuntimeError, match="injected writer failure"):
+        create_full_resolution_product([source], output, "ply", original_point_index=True)
+    assert not output.exists()
+    assert not list(tmp_path.glob(".full-merge-*"))
+
+
+@pytest.mark.parametrize("generate_index", [True, False])
+def test_ply_point_count_overflow_rejected_from_headers_before_reading_points(tmp_path, generate_index):
+    source = tmp_path / "oversize.las"
+    write_cloud(source, np.array([[500000.0, 5000000.0, 1.0]]))
+    # A header-only huge-count fixture ensures preflight never reads billions of records.
+    with source.open("r+b") as stream:
+        header = laspy.LasHeader.read_from(stream)
+        header.point_count = 2 ** 32
+        stream.seek(0)
+        header.write_to(stream)
+    output = tmp_path / "full.ply"
+    with pytest.raises(ValueError, match="PLY point count.*writer limit"):
+        create_full_resolution_product([source], output, "ply", original_point_index=generate_index)
+    assert not output.exists()
+    assert not list(tmp_path.glob(".full-merge-*"))

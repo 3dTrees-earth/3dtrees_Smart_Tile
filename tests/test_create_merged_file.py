@@ -551,7 +551,8 @@ class CreateMergedFileTests(unittest.TestCase):
                 srs_assignment_from_file=mock.Mock(return_value="EPSG:32632"),
             )
             with mock.patch("main_create_merged_file.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}):
+                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}), \
+                        mock.patch("point_cloud_metadata.preserve_extra_bytes_missingness"):
                     with mock.patch("main_create_merged_file.subprocess.run") as run:
                         def run_untwine(*_, **__):
                             output.write_text("copc")
@@ -592,7 +593,8 @@ class CreateMergedFileTests(unittest.TestCase):
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("main_create_merged_file.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}):
+                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}), \
+                        mock.patch("point_cloud_metadata.preserve_extra_bytes_missingness"):
                     with mock.patch("main_create_merged_file.subprocess.run", side_effect=run_untwine):
                         with mock.patch(
                             "main_create_merged_file._point_cloud_point_count",
@@ -622,7 +624,8 @@ class CreateMergedFileTests(unittest.TestCase):
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("main_create_merged_file.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}):
+                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}), \
+                        mock.patch("point_cloud_metadata.preserve_extra_bytes_missingness"):
                     with mock.patch("main_create_merged_file.subprocess.run", side_effect=run_untwine):
                         with mock.patch(
                             "main_create_merged_file._point_cloud_point_count",

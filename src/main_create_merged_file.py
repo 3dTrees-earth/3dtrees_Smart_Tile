@@ -26,6 +26,7 @@ from output_publication import OutputTransaction
 from vector_extra_bytes import VECTOR_SCHEMA_SIDECAR_SUFFIX
 from point_cloud_metadata import (
     copc_files,
+    validate_collection_extra_bytes,
     load_standardization_dims,
     point_cloud_dimension_names,
     point_cloud_source_key as source_key,
@@ -657,9 +658,11 @@ def _validate_preserved_product_dims(
 
 
 def _preserve_and_validate_las_metadata(source_metadata_file: Path, output_file: Path) -> Tuple[bool, str]:
-    """Ensure a LAS/LAZ/COPC product carries the source CRS as one standardized record."""
+    """Preserve source missingness/vector metadata and validate one CRS record."""
     from crs_records import validate_single_crs_record
+    from point_cloud_metadata import preserve_extra_bytes_missingness
 
+    preserve_extra_bytes_missingness(source_metadata_file, output_file)
     valid_crs, message = validate_single_crs_record(source_metadata_file, output_file)
     if not valid_crs:
         return (False, f"CRS validation failed: {message}")
@@ -818,6 +821,7 @@ def _merge_prod_chunks(
         preserve_extra_dims=True,
     ):
         raise RuntimeError(f"Prod-merged COPC conversion failed: {output_file}")
+    _finalize_product(output_file, normalized_format, chunk_files, source_metadata_file)
     try:
         temp_laz.unlink()
     except OSError:
@@ -837,6 +841,7 @@ def create_chunked_prod_merged_files_for_resolution(
     if not outputs:
         return []
 
+    validate_collection_extra_bytes(copc_input_files)
     destinations = [Path(path) for path, _ in outputs]
     with OutputTransaction(destinations, inputs=copc_input_files,
                            sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX,),
@@ -900,6 +905,7 @@ def create_prod_merged_file(
     if not copc_input_files:
         raise ValueError("No COPC input files provided")
 
+    validate_collection_extra_bytes(copc_input_files)
     destination = Path(output_file)
     with OutputTransaction([destination], inputs=copc_input_files,
                            sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX,)) as publication:
@@ -943,6 +949,7 @@ def create_prod_merged_files(
     destinations = [prod_merged_output_path(output_dir, label, fmt)
                     for label, _ in selections for fmt in output_formats]
     inputs = [*point_cloud_files(original_with_predictions_dir), *copc_files(original_with_predictions_dir)]
+    validate_collection_extra_bytes(inputs)
     with OutputTransaction(destinations, inputs=inputs,
                            sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX,),
                            keep_failed=_keep_failed_chunk_work_dir()) as publication:

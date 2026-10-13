@@ -199,7 +199,7 @@ class VectorExtraBytesTests(unittest.TestCase):
             self.assertTrue(valid, message)
 
     def test_round_trip_rejects_corruption_and_wrong_point_associations(self):
-        for change in ("value", "swapped", "missing", "scale", "dtype", "no_data", "count", "duplicate"):
+        for change in ("value", "swapped", "missing", "scale", "dtype", "count", "duplicate"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 source, output = root / "source.las", root / "out.copc.laz"
@@ -215,14 +215,14 @@ class VectorExtraBytesTests(unittest.TestCase):
                         cloud.Vector__1 = np.asarray(cloud.Vector__1)[::-1]
                     elif change == "missing":
                         cloud.remove_extra_dim("Vector__1")
-                    elif change in ("scale", "dtype", "no_data"):
+                    elif change in ("scale", "dtype"):
                         dim = cloud.point_format.dimension_by_name("Vector__1")
                         values = cloud.points.array["Vector__1"].copy()
                         cloud.remove_extra_dim("Vector__1")
                         cloud.add_extra_dim(laspy.ExtraBytesParams(
                             name="Vector__1", type="i4" if change == "dtype" else dim.dtype,
                             scales=[.5] if change == "scale" else [.25], offsets=[20.],
-                            no_data=[-1] if change == "no_data" else [-998]))
+                            no_data=[-998]))
                         cloud.points.array["Vector__1"] = values
                     elif change == "count":
                         cloud.points = cloud.points[:2]
@@ -240,10 +240,9 @@ class VectorExtraBytesTests(unittest.TestCase):
 
                 expected = {
                     "value": "XYZ associations changed", "swapped": "XYZ associations changed",
-                    "missing": "Missing vector component: Vector__1",
-                    "scale": "Changed vector component scales: Vector__1",
+                    "missing": "Vector__1: output dropped an ExtraBytes dimension",
+                    "scale": "Vector__1: no_data becomes indistinguishable from a valid source value",
                     "dtype": "Changed vector component dtype: Vector__1",
-                    "no_data": "Changed vector component no_data: Vector__1",
                     "count": "changed the point count", "duplicate": "XYZ associations changed",
                 }[change]
                 with mock.patch.object(tile_copc, "_convert_laz_to_copc_impl", side_effect=broken_writer), mock.patch("builtins.print") as report:
@@ -252,6 +251,26 @@ class VectorExtraBytesTests(unittest.TestCase):
                 self.assertFalse(output.exists())
                 self.assertFalse(vector_schema_sidecar_path(output).exists())
                 self.assertFalse(any(root.glob(".smarttile-vector-extra-*")))
+
+    def test_converter_repairs_missing_vector_declarations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, output = root / "source.las", root / "out.copc.laz"
+            _write_vector_las(source)
+
+            def writer(scalar_source, candidate, preserve_extra_dims=False):
+                cloud = laspy.read(scalar_source)
+                for vlr in cloud.header.vlrs:
+                    for descriptor in getattr(vlr, "extra_bytes_structs", ()):
+                        descriptor.no_data = None
+                cloud.write(candidate)
+                return True
+
+            with mock.patch.object(tile_copc, "_convert_laz_to_copc_impl", side_effect=writer):
+                self.assertTrue(tile_copc.convert_laz_to_copc(source, output, preserve_extra_dims=True))
+            scalar, _ = scalarize_vector_extra_bytes(source, root / "expected.laz")
+            valid, message = validate_vector_conversion(scalar, output)
+            self.assertTrue(valid, message)
 
     def test_failed_validation_preserves_existing_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:

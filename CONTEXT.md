@@ -106,12 +106,22 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
   ties use the existing eight-ULP allowance relative to the true minimum distance,
   with stable tile/point order independent of cache or disk batch partitioning.
   Original baseline coverage needs only minimum distances, not source identity.
+- Same-instance remapping delegates to the ordinary nearest query with an
+  equality filter on the required instance dimension. Apply this filter to
+  cache identity, candidate selection and both global numerical-tie passes;
+  source batch partitioning must not change the selected prediction record.
 - Index dense/filtered/shared-owner output records during their write pass;
   do not reread compressed outputs only to construct an equivalent index.
 - CRS preservation resolves duplicate projection identities with the same
   last-record precedence as the reader (source EVLRs follow VLRs). Never append
   a shadowed normalized WKT over an already-preserved original WKT; repeated
   product conversion must be idempotent. Keep strict CRS validation enabled.
+- Preserve ExtraBytes missingness through the canonical metadata helper before
+  publishing LAS/LAZ/COPC conversions. Translate raw sentinels through source and
+  destination scales/offsets; reject lossy or ambiguous declarations. Patch only
+  the fixed-size descriptor payload so COPC hierarchy offsets remain valid.
+  Require compatible collection metadata before mixing records, and include
+  missingness/encoding in staged-COPC cache freshness.
 - Exact production
   replays of 3110/3111 and resource benchmarking remain release obligations.
 

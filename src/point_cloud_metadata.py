@@ -107,6 +107,203 @@ def extra_bytes_params_from_dimension_info(
     )
 
 
+def validate_collection_extra_bytes(paths: List[Path]) -> None:
+    """Require one ExtraBytes interpretation before combining source records.
+
+    A single product cannot declare different sentinels/scales for different
+    input files. Check originals before conversion and staged inputs before
+    selection so the first file's metadata cannot redefine another's values.
+    """
+    if len(paths) < 2:
+        return
+    expected = None
+    for path in paths:
+        with laspy.open(path) as reader:
+            actual = {dim.name: extra_bytes_params_from_dimension_info(dim, header=reader.header)
+                      for dim in reader.header.point_format.extra_dimensions}
+        if expected is None:
+            expected = actual
+        elif (actual.keys() != expected.keys()
+              or any(not extra_bytes_params_compatible(expected[name], actual[name]) for name in expected)):
+            raise ValueError(f"{path.name}: ExtraBytes encoding or missingness differs from {paths[0].name}")
+
+
+def _physical_extra_values(values, params):
+    """Interpret stored values with the same float64 scaling used by LAS readers."""
+    values = np.asarray(values)
+    if params.scales is not None:
+        values = values * np.asarray(params.scales, dtype=np.float64)
+    if params.offsets is not None:
+        values = values + np.asarray(params.offsets, dtype=np.float64)
+    return values
+
+
+def _converted_no_data(source, target):
+    """Translate a missing-value declaration without rounding away its meaning."""
+    if source.no_data is None:
+        return None
+    source_dtype, target_dtype = np.dtype(source.type), np.dtype(target.type)
+    source_base, target_base = source_dtype.base, target_dtype.base
+    source_count = source_dtype.itemsize // source_base.itemsize
+    target_count = target_dtype.itemsize // target_base.itemsize
+    if source_count != target_count:
+        raise ValueError(f"{source.name}: ExtraBytes component count changed")
+    if (source_dtype == target_dtype
+            and extra_bytes_attribute_equal(source.scales, target.scales)
+            and extra_bytes_attribute_equal(source.offsets, target.offsets)):
+        return np.asarray(source.no_data, dtype=target_base)
+    if (source_base.kind in 'iu' and target_base.kind in 'iu'
+            and target_base.itemsize < source_base.itemsize):
+        # Checking the sentinel and its neighbours cannot detect distant values
+        # wrapping/clamping onto it during a narrowing integer cast. Without a
+        # complete value-range proof, keep the source integer width instead.
+        raise ValueError(f"{source.name}: no_data is ambiguous when narrowing integer storage")
+
+    physical = _physical_extra_values(np.asarray(source.no_data, dtype=source_base), source)
+    encoded = np.asarray(physical, dtype=np.longdouble)
+    if target.offsets is not None:
+        encoded = encoded - np.asarray(target.offsets, dtype=np.longdouble)
+    if target.scales is not None:
+        scales = np.asarray(target.scales, dtype=np.longdouble)
+        if np.any(scales == 0) or not np.isfinite(scales).all():
+            raise ValueError(f"{source.name}: invalid output ExtraBytes scale")
+        encoded = encoded / scales
+    if target_base.kind in 'iu':
+        limits = np.iinfo(target_base)
+        if (not np.isfinite(encoded).all() or np.any(encoded != np.rint(encoded))
+                or np.any(encoded < limits.min) or np.any(encoded > limits.max)):
+            raise ValueError(f"{source.name}: no_data cannot be represented by {target_dtype}")
+    with np.errstate(over='ignore', invalid='ignore'):
+        converted = encoded.astype(target_base)
+    restored = _physical_extra_values(converted, target)
+    # longdouble keeps integer sentinels above 2**53 exact for this comparison.
+    # NaN declarations retain NaN missingness; a finite value may not become NaN/Inf.
+    if not np.array_equal(np.asarray(physical, dtype=np.longdouble),
+                          np.asarray(restored, dtype=np.longdouble), equal_nan=True):
+        raise ValueError(f"{source.name}: no_data loses precision in {target_dtype}")
+    # A representable sentinel is insufficient: a neighbouring valid raw
+    # value must not round onto it when scaling or narrowing storage. Check
+    # neighbours in the original dtype before scaling loses integer bits.
+    # Same-encoding copies return above; NaN retains its missing-value class.
+    raw = np.asarray(source.no_data, dtype=source_base)
+    for step in (-1, 1):
+        if source_base.kind in 'iu':
+            bounds = np.iinfo(source_base)
+            neighbours = raw.copy()
+            eligible = np.array([bounds.min <= int(value) + step <= bounds.max for value in raw])
+            for index in np.flatnonzero(eligible):
+                neighbours[index] = int(raw[index]) + step
+        else:
+            neighbours = np.nextafter(raw, np.full(raw.shape, step * np.inf, dtype=source_base))
+            eligible = ~np.isnan(raw) & (neighbours != raw)
+        values = np.asarray(_physical_extra_values(neighbours, source), dtype=np.longdouble)
+        if target.offsets is not None:
+            values = values - np.asarray(target.offsets, dtype=np.longdouble)
+        if target.scales is not None:
+            values = values / np.asarray(target.scales, dtype=np.longdouble)
+        if target_base.kind in 'iu':
+            limits = np.iinfo(target_base)
+            eligible &= np.isfinite(values) & (values >= limits.min) & (values <= limits.max)
+        with np.errstate(over='ignore', invalid='ignore'):
+            aliases = values.astype(target_base) == converted
+        if np.any(eligible & aliases):
+            raise ValueError(f"{source.name}: no_data becomes indistinguishable from a valid source value")
+    return converted
+
+
+def _expected_extra_no_data(source_header, output_header):
+    targets = {dim.name: extra_bytes_params_from_dimension_info(dim, header=output_header)
+               for dim in output_header.point_format.extra_dimensions}
+    expected = {}
+    for dim in source_header.point_format.extra_dimensions:
+        source = extra_bytes_params_from_dimension_info(dim, header=source_header)
+        if dim.name not in targets:
+            # Vector transport validates its renamed scalar components separately.
+            if np.dtype(dim.dtype).subdtype is not None:
+                continue
+            raise ValueError(f"{dim.name}: output dropped an ExtraBytes dimension")
+        expected[dim.name] = _converted_no_data(source, targets[dim.name])
+    return expected
+
+
+def validate_extra_bytes_missingness(source: Path, output: Path) -> None:
+    """Raise when converted declarations do not identify the source missing values."""
+    with laspy.open(source) as reader:
+        source_header = reader.header
+    with laspy.open(output) as reader:
+        output_header = reader.header
+    expected = _expected_extra_no_data(source_header, output_header)
+    for dim in output_header.point_format.extra_dimensions:
+        if dim.name in expected:
+            actual = extra_bytes_params_from_dimension_info(dim, header=output_header).no_data
+            if not extra_bytes_attribute_equal(actual, expected[dim.name]):
+                raise ValueError(f"{dim.name}: output no_data declaration differs from source missingness")
+
+
+def preserve_extra_bytes_missingness(source: Path, output: Path) -> None:
+    """Repair no_data in a private LAS/LAZ/COPC output, then validate its meaning.
+
+    Converters may materialize scaled integer fields as unscaled floating values.
+    Keep that output encoding and translate the sentinel into it. Only the existing
+    fixed-size ExtraBytes VLR payload changes: point bytes, COPC hierarchy offsets,
+    and all other VLR/EVLR records remain untouched. Call before output publication.
+    """
+    import struct
+
+    with laspy.open(source) as reader:
+        source_header = reader.header
+    with laspy.open(output) as reader:
+        output_header = reader.header
+    expected = _expected_extra_no_data(source_header, output_header)
+    if not expected:
+        return
+    vlrs = [vlr for vlr in output_header.vlrs if is_extra_bytes_vlr(vlr)]
+    if len(vlrs) != 1:
+        raise ValueError("Output needs one ExtraBytes VLR to preserve missingness")
+    original = vlrs[0].record_data_bytes()
+    updated = deepcopy(vlrs[0])
+    for entry in updated.extra_bytes_structs:
+        name = entry.format_name()
+        if name in expected:
+            entry.no_data = expected[name]
+    replacement = updated.record_data_bytes()
+    if replacement == original:
+        validate_extra_bytes_missingness(source, output)
+        return
+    if len(replacement) != len(original):
+        raise ValueError("ExtraBytes repair must not move the point-data offset")
+
+    # Locate the regular VLR directly instead of rewriting a COPC header/index.
+    vlr_header = struct.Struct('<H16sHH32s')
+    with Path(output).open('r+b') as handle:
+        handle.seek(94)
+        header_size, point_offset, count = struct.unpack('<HII', handle.read(10))
+        handle.seek(header_size)
+        for _ in range(count):
+            _, user_id, record_id, length, _ = vlr_header.unpack(handle.read(vlr_header.size))
+            position = handle.tell()
+            if position + length > point_offset:
+                raise ValueError("ExtraBytes VLR extends beyond the point-data offset")
+            if user_id.rstrip(b'\0 ') == b'LASF_Spec' and record_id == 4:
+                if handle.read(length) != original:
+                    raise ValueError("Output ExtraBytes metadata changed before repair")
+                break
+            handle.seek(length, 1)
+        else:
+            raise ValueError("Output ExtraBytes VLR was not found")
+        try:
+            handle.seek(position)
+            if handle.write(replacement) != len(replacement):
+                raise OSError("Incomplete ExtraBytes metadata write")
+            handle.flush()
+            validate_extra_bytes_missingness(source, output)
+        except BaseException:
+            handle.seek(position)
+            handle.write(original)
+            handle.flush()
+            raise
+
+
 def is_stale_copc_vlr(vlr) -> bool:
     """Return True for COPC index VLRs that cannot be copied to a new container."""
     return getattr(vlr, "user_id", "") == "copc" and getattr(vlr, "record_id", None) in (1, 2, 1000)

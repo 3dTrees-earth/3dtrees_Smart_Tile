@@ -96,10 +96,10 @@ def shared_cache():
 
 
 def region_entry(index, tile, cell, radius, positive_dimension, bounds, *,
-                 selection_key=None, select_points=None):
+                 selection_key=None, select_points=None, matching=None):
     bound_key = None if bounds is None else tuple(np.asarray(bounds).ravel())
     key = (index._cache_owner, tile, *cell, radius, positive_dimension, bound_key,
-           repr(index._storage_dtype().descr), selection_key)
+           repr(index._storage_dtype().descr), selection_key, matching)
     cached = index.query_cache.get(key)
     if cached is not None:
         return cached
@@ -131,6 +131,9 @@ def region_entry(index, tile, cell, radius, positive_dimension, bounds, *,
     mask = (x >= lo[0]) & (x <= hi[0]) & (y >= lo[1]) & (y <= hi[1])
     if positive_dimension is not None:
         mask &= data[f'value_{list(index.dimensions).index(positive_dimension)}'] > 0
+    if matching is not None:
+        dimension, label = matching
+        mask &= data[f'value_{list(index.dimensions).index(dimension)}'] == label
     if bounds is not None:
         from bounded_point_index import inside_xy
         mask &= inside_xy(data['xyz'], bounds)
@@ -170,7 +173,8 @@ def covered_region(index, xyz, radius, positive_dimension):
     return found
 
 
-def nearest_region(index, xyz, radius, *, tile=None, before_tile=None, overlaps=None, positive_dimension=None):
+def nearest_region(index, xyz, radius, *, tile=None, before_tile=None, overlaps=None,
+                   positive_dimension=None, matching=None):
     """Return exact nearest results for one XY region, or request disk fallback."""
     from bounded_point_index import distance_limit, distance_roundoff, inside_xy
     cell = tuple(np.floor(xyz[0, :2] / REGION_SIZE).astype(np.int64))
@@ -189,7 +193,8 @@ def nearest_region(index, xyz, radius, *, tile=None, before_tile=None, overlaps=
         allowed = np.ones(len(xyz), dtype=bool) if bounds is None else inside_xy(xyz, bounds)
         if not np.any(allowed):
             continue
-        entry = region_entry(index, source, cell, limit, positive_dimension, bounds)
+        entry = region_entry(index, source, cell, limit, positive_dimension, bounds,
+                             matching=matching)
         if entry is None:
             return None
         tree, data = entry
@@ -211,5 +216,5 @@ def nearest_region(index, xyz, radius, *, tile=None, before_tile=None, overlaps=
             values[name][take] = data[f'value_{i}'][nearest[take]]
     index.resolve_numerical_ties(xyz, radius, numerical_ties, dists, values, refs,
                                  tile=tile, before_tile=before_tile, overlaps=overlaps,
-                                 positive_dimension=positive_dimension)
+                                 positive_dimension=positive_dimension, matching=matching)
     return dists, values, refs

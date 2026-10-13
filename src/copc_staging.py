@@ -10,21 +10,26 @@ from typing import Dict, Optional
 import numpy as np
 
 from copc_metadata import laspy_laz_backend
-from point_cloud_metadata import point_cloud_source_key
+from point_cloud_metadata import point_cloud_source_key, extra_bytes_params_from_dimension_info
 
 
 MANIFEST_FILENAME = ".smarttile_copc_manifest.json"
 
 
-def _extra_dimension_signature(dim) -> Dict[str, object]:
+def _extra_dimension_signature(dim, header) -> Dict[str, object]:
     """Return the structural extra-dimension schema used for cache freshness.
 
     Descriptions are intentionally excluded. Some LAZ->COPC conversions drop or
     normalize descriptive text while preserving the actual point record schema.
     """
+    params = extra_bytes_params_from_dimension_info(dim, header=header)
     return {
         "name": dim.name,
         "dtype": str(np.dtype(dim.dtype)),
+        "scales": None if params.scales is None else np.asarray(params.scales).tolist(),
+        "offsets": None if params.offsets is None else np.asarray(params.offsets).tolist(),
+        # Strings also make declared NaN sentinels stable across JSON reloads.
+        "no_data": None if params.no_data is None else [str(value) for value in params.no_data],
     }
 
 
@@ -49,7 +54,7 @@ def point_cloud_header_signature(path: Path) -> Dict[str, object]:
             "point_format": int(header.point_format.id),
             "version": str(header.version),
             "extra_dimensions": [
-                _extra_dimension_signature(dim)
+                _extra_dimension_signature(dim, header)
                 for dim in header.point_format.extra_dimensions
             ],
         }

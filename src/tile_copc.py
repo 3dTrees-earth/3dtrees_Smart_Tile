@@ -119,14 +119,21 @@ def convert_laz_to_copc(
     with tempfile.TemporaryDirectory(prefix=".smarttile-vector-extra-", dir=output_copc.parent) as tmpdir:
         scalar_input = Path(tmpdir) / "scalarized.laz"
         working_input, schema = scalarize_vector_extra_bytes(input_laz, scalar_input)
-        if schema is None:
-            return _convert_laz_to_copc_impl(working_input, output_copc, preserve_extra_dims=True)
-        # Keep vector outputs private until both data and reconstruction metadata pass.
+        # Keep every enriched conversion private until metadata validation passes.
         candidate_dir = Path(tmpdir) / "candidate"
         candidate_dir.mkdir()
         candidate = candidate_dir / output_copc.name
         if not _convert_laz_to_copc_impl(working_input, candidate, preserve_extra_dims=True):
             return False
+        from point_cloud_metadata import preserve_extra_bytes_missingness
+        try:
+            preserve_extra_bytes_missingness(working_input, candidate)
+        except ValueError as exc:
+            print(f"  Warning: ExtraBytes missingness validation failed: {exc}")
+            return False
+        if schema is None:
+            candidate.replace(output_copc)
+            return True
         valid, message = validate_vector_conversion(working_input, candidate)
         if not valid:
             print(f"  Warning: vector ExtraBytes validation failed: {message}")
