@@ -24,7 +24,14 @@ The earlier failed full-filter reports remain diagnostic evidence; the later
 acceptance supersedes that defect. Whole-instance tiling preserves ownership
 and per-voxel representation, not every source record after subsampling.
 
-The accepted remap/export source `f2d8ecb` passed **513 tests and 90 subtests** in
+The final review source `f9c01a1` passes **520 tests and 90 subtests**. The
+unpublished Galaxy wrapper `2.4.0+galaxy1` passes 18 functional cases and nine
+independent numeric checks against its exact local candidate image. See the
+[final review record](../../../docs/validation/2026-10-13-final-review-wrapper.md)
+for source/image identities and the additional metadata-cache/LAS 1.2 PLY fixes.
+These small acceptance checks do not rerun the GFZ corpus.
+
+The earlier accepted remap/export source `f2d8ecb` passed **513 tests and 90 subtests** in
 the pinned scientific runtime. Later replays reuse cached real predictions;
 they do not rerun segmentation/species inference or visualization. Full-GFZ
 filter/instance checks and the later cropped remap/export checks have distinct

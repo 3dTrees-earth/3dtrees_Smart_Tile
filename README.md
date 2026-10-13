@@ -571,10 +571,12 @@ python src/run.py --task remap --segmented-folders /path/to/species_tiles_sat,/p
     --match-instances --resolution-1 0.01 --remap-dims species_id_sat,species_prob_sat,species_id_fm,species_prob_fm
 ```
 
-Each collection is matched on the one `PredInstance*` dimension it carries: every
-original point takes the values of the nearest prediction point **of its own
-instance**, so points at a crown contact never take the neighbour's species. The
-originals' instance IDs are neither changed nor transferred. Use the instance tile
+Each collection is matched on its one instance dimension. `PredInstance*` fields
+and the `treeID` fallback are detected automatically; pass
+`--instance-dimension CustomTreeId` for a custom field name, or select that field
+in Galaxy's Remap settings. Every original point takes the values of the nearest
+prediction point **of its own instance**, so points at a crown contact never take
+the neighbour's species. The originals' instance IDs are neither changed nor transferred. Use the instance tile
 resolution as `--resolution-1`. With complete instance-tile predictions, every
 original point has a representative of its own (instance, voxel) within the voxel
 diagonal. Missing same-instance coverage fails; another instance cannot supply
@@ -656,10 +658,15 @@ Run the complete suite in the scientific environment with `pytest` and
 python -m pytest -q -p no:cacheprovider tests
 ```
 
-The accepted source `f2d8ecb` passed **513 tests and 90 subtests**, with no failures,
-errors or skips in the pinned Linux scientific container. The
+The final runtime source `f9c01a1` passed **520 tests and 90 subtests**, with no
+failures, errors or skips. The `2.4.0+galaxy1` wrapper passes **18 real Galaxy
+cases**, 44 staging tests and 13 offline render variants; nine independent numeric
+checks pass against the same immutable candidate image. The
+[final review and wrapper acceptance](docs/validation/2026-10-13-final-review-wrapper.md)
+records the raw/COPC metadata-cache and LAS 1.2 PLY fixes. The
 [combined validation record](docs/validation/2026-10-13-combined-branch.md)
-retains earlier failures and the later fixes; the following are the accepted results:
+retains earlier failures and subsequent fixes; the following GFZ results remain
+separate historical acceptance:
 
 | Scope | Accepted evidence |
 | --- | --- |
@@ -674,9 +681,8 @@ instance runs precede the later remap/export fixes and remain separate evidence.
 ForestStructure acceptance covers artifacts, provenance and point/voxel accounting,
 not independent Julia metric parity or ecological accuracy. The remaining release
 checks are the complete workflow/visualization canary on the selected deployed
-image/wrapper and the exact 3110/3111 replays. The wrapper candidate's current
-validation and publication state must be recorded separately from earlier
-13-case Planemo acceptance.
+image/wrapper and the exact 3110/3111 replays. The final 18-case wrapper acceptance
+is local and unpublished; it supersedes the earlier 13-case wrapper matrix.
 
 Dense-cell point-count targets are soft: an 8-million-point leaf completed under
 an 8 GiB cap, but exceeded the 4-million-point target. This is a reliability limit

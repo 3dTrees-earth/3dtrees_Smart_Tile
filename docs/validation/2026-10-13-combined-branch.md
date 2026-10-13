@@ -1,11 +1,16 @@
 # Combined SmartTile v2.4 branch validation — 2026-10-13
 
+This is a chronological record. The latest source and wrapper acceptance is in
+[the final review record](2026-10-13-final-review-wrapper.md): 520 tests plus
+90 subtests, 18 Galaxy cases and nine independent numeric checks pass locally.
+Production release checks remain open.
+
 ## Integration
 
 The working branch is `codex/3dt-2101-remap-first`. It includes the earlier
 CRS fix (`29ff07d`), full-resolution products and attribute joins (`7e75ef7`),
-and instance tiles with same-instance remapping (`6e5178e`). Instance tiling
-remains CLI-only. The related Galaxy wrapper branch is
+and instance tiles with same-instance remapping (`6e5178e`). At this initial
+snapshot, instance tiling was CLI-only. The then-related Galaxy wrapper branch was
 `claude/smarttile-v2.4-wrapper`, including `cdfe22ca`.
 
 The combined patch removes the unused tiling/subsampling path, bounds dense
