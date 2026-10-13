@@ -119,7 +119,7 @@ class Parameters(BaseSettings):
     instance_tiles: Optional[str] = Field(
         None,
         description="Tile task: comma-separated instance dimensions (e.g. PredInstance_SAT,PredInstance_FM) of inputs "
-                    "that already carry predictions. Writes instance_tiles_<dimension>/ per dimension, in which every "
+                    "that already carry predictions. Writes instance_tiles_<dimension>_<resolution>/ per selection, in which every "
                     "instance is whole in exactly one tile (the tile whose core holds its centroid); background "
                     "follows core ownership. Each collection always carries its instance dimension, independently "
                     "of --instance-tile-dims. Without --tile-outputs, only instance tiles are written.",
@@ -295,7 +295,8 @@ class Parameters(BaseSettings):
 
     output_folder: Optional[Path] = Field(
         default=None,
-        description="Merge/filter work root for output_tiles and the report (default: next to the first input collection)",
+        description="Merge work root for output_tiles and the report (default: next to the first input collection). "
+                    "Filter requires --output-dir.",
         validation_alias=AliasChoices("output-folder", "output_folder"),
     )
 
@@ -313,7 +314,7 @@ class Parameters(BaseSettings):
         description=(
             "Optional directory with already converted Original-with-predictions COPC files "
             "for create_merged_file/prod-merged outputs. Matching COPCs are reused after "
-            "a readable-header check."
+            "source/header freshness checks, including ExtraBytes encoding and no_data declarations."
         ),
         validation_alias=AliasChoices("staged-copc-dir", "staged_copc_dir"),
     )
@@ -330,7 +331,8 @@ class Parameters(BaseSettings):
 
     original_point_index: bool = Field(
         True,
-        description="Full-resolution prod-merged product: add OriginalPointIndex (uint64, first ExtraByte), "
+        description="Full-resolution prod-merged product: add OriginalPointIndex (uint64 in LAZ/COPC; uint32 in PLY, "
+                    "with overflow rejected), first ExtraByte in LAS outputs, "
                     "each point's 0-based record position across the inputs in sorted file order, so "
                     "ForestStructure can restore source order after COPC and reproduce Julia's results. "
                     "Disable with --no-original-point-index.",

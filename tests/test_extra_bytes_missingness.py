@@ -290,3 +290,48 @@ def test_integer_narrowing_cannot_wrap_a_valid_point_onto_sentinel(tmp_path):
     with pytest.raises(ValueError, match='no_data.*narrowing integer'):
         preserve_extra_bytes_missingness(source, output)
     assert output.read_bytes() == before
+
+
+def test_colocated_copc_cache_preserves_source_selection(tmp_path):
+    from copc_staging import write_copc_stage_manifest_entry
+    from tile_copc import convert_laz_to_copc
+    inputs = tmp_path/'inputs'; inputs.mkdir()
+    original, cache = inputs/'a.laz', inputs/'a.copc.laz'
+    source = fixture(original)
+    assert convert_laz_to_copc(original, cache, preserve_extra_dims=True)
+    write_copc_stage_manifest_entry(original, cache)
+    assert params(source, 'Amplitude').type != params(laspy.read(cache), 'Amplitude').type
+    before = [digest(original), digest(cache)]
+    products = create_prod_merged_files(inputs, tmp_path/'products', 'full,10cm', 'laz,copc.laz', .01, .1)
+    assert len(products) == 4
+    for product in products:
+        expected = source if product.name.startswith('merged.') else laspy.LasData(source.header.copy(), points=source.points[:6])
+        assert_missingness(expected, laspy.read(product))
+    assert [digest(original), digest(cache)] == before
+
+
+def test_distinct_copc_only_source_participates_in_subsampled_product(tmp_path):
+    from tile_copc import convert_laz_to_copc
+    inputs = tmp_path/'inputs'; inputs.mkdir()
+    raw, other, cache = inputs/'a.laz', tmp_path/'b.laz', inputs/'b.copc.laz'
+    for path, x, value in [(raw, 1., 0), (other, 2., 2)]:
+        write_field(path, laspy.ExtraBytesParams(name='value', type=np.uint16, no_data=[0]))
+        cloud = laspy.read(path); cloud.x = [x]; cloud.value = [value]; cloud.write(path)
+    assert convert_laz_to_copc(other, cache, preserve_extra_dims=True)
+    products = create_prod_merged_files(inputs, tmp_path/'products', '10cm', 'laz', .01, .1)
+    output = laspy.read(products[0]); order = np.argsort(np.asarray(output.x))
+    np.testing.assert_array_equal(np.asarray(output.x)[order], [1., 2.])
+    np.testing.assert_array_equal(np.asarray(output.value)[order], [0, 2])
+    np.testing.assert_array_equal(params(output, 'value').no_data, [0])
+
+
+def test_distinct_copc_only_source_retains_strict_metadata_preflight(tmp_path, monkeypatch):
+    import main_create_merged_file
+    inputs = tmp_path/'inputs'; inputs.mkdir()
+    write_field(inputs/'a.las', laspy.ExtraBytesParams(name='value', type=np.uint16, no_data=[0]))
+    write_field(inputs/'b.copc.laz', laspy.ExtraBytesParams(name='value', type=np.uint16, no_data=[1]))
+    def unexpected(*args, **kwargs):pytest.fail('incompatible COPC-only source reached conversion')
+    monkeypatch.setattr(main_create_merged_file, 'prepare_copc_inputs', unexpected)
+    with pytest.raises(ValueError, match='ExtraBytes encoding or missingness differs'):
+        create_prod_merged_files(inputs, tmp_path/'products', '10cm', 'laz', .01, .1)
+    assert not (tmp_path/'products').exists()

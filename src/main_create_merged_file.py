@@ -948,8 +948,15 @@ def create_prod_merged_files(
     selections.sort(key=lambda selection: selection[0] != "full")
     destinations = [prod_merged_output_path(output_dir, label, fmt)
                     for label, _ in selections for fmt in output_formats]
-    inputs = [*point_cloud_files(original_with_predictions_dir), *copc_files(original_with_predictions_dir)]
-    validate_collection_extra_bytes(inputs)
+    raw_inputs = point_cloud_files(original_with_predictions_dir)
+    copc_inputs = copc_files(original_with_predictions_dir)
+    inputs = [*raw_inputs, *copc_inputs]
+    # A colocated COPC is an alternative encoding/cache of its matching raw
+    # source, not another source to merge. Keep every path in alias preflight,
+    # but compare metadata once per source, before conversion changes encodings.
+    raw_keys = {source_key(path) for path in raw_inputs}
+    validate_collection_extra_bytes([
+        *raw_inputs, *(path for path in copc_inputs if source_key(path) not in raw_keys)])
     with OutputTransaction(destinations, inputs=inputs,
                            sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX,),
                            keep_failed=_keep_failed_chunk_work_dir()) as publication:
