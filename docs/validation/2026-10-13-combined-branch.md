@@ -446,3 +446,76 @@ These results close the three reproduced defects, not the broader release gate.
 No new full 16,426,961-point filter run or downstream ForestStructure/Potree run
 is claimed. The prior full-GFZ filter result remains separate evidence; hard
 dense-cell memory bounds and downstream certification remain open.
+
+## ForestStructure handoff and memory qualification — 2026-10-13
+
+ForestStructure successfully consumed the previously generated joined,
+full-resolution GFZ `merged.copc.laz` from SmartTile source `f2d8ecb`.
+The input is the existing **867,599-point crop**, with its complete uint64
+`OriginalPointIndex` and separate SAT/FM instance fields. Its SHA-256 matches
+the preceding SmartTile export acceptance; the input and all produced artifacts
+were unchanged by validation.
+
+The offline run used the installed ForestStructure image
+`sha256:6de7550fdae2e331942f3a627b81a5d85a1cb2d03756f6f1a54324597f41b224`.
+All 15 embedded runtime source files match commit
+`e16baf8368988470b2ae89f2c5ff0909742cfee9`; the historical image revision label
+was not used as source identity. No source override was mounted. Limits were
+4 CPUs, 20 GiB RAM with no additional swap, one catalog worker, a 16 GiB
+internal budget, no GPU and no network. The source was mounted read-only.
+The full source extent was used without an AOI or original-LAZ companion;
+scientific defaults were retained, including 20 m analysis tiles, 1 m DTM,
+0.5 m CHM, 0.2 m structural voxels and the 0.5 m voxel-count product.
+
+Analysis exited 0, validated internally and published all **16 expected
+artifacts**. End-to-end local runner time was **32.34 seconds**, including
+**27.36 seconds** reported for scientific processing; peak cgroup memory was
+**850,096,128 bytes (0.79 GiB)**, with no OOM or limit events.
+
+| Output | SAT | ForestMamba |
+| --- | ---: | ---: |
+| Analysis tile rows | 2 | 2 |
+| Source positive IDs / segment diagnostics | 12 / 12 | 17 / 17 |
+| Segments satisfying the default tree criteria | 10 | 13 |
+
+Both the canonical artifact validator and **all seven independent acceptance
+checks passed**. The independent validator checks all artifacts and hashes,
+COPC/instance/index provenance, finite raster cells, CSV/GeoJSON agreement,
+source-ID membership, table totals and scratch cleanup. It streams every source
+point and independently recounts the voxel export against the produced DTM:
+**658,245 included + 174,392 boundary/domain exclusions + 34,962 below-DTM
+exclusions = 867,599 records**. No source record is unexplained. All **6,241
+occupied voxels across 56 bands** agree exactly between source recount, CSV and
+raster; every source-order index occurs exactly once.
+
+GeoTIFFs serialize the declared horizontal CRS as canonical EPSG:25833. Strict
+comparison with the source's custom compound WKT initially failed. Acceptance
+then required the explicit source EPSG declaration, matching projection method
+and every parameter, ellipsoid, axis directions and units, plus canonical CRS
+agreement in all four rasters. The original compound WKT remains in provenance.
+The initial validator and failed report are retained; neither analysis nor
+SmartTile code was changed to obtain acceptance. This is a qualified horizontal
+CRS check, not byte-for-byte preservation of the compound WKT in GeoTIFF.
+
+This closes the tested **SmartTile COPC → ForestStructure** consumer handoff.
+It establishes artifact and accounting consistency, not independent Julia
+metric-reference parity or ecological accuracy. It does not constitute a
+production deployment or the remaining complete workflow/visualization canary.
+Commands, parameters, source/runtime hashes and results are in
+[`2026-10-13-foreststructure-handoff.json`](2026-10-13-foreststructure-handoff.json).
+
+### What the dense-cell evidence actually proves
+
+The 4-million-point tiler target is soft. When XY subdivision cannot split a
+cell further, the current reducer reads that complete leaf. The existing
+synthetic 0.1 m XY column produced one **8-million-point leaf**, with **1.86 GiB
+peak process RSS**, versus **0.65 GiB** for 4 million points. Both runs produced
+the correct 400 output voxels and completed under the 8 GiB container cap.
+The current reducer's hash exactly matches the tested code.
+
+This proves that the point-count target is not a density-independent memory
+bound. It does **not** prove an OOM, bypass the hard container RAM cap, or show
+that GFZ's successful runs are unsafe. Calling it a blanket production blocker
+was stronger than the observed evidence supports. It remains a reliability
+limitation for unusually dense inputs outside the measured workload envelope;
+full GFZ instance tiling and filtering completed within their configured caps.

@@ -1,0 +1,561 @@
+{
+  "date": "2026-10-13",
+  "recorded_utc": "2026-10-13T16:13:38.730089+00:00",
+  "acceptance": "passed",
+  "scope": "One generated GFZ full-resolution COPC consumed by ForestStructure using existing SAT/FM instances; local compatibility and artifact/accounting acceptance.",
+  "smarttile_source_commit": "f2d8ecb89df142d440079f3b9965248ac80b9b98",
+  "foreststructure_image": "sha256:6de7550fdae2e331942f3a627b81a5d85a1cb2d03756f6f1a54324597f41b224",
+  "foreststructure_runtime_source_commit": "e16baf8368988470b2ae89f2c5ff0909742cfee9",
+  "embedded_runtime_files_verified_against_commit": [
+    {
+      "path": "aoi_conversion.R",
+      "sha256": "e960b17ef995092156504db80bdaeaf01f4a261cb0288a16b54b0e4ab93e6025"
+    },
+    {
+      "path": "artifact_publication.R",
+      "sha256": "a32f2ab3b6ea57549f96119012c7a88da1be2fa04a43a2f188d3df7f57b8c2b2"
+    },
+    {
+      "path": "catalog_scheduler.R",
+      "sha256": "f4e9e929603fc41d3e0d477528444ea1d47788c0992431dc5111d7f7d67171ac"
+    },
+    {
+      "path": "convert_aoi.R",
+      "sha256": "dae8663636a938f0b79cc69943f660edc5e13747ddbb6e6d65be18abe33cfc22"
+    },
+    {
+      "path": "copc_task_counts.py",
+      "sha256": "323bb1b68ef70b727d1cba36fc850b33bc67f59c3e9dcbcc9759a9dc89104c35"
+    },
+    {
+      "path": "instance_read_groups.R",
+      "sha256": "a021e30c08d03ab0203310b35dade72686363b77f9a3122b9f5c331f31502eec"
+    },
+    {
+      "path": "production_contract.R",
+      "sha256": "8a6375ec27d172da40e45d4fc6c6358923ab126acde26d6854fb62b66be9ef2a"
+    },
+    {
+      "path": "project_instance_dimension.py",
+      "sha256": "ebdd34206e1a17644352100ec031bae4310d2e35123ebf9d111a42f348b7eead"
+    },
+    {
+      "path": "raster_crs.py",
+      "sha256": "bff04eec93cbb2339921ad3b678302e1639575b4ce67dba0d314cf5a2e896012"
+    },
+    {
+      "path": "resource_scheduler.R",
+      "sha256": "bac0c8aacce19e0be924f331e01271ee85e4461fcd0e7d3a56e5432fd1630367"
+    },
+    {
+      "path": "run.R",
+      "sha256": "2deeaeda00e9b10e295383ec0310129c673d2475338ed08e5286262a52da5ab1"
+    },
+    {
+      "path": "run_julia_memory_safe.R",
+      "sha256": "663af29794d8909a3943c61b8390fa764669c02b300cc5f0eaf03a4f0dfc8d51"
+    },
+    {
+      "path": "tile_scheduler.R",
+      "sha256": "20165fca6f488c4f7cbf5e8e18f57d90d9f5fc5c24929eb36b96e8208705613f"
+    },
+    {
+      "path": "voxel_counts.R",
+      "sha256": "1fe0d8782f21e513ce7f595e6b8143043c7af1a6a0348171cb007f6228991021"
+    },
+    {
+      "path": "voxel_counts.py",
+      "sha256": "00cad0efddf323ce0b5130cc3c5354443eeffcec73602e6bdaf1280180118000"
+    }
+  ],
+  "input_host_path": "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/joined/merged.copc.laz",
+  "input_sha256": "48cffb8f96da0a09acd2dea46c6ce23f0a7d171ad0273c30d47df0542af6b1c3",
+  "source_input_matches_prior_smarttile_acceptance": true,
+  "execution": {
+    "started_utc": "2026-10-13T16:00:12.830206+00:00",
+    "state": "analysis_passed_pending_artifact_validation",
+    "image": "sha256:6de7550fdae2e331942f3a627b81a5d85a1cb2d03756f6f1a54324597f41b224",
+    "smarttile_source_commit": "f2d8ecb89df142d440079f3b9965248ac80b9b98",
+    "input": "/input/merged.copc.laz",
+    "limits": {
+      "cpus": 4,
+      "memory_bytes": 21474836480,
+      "additional_swap": 0,
+      "network": "none",
+      "gpu": false
+    },
+    "checks": [
+      {
+        "name": "expected_input_count",
+        "passed": true
+      },
+      {
+        "name": "canonical_order_index_schema",
+        "passed": true
+      },
+      {
+        "name": "complete_unique_order_indices",
+        "passed": true
+      },
+      {
+        "name": "input_PredInstance_SAT",
+        "passed": true,
+        "ids": [
+          0,
+          3,
+          4,
+          6,
+          8,
+          10,
+          12,
+          13,
+          14,
+          84,
+          85,
+          86,
+          89
+        ],
+        "counts": [
+          251238,
+          93144,
+          20151,
+          7559,
+          1415,
+          97585,
+          157589,
+          146022,
+          595,
+          70833,
+          19085,
+          2182,
+          201
+        ]
+      },
+      {
+        "name": "input_PredInstance_FM",
+        "passed": true,
+        "ids": [
+          0,
+          1,
+          14,
+          15,
+          16,
+          26,
+          27,
+          29,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          47,
+          63,
+          64,
+          108
+        ],
+        "counts": [
+          252229,
+          19700,
+          8175,
+          2039,
+          86014,
+          129,
+          1427,
+          863,
+          1049,
+          874,
+          1214,
+          161253,
+          97870,
+          2343,
+          673,
+          147617,
+          20809,
+          63321
+        ]
+      },
+      {
+        "name": "analysis_exit_zero",
+        "passed": true
+      },
+      {
+        "name": "input_hash_unchanged",
+        "passed": true
+      }
+    ],
+    "embedded_source_sha256": {
+      "/opt/foreststructure/aoi_conversion.R": "e960b17ef995092156504db80bdaeaf01f4a261cb0288a16b54b0e4ab93e6025",
+      "/opt/foreststructure/artifact_publication.R": "a32f2ab3b6ea57549f96119012c7a88da1be2fa04a43a2f188d3df7f57b8c2b2",
+      "/opt/foreststructure/catalog_scheduler.R": "f4e9e929603fc41d3e0d477528444ea1d47788c0992431dc5111d7f7d67171ac",
+      "/opt/foreststructure/convert_aoi.R": "dae8663636a938f0b79cc69943f660edc5e13747ddbb6e6d65be18abe33cfc22",
+      "/opt/foreststructure/copc_task_counts.py": "323bb1b68ef70b727d1cba36fc850b33bc67f59c3e9dcbcc9759a9dc89104c35",
+      "/opt/foreststructure/instance_read_groups.R": "a021e30c08d03ab0203310b35dade72686363b77f9a3122b9f5c331f31502eec",
+      "/opt/foreststructure/production_contract.R": "8a6375ec27d172da40e45d4fc6c6358923ab126acde26d6854fb62b66be9ef2a",
+      "/opt/foreststructure/project_instance_dimension.py": "ebdd34206e1a17644352100ec031bae4310d2e35123ebf9d111a42f348b7eead",
+      "/opt/foreststructure/raster_crs.py": "bff04eec93cbb2339921ad3b678302e1639575b4ce67dba0d314cf5a2e896012",
+      "/opt/foreststructure/resource_scheduler.R": "bac0c8aacce19e0be924f331e01271ee85e4461fcd0e7d3a56e5432fd1630367",
+      "/opt/foreststructure/run.R": "2deeaeda00e9b10e295383ec0310129c673d2475338ed08e5286262a52da5ab1",
+      "/opt/foreststructure/run_julia_memory_safe.R": "663af29794d8909a3943c61b8390fa764669c02b300cc5f0eaf03a4f0dfc8d51",
+      "/opt/foreststructure/tile_scheduler.R": "20165fca6f488c4f7cbf5e8e18f57d90d9f5fc5c24929eb36b96e8208705613f",
+      "/opt/foreststructure/voxel_counts.R": "1fe0d8782f21e513ce7f595e6b8143043c7af1a6a0348171cb007f6228991021",
+      "/opt/foreststructure/voxel_counts.py": "00cad0efddf323ce0b5130cc3c5354443eeffcec73602e6bdaf1280180118000"
+    },
+    "input_sha256_before": "48cffb8f96da0a09acd2dea46c6ce23f0a7d171ad0273c30d47df0542af6b1c3",
+    "header": {
+      "points": 867599,
+      "point_format": 7,
+      "extra_dimensions": [
+        "OriginalPointIndex",
+        "PredInstance_SAT",
+        "PredInstance_FM",
+        "Amplitude",
+        "Reflectance",
+        "Deviation",
+        "PredSemantic_SAT",
+        "species_id_SAT",
+        "species_prob_SAT",
+        "PredSemantic_FM",
+        "PredScore_FM",
+        "species_id_FM",
+        "species_prob_FM",
+        "species_id_RCT",
+        "species_prob_RCT",
+        "PredInstance_RCT"
+      ],
+      "bounds_min": [
+        398706.857,
+        5646175.349,
+        386.20900000000006
+      ],
+      "bounds_max": [
+        398739.999,
+        5646179.999,
+        415.785
+      ],
+      "crs_wkt": "COMPOUNDCRS[\"ETRS89 / UTM zone 33N + DHHN2016\",PROJCRS[\"ETRS89 / UTM zone 33N + DHHN2016\",BASEGEOGCRS[\"ETRS89 / UTM zone 33N + DHHN2016\",DATUM[\"ETRF89\",ELLIPSOID[\"GRS 1980\",6378137,298.257222101,LENGTHUNIT[\"metre\",1]]],PRIMEM[\"Greenwich\",0,ANGLEUNIT[\"Degree\",0.0174532925199433]],ID[\"EPSG\",25833]],CONVERSION[\"UTM zone 33N\",METHOD[\"Transverse Mercator\",ID[\"EPSG\",9807]],PARAMETER[\"Latitude of natural origin\",0,ANGLEUNIT[\"Degree\",0.0174532925199433],ID[\"EPSG\",8801]],PARAMETER[\"Longitude of natural origin\",15,ANGLEUNIT[\"Degree\",0.0174532925199433],ID[\"EPSG\",8802]],PARAMETER[\"Scale factor at natural origin\",0.9996,SCALEUNIT[\"unity\",1],ID[\"EPSG\",8805]],PARAMETER[\"False easting\",500000,LENGTHUNIT[\"Meter\",1],ID[\"EPSG\",8806]],PARAMETER[\"False northing\",0,LENGTHUNIT[\"Meter\",1],ID[\"EPSG\",8807]]],CS[Cartesian,2],AXIS[\"easting\",east,ORDER[1],LENGTHUNIT[\"Meter\",1]],AXIS[\"northing\",north,ORDER[2],LENGTHUNIT[\"Meter\",1]],ID[\"EPSG\",25833]],VERTCRS[\"Orthometric Heights\",VDATUM[\"GCG2016v2023_DHHN2016\",ID[\"EPSG\",0]],CS[vertical,1],AXIS[\"height\",up,LENGTHUNIT[\"Meter\",1,ID[\"EPSG\",9001]]]]]"
+    },
+    "elapsed_seconds": 32.34256224683486,
+    "memory.peak": "850096128",
+    "memory.max": "21474836480",
+    "memory.swap.max": "0",
+    "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+    "cpu.stat": "usage_usec 33918511\nuser_usec 32468618\nsystem_usec 1449893\ncore_sched.force_idle_usec 0\nnr_periods 327\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+    "cpu.max": "400000 100000",
+    "command": [
+      "Rscript",
+      "/opt/foreststructure/run_julia_memory_safe.R",
+      "--point-cloud",
+      "/input/merged.copc.laz",
+      "--output-dir",
+      "/work/output",
+      "--temp-dir",
+      "/work/scratch",
+      "--memory-budget-gib",
+      "16",
+      "--instance-dimension",
+      "PredInstance_SAT",
+      "--instance-dimension",
+      "PredInstance_FM"
+    ],
+    "analysis_elapsed_seconds": 31.778992391191423,
+    "exit_code": 0,
+    "input_sha256_after": "48cffb8f96da0a09acd2dea46c6ce23f0a7d171ad0273c30d47df0542af6b1c3",
+    "outputs": {
+      "foreststructure_PredInstance_FM_results.csv": {
+        "bytes": 902,
+        "sha256": "e76c14ec0e689a36b539abe71308492883ed05484959f2a315f5d9bbc86ff113"
+      },
+      "foreststructure_PredInstance_FM_segment_diagnostics.csv": {
+        "bytes": 1850,
+        "sha256": "639bb50f8420b22b1bb539a2a6a260986e61375a1bf2274169827b5d58296127"
+      },
+      "foreststructure_PredInstance_FM_tiles.geojson": {
+        "bytes": 2326,
+        "sha256": "4435c67e08da8595a3a1a633783a143ca4ef0e96ef5ef5561180e9631a3093ae"
+      },
+      "foreststructure_PredInstance_SAT_results.csv": {
+        "bytes": 904,
+        "sha256": "cdfc9a27faf841d7fce8e2394f7b7e12a5e3250b3dd45df66477e5565224580e"
+      },
+      "foreststructure_PredInstance_SAT_segment_diagnostics.csv": {
+        "bytes": 1367,
+        "sha256": "2f93afb3a2048f1861f18852dd4ab359d02282c7f7c5c1ea3d608e8769a23b8f"
+      },
+      "foreststructure_PredInstance_SAT_tiles.geojson": {
+        "bytes": 2329,
+        "sha256": "55a9c80e3447516a38132d7c24c499540269f751c9497e4e3473fb1548bb8e00"
+      },
+      "foreststructure_aoi_conversion.json": {
+        "bytes": 239,
+        "sha256": "1fcb1b3278f25700b994f0ac5a8b5379c631f875aa33b368315bc11db90ae08a"
+      },
+      "foreststructure_chm.tif": {
+        "bytes": 2804,
+        "sha256": "deea5712992e7e91a9267cd7c841c5af214e12e1db154fbf061aa0e02ef017f6"
+      },
+      "foreststructure_dtm.tif": {
+        "bytes": 3178,
+        "sha256": "068165dfb6befce2965c2c249a2827288b996c2b48c196e48fe857c1dcf461aa"
+      },
+      "foreststructure_julia_memory_safe_run.json": {
+        "bytes": 15462,
+        "sha256": "d27cabef8012669e1373f04ee22baa7ea82a00da85bc2bd5fefb8417eccccd53"
+      },
+      "foreststructure_performance.csv": {
+        "bytes": 1532,
+        "sha256": "183dc37fae5fcf9c0e6b07559385191516732dafa1e3f015c7fc2f4f8318bcd9"
+      },
+      "foreststructure_tiles.png": {
+        "bytes": 70299,
+        "sha256": "0cfa88227c16ba8f6ce32714a9f23687563abdfd0fb56f5db078e79ae6cd4c1a"
+      },
+      "foreststructure_voxel_counts.csv": {
+        "bytes": 216307,
+        "sha256": "42e234957bc8134e45d516a3d74c360f5b4d90bafbd336f75ff7ffed9d0ddbd7"
+      },
+      "foreststructure_voxel_counts.json": {
+        "bytes": 5042,
+        "sha256": "d2844aae6ef8c90349dcd295dfff9a0b515cb411f4ccecc42d91ab13f4d65ddd"
+      },
+      "foreststructure_voxel_counts.tif": {
+        "bytes": 65361,
+        "sha256": "d9b5b85b2ca8a0827b4d36f96f6a6dd84e5bb4ff5c66e763fca4518ce3a3bf6b"
+      },
+      "foreststructure_voxel_counts_validity.tif": {
+        "bytes": 952,
+        "sha256": "0c9dc2a609cc83d24df52759af799f0e6d4f19e4435699254bb570ff86a08712"
+      }
+    }
+  },
+  "artifact_validation": {
+    "dataset_id": "foreststructure",
+    "errors": [],
+    "ignored_gdal_sidecars": [],
+    "missing_instance_dimensions": [],
+    "processed_instance_dimensions": [
+      "PredInstance_SAT",
+      "PredInstance_FM"
+    ],
+    "publish_artifacts": [
+      "foreststructure_PredInstance_FM_results.csv",
+      "foreststructure_PredInstance_FM_segment_diagnostics.csv",
+      "foreststructure_PredInstance_FM_tiles.geojson",
+      "foreststructure_PredInstance_SAT_results.csv",
+      "foreststructure_PredInstance_SAT_segment_diagnostics.csv",
+      "foreststructure_PredInstance_SAT_tiles.geojson",
+      "foreststructure_aoi_conversion.json",
+      "foreststructure_chm.tif",
+      "foreststructure_dtm.tif",
+      "foreststructure_julia_memory_safe_run.json",
+      "foreststructure_performance.csv",
+      "foreststructure_tiles.png",
+      "foreststructure_voxel_counts.csv",
+      "foreststructure_voxel_counts.json",
+      "foreststructure_voxel_counts.tif",
+      "foreststructure_voxel_counts_validity.tif"
+    ],
+    "status": "valid",
+    "validated_at_utc": "2026-10-13T16:03:43.901492+00:00"
+  },
+  "independent_validation": {
+    "scope": "All artifacts and all source points; voxel recount conditioned on produced DTM; no independent metric-reference parity",
+    "checks": [
+      {
+        "name": "complete_immutable_artifacts",
+        "passed": true,
+        "count": 16
+      },
+      {
+        "name": "source_provenance_and_order_restoration_contract",
+        "passed": true,
+        "points": 867599,
+        "selectors": [
+          "xyz12",
+          "xyz13"
+        ],
+        "dimensions": [
+          "PredInstance_SAT",
+          "PredInstance_FM"
+        ]
+      },
+      {
+        "name": "rasters_georeferenced_and_finite",
+        "passed": true,
+        "rasters": {
+          "dtm": {
+            "shape": [
+              5,
+              34
+            ],
+            "finite_cells": 142,
+            "minimum": 386.249,
+            "maximum": 388.29
+          },
+          "chm": {
+            "shape": [
+              10,
+              67
+            ],
+            "finite_cells": 476,
+            "minimum": 0.0,
+            "maximum": 28.600000381469727
+          }
+        },
+        "crs_normalization": {
+          "declared_horizontal_authority": "EPSG:25833",
+          "source_projection_parameters_ellipsoid_axes_and_units_match_authority": true,
+          "custom_compound_source_WKT_retained_in_provenance": true
+        }
+      },
+      {
+        "name": "all_voxel_csv_cells_match_raster",
+        "passed": true,
+        "occupied_voxels": 6241,
+        "bands": 56
+      },
+      {
+        "name": "exhaustive_source_voxel_recount_and_index_coverage",
+        "passed": true,
+        "point_accounting": {
+          "read": 867599,
+          "nonfinite": 0,
+          "excluded_domain": 174392,
+          "invalid_dtm": 0,
+          "negative_height": 34962,
+          "included": 658245
+        },
+        "unique_indices": 867599
+      },
+      {
+        "name": "SAT_FM_tables_geometry_and_source_ID_membership",
+        "passed": true,
+        "dimensions": {
+          "PredInstance_SAT": {
+            "tiles": 2,
+            "source_positive_ids": 12,
+            "segments": 12,
+            "accepted_trees": 10,
+            "NA_fields": 28
+          },
+          "PredInstance_FM": {
+            "tiles": 2,
+            "source_positive_ids": 17,
+            "segments": 17,
+            "accepted_trees": 13,
+            "NA_fields": 38
+          }
+        }
+      },
+      {
+        "name": "terrain_provenance_and_scratch_cleanup",
+        "passed": true
+      }
+    ],
+    "status": "passed",
+    "elapsed_seconds": 0.9971107721794397
+  },
+  "memory_qualification": {
+    "meaning": "The point-count target can be exceeded in a spatially unsplittable cell; this does not bypass the container RAM cap. No OOM was demonstrated in these tests.",
+    "tested_commit": "53ba60ef47b6f12859f016a4ed3a7449b3499b99",
+    "current_reducer_matches_tested_code": true,
+    "reducer_sha256": "9436a692fca8522b835af237699544510a4e73508ebbcd445ffcd93d904adb45",
+    "stress_limits": {
+      "cpus": 2,
+      "memory_gib": 8
+    },
+    "cases": {
+      "4000000": {
+        "input_points": 4000000,
+        "configured_block_points": 4000000,
+        "largest_reducer_leaf": 4000000,
+        "leaf_count": 1,
+        "represented_points": 4000000,
+        "output_points": 400,
+        "output_xyz_sha256": "f5911895befbaf201613b760592f337b25836357bbd916c8b9f28bf95d074d41",
+        "point_accounting_pass": true,
+        "configured_limit_exceeded": false,
+        "mode": "tile",
+        "baseline_peak_rss_bytes": 55574528,
+        "peak_rss_bytes": 694964224,
+        "elapsed_seconds": 0.7970011110883206,
+        "status": "completed"
+      },
+      "8000000": {
+        "input_points": 8000000,
+        "configured_block_points": 4000000,
+        "largest_reducer_leaf": 8000000,
+        "leaf_count": 1,
+        "represented_points": 8000000,
+        "output_points": 400,
+        "output_xyz_sha256": "f5911895befbaf201613b760592f337b25836357bbd916c8b9f28bf95d074d41",
+        "point_accounting_pass": true,
+        "configured_limit_exceeded": true,
+        "mode": "tile",
+        "baseline_peak_rss_bytes": 55574528,
+        "peak_rss_bytes": 1995313152,
+        "elapsed_seconds": 4.637215949827805,
+        "status": "completed"
+      }
+    },
+    "all_stress_processes_completed_without_oom": true,
+    "readiness": "A demonstrated soft-limit/density risk outside the measured workload envelope, not evidence that the successful GFZ runs are unsafe."
+  },
+  "limitations": [
+    "This local pinned image was tested; no production deployment or complete workflow/Potree canary ran.",
+    "GFZ input is the existing867599-point narrow crop, not the full16426961-point collection.",
+    "Voxel recount is conditioned on ForestStructure generated DTM; no independent Julia metric-reference or ecological-ground-truth parity is claimed.",
+    "GeoTIFF CRS is canonical declared horizontalEPSG25833; source custom compoundWKT is retained in provenance. Strict rawCRSequality is false; projection parameters, ellipsoid, axes, units and authority were checked.",
+    "Initial independent validator stopped on rawCRSequality; its script/report are retained. Analysis was not rerun or altered."
+  ],
+  "artifacts": {
+    "/mnt/ssds/kg281/smarttile-foreststructure-gfz-20261013/run.sh": {
+      "sha256": "62cd07dba457eac14a4d5b46539f1ca563ef84d4be27ff69b53d439630b1ee61",
+      "bytes": 845
+    },
+    "/mnt/ssds/kg281/smarttile-foreststructure-gfz-20261013/code/run.py": {
+      "sha256": "0eca93ddb12e85a55b337dd8f409985ae825e6693173713680897db3360c5348",
+      "bytes": 3765
+    },
+    "/mnt/ssds/kg281/smarttile-foreststructure-gfz-20261013/logs/analysis.log": {
+      "sha256": "2e8e08a6226b8fd0f1c9e6861c8d3ef9a9e326340633c51f03c592bf82a3464f",
+      "bytes": 5900
+    },
+    "/mnt/ssds/kg281/smarttile-foreststructure-gfz-20261013/logs/driver.log": {
+      "sha256": "12791eb7bc047d4fc13e2abb0fb91897782594c33040196adf49a24cfcf605bf",
+      "bytes": 111
+    },
+    "/mnt/ssds/kg281/smarttile-foreststructure-gfz-20261013/logs/foreststructure-help.log": {
+      "sha256": "f1c8643d8f245e201a50c3b787c5387327d222b024a8a3be98b6f201c96e2936",
+      "bytes": 2423
+    },
+    "/mnt/ssds/kg281/smarttile-foreststructure-gfz-20261013/code/validate_output_artifacts.py": {
+      "sha256": "7802d5a0091cf9ddbde5d3f376f56cc3bb7af62d88b518e5d10aede2fff34954",
+      "bytes": 5851
+    },
+    "/mnt/ssds/kg281/smarttile-foreststructure-gfz-20261013/code/validate_smarttile_foreststructure.py": {
+      "sha256": "4c03005ce98b57800babdfea716a0d99bb2d2d80bff88cf6c12188b89e78efda",
+      "bytes": 14336
+    },
+    "/mnt/ssds/kg281/smarttile-foreststructure-gfz-20261013/code/validate_smarttile_foreststructure.initial.py": {
+      "sha256": "6f14899f4de2e8177592893c11c51e86db78626617f590b5f56b03ac7d2109ce",
+      "bytes": 11983
+    },
+    "/mnt/ssds/kg281/smarttile-foreststructure-gfz-20261013/reports/run.json": {
+      "sha256": "40d70d5db2ee233f33e1c5ad42df9e6af146d70f9969e4fb0dacec3c5cbc84b9",
+      "bytes": 9070
+    },
+    "/mnt/ssds/kg281/smarttile-foreststructure-gfz-20261013/reports/artifact_validation.json": {
+      "sha256": "2d65050a20b10ff7fc4aa96fade3df41d726d470461aedb7f740cc10b1a8e720",
+      "bytes": 1052
+    },
+    "/mnt/ssds/kg281/smarttile-foreststructure-gfz-20261013/reports/independent_validation.json": {
+      "sha256": "b7a3f4a9a5d228cd56434675642990dddaa637618c3070340396fd4fd14049eb",
+      "bytes": 2377
+    },
+    "/mnt/ssds/kg281/smarttile-foreststructure-gfz-20261013/reports/independent_validation.initial.json": {
+      "sha256": "d907b7baf68b6e74e232aa68a3d1d92ef2bffd798742c533ecd9de577f921ce8",
+      "bytes": 1000
+    }
+  }
+}
