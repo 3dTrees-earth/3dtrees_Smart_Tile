@@ -43,6 +43,7 @@ from raycloud_instance_ids import (
 from worker_budget import spatial_query_worker_count
 from instance_statistics import InstanceStatistics, summary_document, summary_file_name
 from small_instance_reassignment import reassign_small_instances
+from instance_consolidation import consolidate_instances, verify_distinct_instances
 
 
 CORRESPONDENCE_RADIUS = 0.05  # m, cross-tile instance correspondence search
@@ -309,16 +310,64 @@ def timed_stage(report, name, function, *args, **kwargs):
         print(f"{report['model']}: {name} finished in {elapsed:.3f}s", flush=True)
 
 
+def _release(index=None, directory=None, *, live=(), keep=()):
+    """Free a finished merge stage: close and delete its index, delete its files.
+
+    Files still referenced by a later stage (``live``) or needed later
+    (``keep``) stay. Without this, every stage stays on disk until publish:
+    about 270 bytes of scratch per dense point and model.
+    """
+    if index is not None:
+        index.close()
+        for path in index.path.parent.glob(index.path.name + "*"):
+            path.unlink(missing_ok=True)
+    if directory is not None and Path(directory).exists():
+        protected = {Path(f).resolve() for f in (*live, *keep)}
+        for path in sorted(Path(directory).rglob("*"), reverse=True):
+            if path.is_file() and path.resolve() not in protected:
+                path.unlink()
+            elif path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+
+
+def _tile_labels(pairs, regions, tile_bounds_json):
+    """Output tile names ``cXX_rYY`` from the layout tile each pair was matched to.
+
+    A single-cloud layout (no grid tile) is ``c00_r00``. Layouts without
+    col/row fall back to the label in the file names, then the layout position.
+    """
+    import re
+    tiles = json.loads(Path(tile_bounds_json).read_text()).get("tiles") or []
+    labels = []
+    for n, ((source, target, _), region) in enumerate(zip(pairs, regions)):
+        index = region.get("layout_tile")
+        entry = tiles[index] if index is not None and index < len(tiles) else None
+        if index is None:
+            labels.append("c00_r00")
+        elif entry is not None and "col" in entry and "row" in entry:
+            labels.append(f"c{int(entry['col']):02d}_r{int(entry['row']):02d}")
+        else:
+            match = re.search(r"c\d+_r\d+", Path(target).name) or re.search(r"c\d+_r\d+", Path(source).name)
+            labels.append(match.group(0) if match else f"c{index:02d}_r00")
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"Tiles map to duplicate layout names: {labels}")
+    return labels
+
+
 def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json,
                       originals=None, original_output=None, merged_output=None,
                       transfer_radius=.1732, overlap_threshold=.3,
                       ready=False, matching=True, target_dims=None,
                       instance_dimension="PredInstance", filter_anchor="centroid", workers=1,
-                      resolution_1=0.01, remap_tolerance=None, small_instances=None):
+                      resolution_1=0.01, remap_tolerance=None, small_instances=None,
+                      keep_unfiltered=True):
     """The sole remap-first merge path for one or more independent models.
 
     ``small_instances`` (a SmallInstancePolicy) reassigns small final instances
     after deduplication; it is rejected for RayCloudTools tree IDs.
+    ``keep_unfiltered`` publishes the unfiltered dense tiles as the remap
+    baseline (``<output_tiles>_unfiltered_1cm``); without it they are deleted
+    as soon as orphan recovery no longer needs them.
     """
     from tile_file_matching import find_matching_files
     if filter_anchor not in ANCHORS:
@@ -350,7 +399,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
     report["parallelism"] = {"requested_workers": workers, "query_workers": query_workers,
                              "scope": "bounded spatial queries; small batches run serially"}
     start, cpu_start = time.monotonic(), time.process_time()
-    destinations = [output_tiles, baseline_output]
+    destinations = [output_tiles] + ([baseline_output] if keep_unfiltered else [])
     if tree_output is not None:
         destinations.append(tree_output)
     if originals:
@@ -433,7 +482,15 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                         model, owned_files, pairs, regions, model_report["instance_ownership"],
                         survivors, origin, final_tile_dir, instance_statistics=statistics)
                     model_report["rct_instance_ids"] = namespace
+                    # RCT trees are never merged across tiles; check the one-tile contract.
+                    verify_distinct_instances(final_files, model.instance)
                     validate_recovered_geometry(survivors, model, admitted, claims_path, model_report, origin)
+                    for stage in (owned, admitted_index):
+                        _release(stage)
+                    for stage in ("owned", "recovered"):
+                        _release(None, work / stage / suffix, live=final_files)
+                    _release(None if originals else dense,
+                             None if keep_unfiltered else dense_dir / suffix, live=final_files)
                     model_report["reconciliation"] = {
                         "policy": "tile namespace only; no cross-tile merge or reassignment",
                         "ids": [[tile, local, final] for (tile, local), final in sorted(mapping.items())],
@@ -461,8 +518,14 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                         model, dense_files, owned_files, owned, regions, overlaps,
                         work / "recovered" / suffix, recovered, origin, counts, model_report,
                         workers=query_workers)
+                    stage_dir = work / "owned" / suffix
                     if admitted:
-                        owned = recovered
+                        _release(owned, stage_dir, live=owned_files)
+                        owned, stage_dir = recovered, work / "recovered" / suffix
+                    else:
+                        _release(recovered)
+                    _release(None if originals else dense,
+                             None if keep_unfiltered else dense_dir / suffix, live=owned_files)
                     mapping = timed_stage(model_report, 'reconciliation', reconcile_instances, model, owned_files, owned, origin, counts, overlap_threshold,
                                                   CORRESPONDENCE_RADIUS, model_report, enabled=matching,
                                                   overlaps=overlaps, normal_keys=normal_keys if admitted else None, workers=query_workers)
@@ -478,7 +541,8 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                         owned_files = timed_stage(model_report, 'shared_point_ownership', assign_shared_points,
                             model, owned_files, owned, regions, mapping, work / "resolved" / suffix,
                             resolved, origin, model_report, overlaps=overlaps, workers=query_workers)
-                        owned = resolved
+                        _release(owned, stage_dir, live=owned_files, keep=[claims_path])
+                        owned, stage_dir = resolved, work / "resolved" / suffix
                         if any(t["background_input"] > t["background_removed"]
                                for t in model_report["instance_ownership"]["tiles"]):
                             tree_priority = stack.enter_context(PointIndex(work / f"tree_priority_{i}.sqlite", dimensions, query_workers=query_workers))
@@ -486,12 +550,15 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                                 model, owned_files, owned, regions, mapping, work / "tree_priority" / suffix,
                                 tree_priority, origin, model_report, overlaps=overlaps, background_only=True,
                                 workers=query_workers)
-                            owned = tree_priority
+                            _release(owned, stage_dir, live=owned_files, keep=[claims_path])
+                            owned, stage_dir = tree_priority, work / "tree_priority" / suffix
                     final_files = timed_stage(model_report, 'deduplication', deduplicate, model, owned_files, owned, survivors, origin, mapping,
                                               final_dir / suffix, model_report, overlaps=overlaps,
                                               background_semantics_owned=True, core_regions=regions,
                                               instance_statistics=statistics, workers=query_workers)
+                    _release(owned, stage_dir, live=final_files, keep=[claims_path])
                     validate_recovered_geometry(survivors, model, admitted, claims_path, model_report, origin)
+                    _release(None, work / "recovered" / suffix, live=final_files)
                     # Tiles are relabelled in place; the survivor index keeps the
                     # pre-reassignment labels and compaction folds them (aliases).
                     if small_instances is not None:
@@ -499,16 +566,21 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                                                  statistics, small_instances, final_files, model.instance, model_report)
                     mapping = {key: reassigned.get(value, value) for key, value in mapping.items()}
                     reassignments[model.instance] = reassigned
+                    # One tile per instance, so per-tile tools see every tree once and whole.
+                    timed_stage(model_report, 'instance_consolidation', consolidate_instances,
+                                final_files, model.instance, regions, work / "consolidation" / suffix, model_report)
                     with (final_dir / suffix / "instance_metadata.csv").open("w", newline="", encoding="utf-8") as stream:
                         writer = csv.writer(stream)
                         writer.writerow([model.instance, "has_added_clusters"])
                         targets = set(reassigned.values())
                         writer.writerows((value, int(value in targets)) for value in sorted(set(mapping.values())))
                     indices.append(survivors)
-                baselines.append(dense)
+                baselines.append(dense if originals else None)
                 manifest = {"contract": report["contract"], "model": model.name,
-                            "resolution_1_m": resolution_1,
-                            "baseline": os.path.relpath(baseline_output / suffix, output_tiles / suffix)}
+                            "resolution_1_m": resolution_1}
+                if keep_unfiltered:
+                    manifest["baseline"] = os.path.relpath(baseline_output / suffix, output_tiles / suffix)
+                model_report["tile_names"] = _tile_labels(pairs, regions, tile_bounds_json)
                 manifest["instance_summary"] = summary_file_name(model.instance)
                 write_report(final_dir / suffix / manifest["instance_summary"], summary_document(
                     model, statistics, reassigned, origin=origin, resolution_1=resolution_1,
@@ -531,7 +603,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                 manifest["tile_bounds_json"] = "tile_bounds.json"
                 manifest["tile_bounds_sha256"] = digest(layout_path)
                 write_report(final_dir / suffix / "smarttile_merge.json", manifest)
-            products = [(final_dir, output_tiles), (dense_dir, baseline_output)]
+            products = [(final_dir, output_tiles)] + ([(dense_dir, baseline_output)] if keep_unfiltered else [])
             if tree_mode:
                 products.append((work / "tree_files", tree_output))
             if originals:
@@ -551,6 +623,14 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                 metadata = work / "merged_instance_metadata.csv"
                 metadata.write_bytes((final_dir / "instance_metadata.csv").read_bytes())
                 products.append((metadata, Path(merged_output).with_name(Path(merged_output).stem + "_instance_metadata.csv")))
+            # Name output tiles after the tile layout once nothing reads them by index.
+            for model_report, suffix in zip(report["models"], [Path(f"model_{i:03d}") if len(collections) > 1 else Path()
+                                                              for i in range(len(collections))]):
+                for directory in [final_dir / suffix] + ([dense_dir / suffix] if keep_unfiltered else []):
+                    for n, label in enumerate(model_report["tile_names"]):
+                        current = directory / f"tile_{n:05d}.laz"
+                        if current.exists() and label != current.stem:
+                            current.rename(directory / f"{label}.laz")
             report["checksums"] = {str(destination / file.relative_to(source) if source.is_dir() else destination): digest(file)
                                    for source, destination in products
                                    for file in (sorted(source.rglob("*.la*")) if source.is_dir() else [source])}

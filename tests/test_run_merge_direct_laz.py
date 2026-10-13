@@ -40,7 +40,7 @@ class RunMergeDirectLazTests(unittest.TestCase):
             report = json.loads((root / "output/remap_first_report.json").read_text())
             self.assertEqual(report["models"][0]["transfer"][0]["matched"], 3)
             self.assertEqual(report["state"], "validated")
-            self.assertTrue((root / "output/merged.laz").is_file())
+            self.assertTrue((root / "output/merged_tiles.laz").is_file())
             self.assertTrue((root / "output/original_with_predictions/a.las").is_file())
 
     def test_input_area_stays_unchanged_and_no_originals_is_pending(self):
@@ -61,7 +61,7 @@ class RunMergeDirectLazTests(unittest.TestCase):
             params = self.params(root, segmented_remapped_folder=source, original_laz_input_dir=originals,
                                  skip_merged_file=True)
             run.run_merge_task(params)
-            self.assertFalse((root / "output/merged.laz").exists())
+            self.assertFalse((root / "output/merged_tiles.laz").exists())
             self.assertTrue((root / "output/original_with_predictions/a.las").exists())
 
     def test_copc_lane_is_validation_only_and_raw_metadata_is_preserved(self):

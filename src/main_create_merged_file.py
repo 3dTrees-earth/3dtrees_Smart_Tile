@@ -35,6 +35,7 @@ from copc_staging import (
 )
 
 SUPPORTED_OUTPUT_FORMATS = {"laz", "copc.laz", "ply"}
+FULL_RESOLUTION_TOKENS = {"full", "original"}
 
 
 def get_pdal_path() -> str:
@@ -58,7 +59,11 @@ def parse_merged_resolutions(
     res1: float,
     res2: float,
 ) -> List[Tuple[str, float]]:
-    """Parse create_merged_file resolution selector into unique label/resolution pairs."""
+    """Parse create_merged_file resolution selector into unique label/resolution pairs.
+
+    ``full`` (or ``original``) selects the full-resolution product: every input
+    point, no subsampling, as label ``full`` with resolution 0.
+    """
     aliases = {
         "res1": ("res1", res1),
         "resolution1": ("res1", res1),
@@ -75,6 +80,11 @@ def parse_merged_resolutions(
     for raw_token in (value or "res1,res2").split(","):
         token = raw_token.strip().lower()
         if not token:
+            continue
+        if token in FULL_RESOLUTION_TOKENS:
+            if "full" not in seen:
+                seen.add("full")
+                parsed.append(("full", 0.0))
             continue
         if token in aliases:
             base_label, resolution = aliases[token]
@@ -101,8 +111,10 @@ def parse_merged_resolutions(
 
 
 def prod_merged_output_path(output_dir: Path, label: str, output_format: str = "copc.laz") -> Path:
-    safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_")
     normalized_format = parse_merged_output_formats(output_format)[0]
+    if label == "full":  # every input point: one merged file
+        return output_dir / f"merged.{normalized_format}"
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_")
     return output_dir / f"prod_merged_{safe_label}.{normalized_format}"
 
 
@@ -347,18 +359,31 @@ def _copc_union_bounds(input_files: List[Path]) -> Tuple[float, float, float, fl
     )
 
 
+# PDAL holds a whole chunk in memory (dataset 645: about 330 B per point with
+# prediction dimensions), and up to --workers chunks run at once: bound the
+# chunk size, not only the chunk count, so memory does not grow with the
+# dataset (10 workers x 2 M points: about 7 GB).
+PRODUCT_CHUNK_POINTS = 2_000_000
+
+
 def _prod_merged_chunk_bounds(
     input_files: List[Path],
     resolution: float,
     num_spatial_chunks: int,
 ) -> List[str]:
+    import laspy
     from main_subsample import _aligned_edges, get_file_xy_scales
 
     minx, maxx, miny, maxy = _copc_union_bounds(input_files)
     if maxx - minx == 0 or maxy - miny == 0:
         return [f"([{minx},{maxx}],[{miny},{maxy}])"]
 
-    raw_x_step = (maxx - minx) / max(1, num_spatial_chunks)
+    total_points = 0
+    for input_file in input_files:
+        with laspy.open(input_file) as reader:
+            total_points += int(reader.header.point_count)
+    chunks = max(1, int(num_spatial_chunks or 1), math.ceil(total_points / PRODUCT_CHUNK_POINTS))
+    raw_x_step = (maxx - minx) / chunks
     x_step = max(resolution, math.ceil(raw_x_step / resolution) * resolution)
     scale_x = min(get_file_xy_scales(input_file)[0] for input_file in input_files)
     edges = _aligned_edges(minx, maxx, x_step, resolution)
@@ -571,7 +596,9 @@ def _validate_preserved_product_dims(
     except Exception as exc:
         return (False, f"could not inspect output product dimensions: {exc}")
 
-    missing = sorted(expected - output_dims)
+    # COPC needs point formats 6-8, which name the LAS 1.0-1.3 field differently.
+    renamed = {"scan_angle_rank": "scan_angle"}
+    missing = sorted(name for name in expected - output_dims if renamed.get(name) not in output_dims)
     if missing:
         return (
             False,
@@ -841,8 +868,14 @@ def create_prod_merged_files(
     chunk_workers: Optional[int] = None,
     staged_copc_dir: Optional[Path] = None,
     standardization_json: Optional[Path] = None,
+    original_point_index: bool = True,
 ) -> List[Path]:
-    """Create all selected prod-merged products."""
+    """Create all selected prod-merged products.
+
+    The full-resolution product streams the LAS/LAZ inputs in record order and,
+    with ``original_point_index``, numbers every point (``OriginalPointIndex``).
+    Subsampled products are built from staged COPCs and carry no index.
+    """
     outputs = []
     expected_dims = None
     if standardization_json:
@@ -852,6 +885,26 @@ def create_prod_merged_files(
             flush=True,
         )
 
+    output_formats = parse_merged_output_formats(output_format_selector)
+    selections = parse_merged_resolutions(resolution_selector, res1, res2)
+    if any(label == "full" for label, _ in selections):
+        from full_resolution_merge import create_full_resolution_product
+
+        inputs = point_cloud_files(original_with_predictions_dir)
+        for output_format in output_formats:
+            output_file = prod_merged_output_path(output_dir, "full", output_format)
+            print(f"  Creating {output_file.name} at full resolution from {len(inputs)} file(s) in record order"
+                  + (f" with {'OriginalPointIndex'}" if original_point_index else ""))
+            _remove_existing_output(output_file)
+            create_full_resolution_product(inputs, output_file, output_format,
+                                           original_point_index=original_point_index)
+            _finalize_product(output_file, output_format, inputs, inputs[0])
+            if output_format in {"laz", "copc.laz"}:
+                _validate_expected_dims([output_file], expected_dims, output_file.name)
+            outputs.append(output_file)
+    selections = [(label, resolution) for label, resolution in selections if label != "full"]
+    if not selections:
+        return outputs
     print("  Preparing COPC inputs with SmartTile untwine/PDAL fallback conversion")
     copc_input_files = prepare_copc_inputs(
         original_with_predictions_dir,
@@ -859,8 +912,7 @@ def create_prod_merged_files(
         staged_copc_dir=staged_copc_dir,
     )
     _validate_expected_dims(copc_input_files, expected_dims, "staged Original-with-predictions COPCs")
-    output_formats = parse_merged_output_formats(output_format_selector)
-    for label, resolution in parse_merged_resolutions(resolution_selector, res1, res2):
+    for label, resolution in selections:
         selected_outputs = [
             (prod_merged_output_path(output_dir, label, output_format), output_format)
             for output_format in output_formats
@@ -874,19 +926,14 @@ def create_prod_merged_files(
                 f"with nearest-to-centroid"
             )
 
-        if num_spatial_chunks and num_spatial_chunks > 1:
-            created_outputs = create_chunked_prod_merged_files_for_resolution(
-                copc_input_files,
-                selected_outputs,
-                resolution,
-                num_spatial_chunks,
-                chunk_workers=chunk_workers,
-            )
-        else:
-            created_outputs = [
-                create_prod_merged_file(copc_input_files, output_file, resolution, output_format)
-                for output_file, output_format in selected_outputs
-            ]
+        # Always chunked: the chunk size, not the worker count, bounds memory.
+        created_outputs = create_chunked_prod_merged_files_for_resolution(
+            copc_input_files,
+            selected_outputs,
+            resolution,
+            num_spatial_chunks or 1,
+            chunk_workers=chunk_workers,
+        )
 
         for created, output_format in zip(created_outputs, output_formats):
             if parse_merged_output_formats(output_format)[0] in {"laz", "copc.laz"}:

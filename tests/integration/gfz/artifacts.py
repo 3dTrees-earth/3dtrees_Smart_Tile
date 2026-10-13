@@ -87,9 +87,14 @@ def dense(model_name):
         def flush(self):
             pass
 
+        def append_index(self, path):
+            # Parallel tile transfers hand over finished index shards; the
+            # census counts the written dense tiles below instead.
+            pass
+
     census = TransferCensus()
     files, _ = prepare_dense(model, pairs, output, census, origin_for([p[0] for p in pairs]), .1732, report)
-    report['validated_dense_points'] = census.count
+    report['validated_dense_points'] = census.count + sum(laspy.open(f).header.point_count for f in files)
     if model_name == 'RCT':
         for target, (source, _, _) in zip(files, pairs):
             for kind in ('trees','trees_info'):

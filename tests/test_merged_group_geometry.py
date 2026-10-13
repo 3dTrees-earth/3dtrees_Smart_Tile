@@ -105,3 +105,8 @@ class RecoveredMergePipelineTests(unittest.TestCase):
             cloud = laspy.read(root/'original_with_predictions/raw.las')
             np.testing.assert_array_equal(cloud.PredInstance, [1, 1, 1, 1])
             np.testing.assert_array_equal(cloud.PredSemantic, [2, 3, 8, 9])
+            # The reconciled tree ends up whole in one output tile, with every point.
+            tiles = [laspy.read(p) for p in sorted((root/'out').glob('*.laz'))]
+            self.assertEqual(sum(np.any(t.PredInstance == 1) for t in tiles), 1)
+            self.assertEqual(sum(len(t.points) for t in tiles), 4)
+            self.assertEqual(report['models'][0]['instance_consolidation']['split_instances'], 1)

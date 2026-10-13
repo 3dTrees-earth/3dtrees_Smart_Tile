@@ -159,7 +159,7 @@ class CreateMergedFileTests(unittest.TestCase):
 
             def create_file(*args, **kwargs):
                 created.write_text("laz")
-                return created
+                return [created]
 
             with mock.patch(
                 "main_create_merged_file.prepare_copc_inputs",
@@ -170,7 +170,7 @@ class CreateMergedFileTests(unittest.TestCase):
                     return_value={"X", "Y", "Z", "intensity", "Amplitude"},
                 ) as dims:
                     with mock.patch(
-                        "main_create_merged_file.create_prod_merged_file",
+                        "main_create_merged_file.create_chunked_prod_merged_files_for_resolution",
                         side_effect=create_file,
                     ):
                         outputs = create_prod_merged_files(

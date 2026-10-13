@@ -252,7 +252,10 @@ class Parameters(BaseSettings):
 
     original_with_predictions_dir: Optional[Path] = Field(
         default=None,
-        description="Directory with Original-with-predictions files for create_merged_file task",
+        description="Directory with Original-with-predictions files for create_merged_file task. "
+                    "Several comma-separated directories hold versions of the same originals with "
+                    "different attributes (for example one per segmentation run); they are joined "
+                    "by record order before merging.",
         validation_alias=AliasChoices("original-with-predictions-dir", "original_with_predictions_dir"),
     )
 
@@ -276,11 +279,21 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("standardization-json", "standardization_json"),
     )
 
+    original_point_index: bool = Field(
+        True,
+        description="Full-resolution prod-merged product: add OriginalPointIndex (uint64, first ExtraByte), "
+                    "each point's 0-based record position across the inputs in sorted file order, so "
+                    "ForestStructure can restore source order after COPC and reproduce Julia's results. "
+                    "Disable with --no-original-point-index.",
+        validation_alias=AliasChoices("original-point-index", "original_point_index"),
+    )
+
     merged_resolutions: str = Field(
         "res1,res2",
         description=(
             "Comma-separated prod-merged output resolutions for create_merged_file. "
-            "Use res1/res2, numeric meters, or centimeter labels such as 1cm,10cm."
+            "Use res1/res2, numeric meters, centimeter labels such as 1cm,10cm, or full "
+            "(every input point, no subsampling, in input record order)."
         ),
         validation_alias=AliasChoices("merged-resolutions", "merged_resolutions"),
     )
@@ -389,6 +402,13 @@ class Parameters(BaseSettings):
         False,
         description="Disable cross-tile instance matching",
         validation_alias=AliasChoices("disable-matching", "disable_matching"),
+    )
+
+    skip_unfiltered_tiles: bool = Field(
+        False,
+        description="Merge/filter: do not publish <output-tiles>_unfiltered_1cm (the remap baseline); "
+                    "frees that scratch early. Standalone remap then checks final coverage only.",
+        validation_alias=AliasChoices("skip-unfiltered-tiles", "skip_unfiltered_tiles"),
     )
 
     skip_merged_file: bool = Field(

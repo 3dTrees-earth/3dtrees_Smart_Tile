@@ -13,6 +13,7 @@ from remap_first_pipeline import merge_collections
 from dense_instance_ownership import (owned_anchor, owned_background, ownership_regions,
                                       core_distance, preferred_core)
 from test_merge_stages import write_cloud
+from output_tiles import output_tile  # noqa: E402
 
 
 def core_layout(root):
@@ -107,7 +108,7 @@ class CoreOwnershipTests(unittest.TestCase):
                         output_tiles=root / 'out', tile_bounds_json=core_layout(root), ready=True,
                         originals=originals, filter_anchor=anchor)
                 self.assertEqual(report['state'], 'validated')
-                clouds = [laspy.read(root / f'out/tile_{i:05d}.laz') for i in range(2)]
+                clouds = [laspy.read(output_tile(root / 'out', i)) for i in range(2)]
                 self.assertEqual([len(c.points) for c in clouds], expected)
                 owned = clouds[expected.index(2)]
                 np.testing.assert_allclose(owned.x, [.5, 1.1])  # No clipping of the kept crown.
@@ -163,7 +164,7 @@ class CoreOwnershipTests(unittest.TestCase):
             write_cloud(source / 'b.las', [1, 1.5], [2, 2], [3, 3])
             report = merge_collections(collections=[source], target_dir=None,
                 output_tiles=root / 'out', tile_bounds_json=core_layout(root), ready=True, matching=False)
-            a, b = [laspy.read(root / f'out/tile_{i:05d}.laz') for i in range(2)]
+            a, b = [laspy.read(output_tile(root / 'out', i)) for i in range(2)]
             np.testing.assert_allclose(a.x, [.5, 1])
             np.testing.assert_allclose(b.x, [1.5])
             np.testing.assert_array_equal(a.PredSemantic, [2, 2])
@@ -186,7 +187,7 @@ class CoreOwnershipTests(unittest.TestCase):
                         output_tiles=root / 'out', tile_bounds_json=core_layout(root),
                         ready=True, matching=False, originals=originals)
                 self.assertEqual(report['state'], 'validated')
-                clouds = [laspy.read(root / f'out/tile_{i:05d}.laz') for i in range(2)]
+                clouds = [laspy.read(output_tile(root / 'out', i)) for i in range(2)]
                 a, b = clouds[::-1] if reverse else clouds
                 np.testing.assert_allclose(a.x, [-1, -.8, .9, .998, 1.19] if reverse else [-1, -.8, .9, .998, 1., 1.19])
                 np.testing.assert_allclose(b.x, [.81, 1., 1.002, 1.1, 2.8, 3.] if reverse else [.81, 1.002, 1.1, 2.8, 3.])
@@ -225,7 +226,8 @@ class CoreOwnershipTests(unittest.TestCase):
                         ready=True, matching=False, originals=originals)
                 self.assertEqual(report['state'], 'validated')
                 clouds = [laspy.read(p) for p in sorted((root / 'out').glob('*.laz'))]
-                left, right = (clouds[2], clouds[0]) if reverse else (clouds[0], clouds[2])
+                # Outputs are named after the layout tile (c00_r00 is the left one).
+                left, right = clouds[0], clouds[2]
                 enriched = laspy.read(root / 'original_with_predictions/raw.las')
                 np.testing.assert_array_equal(enriched.PredSemantic, [3, 12 if reverse else 4, 13, 6])
                 left_id, right_id = int(left.PredInstance[0]), int(right.PredInstance[-1])
@@ -323,7 +325,7 @@ class CoreOwnershipTests(unittest.TestCase):
                 output_tiles=root / 'out', tile_bounds_json=core_layout(root),
                 ready=True, originals=originals)
             self.assertEqual(report['state'], 'validated')
-            a, b = [laspy.read(root / f'out/tile_{i:05d}.laz') for i in range(2)]
+            a, b = [laspy.read(output_tile(root / 'out', i)) for i in range(2)]
             np.testing.assert_allclose(a.x, [-1, .998])
             np.testing.assert_array_equal(a.PredSemantic, [1, 1])
             np.testing.assert_allclose(b.x, [1., 1.002, 3])

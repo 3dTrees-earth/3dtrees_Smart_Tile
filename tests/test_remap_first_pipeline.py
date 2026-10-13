@@ -11,6 +11,7 @@ from laspy.vlrs.vlrlist import VLRList
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from remap_first_pipeline import merge_collections, strict_remap
 from test_merge_stages import write_cloud
+from output_tiles import output_tile  # noqa: E402
 
 
 def layout(root, number):
@@ -130,7 +131,7 @@ class StrictPipelineTests(unittest.TestCase):
             merge_collections(collections=[source], target_dir=targets, output_tiles=root / "out",
                               tile_bounds_json=layout(root, 1), originals=originals,
                               merged_output=root / "merged.laz")
-            for file in (root / "out_unfiltered_1cm/tile_00000.laz", root / "out/tile_00000.laz",
+            for file in (output_tile(root / "out_unfiltered_1cm", 0), output_tile(root / "out", 0),
                          root / "merged.laz", root / "original_with_predictions/a.las"):
                 with self.subTest(file=file):
                     assert_extended_metadata(self, file)

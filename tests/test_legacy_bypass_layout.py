@@ -13,6 +13,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from dense_instance_ownership import ownership_regions, owned_anchor
 from remap_first_pipeline import merge_collections
+from output_tiles import output_tile  # noqa: E402
 
 
 # Actual header extents from the failed 2590 / 2594 / 2595 replays.
@@ -75,7 +76,7 @@ class LegacyBypassLayoutTests(unittest.TestCase):
             report = merge_collections(collections=[source], target_dir=target,
                 output_tiles=root / 'out', tile_bounds_json=layout, originals=target)
             self.assertEqual(report['state'], 'validated')
-            result = laspy.read(root / 'out/tile_00000.laz')
+            result = laspy.read(output_tile(root / 'out', 0))
             np.testing.assert_array_equal(result.PredSemantic, [1, 2, 3])
             np.testing.assert_array_equal(result.X, laspy.read(target / '8645.las').X)
             np.testing.assert_array_equal(result.Y, laspy.read(target / '8645.las').Y)

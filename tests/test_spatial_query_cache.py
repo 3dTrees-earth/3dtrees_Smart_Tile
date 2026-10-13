@@ -91,7 +91,7 @@ class QueryCacheTests(unittest.TestCase):
                     report=merge_collections(collections=collections,target_dir=None,output_tiles=root/label/'tiles',
                         tile_bounds_json=layout(root,2),originals=originals,ready=True)
                 self.assertEqual(report['state'],'validated')
-            for rel in ('tiles/model_000/tile_00000.laz','tiles/model_001/tile_00001.laz','original_with_predictions/a.las'):
+            for rel in ('tiles/model_000/c00_r00.laz','tiles/model_001/c01_r00.laz','original_with_predictions/a.las'):
                 a,b=laspy.read(root/'disk'/rel),laspy.read(root/'cache'/rel)
                 np.testing.assert_array_equal(a.points.array,b.points.array)
             cloud=laspy.read(root/'cache/original_with_predictions/a.las')

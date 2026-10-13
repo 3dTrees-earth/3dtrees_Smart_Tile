@@ -13,6 +13,7 @@ from remap_first_pipeline import merge_collections, strict_remap
 from test_merge_stages import write_cloud
 from test_dense_instance_ownership import core_layout
 from worker_budget import spatial_query_worker_count
+from output_tiles import output_tile  # noqa: E402
 
 
 class QueryBudgetTests(unittest.TestCase):
@@ -122,7 +123,7 @@ class ParallelQueryTests(unittest.TestCase):
                     output=dest / 'enriched', workers=workers)
                 self.assertEqual(remap['state'], 'validated')
                 results.append([laspy.read(p).points.array for p in
-                    [dest / 'out/tile_00000.laz', dest / 'out/tile_00001.laz', dest / 'enriched/raw.las']])
+                    [output_tile(dest / 'out', 0), output_tile(dest / 'out', 1), dest / 'enriched/raw.las']])
             for a, b in zip(*results):
                 np.testing.assert_array_equal(a, b)
 

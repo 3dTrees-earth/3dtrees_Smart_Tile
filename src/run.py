@@ -76,7 +76,8 @@ def _create_prod_merged_outputs(
         print(f"Standardization JSON: {params.standardization_json}")
     print(f"Selected resolutions: {params.merged_resolutions}")
     print(f"Selected output formats: {params.merged_output_formats}")
-    print("Product subsampling method: nearest-to-centroid")
+    print("Product subsampling method: nearest-to-centroid (full: no subsampling)")
+    print(f"OriginalPointIndex on the full-resolution product: {params.original_point_index}")
     print()
 
     outputs = create_prod_merged_files(
@@ -90,6 +91,7 @@ def _create_prod_merged_outputs(
         chunk_workers=spatial_query_worker_count(params.workers),
         staged_copc_dir=params.staged_copc_dir,
         standardization_json=params.standardization_json,
+        original_point_index=params.original_point_index,
     )
     print("  Prod-merged outputs:")
     for output in outputs:
@@ -347,7 +349,12 @@ def run_merge_task(params: Parameters):
             _validate_raw_original_lane(Path(originals), original_output)
         merged = None if params.skip_merged_file else params.output_merged_laz
         if merged is None and not params.skip_merged_file and len(collections) == 1:
-            merged = work / "merged.laz"
+            merged = work / "merged_tiles.laz"
+        if (merged and originals and params.transfer_original_dims_to_merged
+                and Path(merged).resolve().parent == output_tiles.parent.resolve()
+                and Path(merged).name in {"merged.laz", "merged.copc.laz", "merged.ply"}):
+            raise ValueError(f"{merged} would be overwritten by the full-resolution prod-merged product; "
+                             "choose another --output-merged-laz name")
         report = merge_collections(
             collections=collections, target_dir=Path(target) if target else None,
             output_tiles=output_tiles, tile_bounds_json=tile_bounds,
@@ -360,6 +367,7 @@ def run_merge_task(params: Parameters):
             ready=ready, instance_dimension=params.instance_dimension, filter_anchor=params.filter_anchor,
             target_dims=set(_parse_csv(params.remap_dims)) if params.remap_dims else None,
             small_instances=_small_instance_policy(params),
+            keep_unfiltered=not params.skip_unfiltered_tiles,
         )
         if originals and params.transfer_original_dims_to_merged:
             _create_prod_merged_outputs(original_output, output_tiles.parent, params)
@@ -411,13 +419,26 @@ def run_create_merged_file_task(params: Parameters):
     if input_dir is None:
         print("Error: --original-with-predictions-dir or --input-dir is required for create_merged_file task")
         sys.exit(1)
-    input_dir = Path(input_dir)
-    if not input_dir.exists():
-        print(f"Error: Original-with-predictions directory not found: {input_dir}")
+    input_dirs = comma_paths(str(input_dir))
+    missing = [d for d in input_dirs if not d.exists()]
+    if missing:
+        print(f"Error: Original-with-predictions directory not found: {', '.join(map(str, missing))}")
         sys.exit(1)
-    output_dir = Path(params.output_dir) if params.output_dir is not None else input_dir.parent
+    output_dir = Path(params.output_dir) if params.output_dir is not None else input_dirs[0].parent
     try:
-        _create_prod_merged_outputs(input_dir, output_dir, params)
+        if len(input_dirs) > 1:
+            import shutil
+            import tempfile
+            from attribute_join import join_attribute_collections
+
+            output_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Joining attributes of {len(input_dirs)} collections of the same originals")
+            with tempfile.TemporaryDirectory(prefix=".joined-originals-", dir=output_dir) as work:
+                joined = join_attribute_collections(input_dirs, Path(work) / "originals")
+                _create_prod_merged_outputs(joined, output_dir, params)
+                shutil.rmtree(joined)
+        else:
+            _create_prod_merged_outputs(input_dirs[0], output_dir, params)
     except Exception as e:
         print(f"Error: {e}")
         import traceback
@@ -444,7 +465,8 @@ def run_filter_task(params: Parameters):
                           ready=True, matching=not params.disable_matching, workers=params.workers,
                           instance_dimension=params.instance_dimension,
                           overlap_threshold=params.overlap_threshold, filter_anchor=params.filter_anchor,
-                          small_instances=_small_instance_policy(params))
+                          small_instances=_small_instance_policy(params),
+                          keep_unfiltered=not params.skip_unfiltered_tiles)
     except Exception as exc:
         print(f"Error: {exc}")
         sys.exit(1)
@@ -463,6 +485,8 @@ def preprocess_boolean_flags(args_list):
         '--output-copc-res1', '--output_copc_res1',
         '--output-copc-res2', '--output_copc_res2',
         '--skip-merged-file', '--skip_merged_file',
+        '--skip-unfiltered-tiles', '--skip_unfiltered_tiles',
+        '--original-point-index', '--original_point_index',
         '--transfer-original-dims-to-merged', '--transfer_original_dims_to_merged',
     ]
 
@@ -496,6 +520,8 @@ def _accepted_cli_flags() -> set[str]:
         "no-produce_merged_file",
         "no-transfer-original-dims-to-merged",
         "no-transfer_original_dims_to_merged",
+        "no-original-point-index",
+        "no-original_point_index",
     }
     for field_name, field in Parameters.model_fields.items():
         accepted.add(field_name)
@@ -594,6 +620,7 @@ def _print_cli_help() -> None:
                 "output_tiles_folder",
                 "output_merged_laz",
                 "skip_merged_file",
+                "skip_unfiltered_tiles",
             ],
         ),
         (
@@ -609,6 +636,7 @@ def _print_cli_help() -> None:
                 "standardization_json",
                 "transfer_original_dims_to_merged",
                 "merged_resolutions",
+                "original_point_index",
                 "merged_output_formats",
             ],
         ),
@@ -682,6 +710,8 @@ def main():
             mapped_args.extend(['--transfer-original-dims-to-merged', 'False'])
         elif arg in ('--no-transfer-original-dims-to-merged', '--no-transfer_original_dims_to_merged'):
             mapped_args.extend(['--transfer-original-dims-to-merged', 'False'])
+        elif arg in ('--no-original-point-index', '--no-original_point_index'):
+            mapped_args.extend(['--original-point-index', 'False'])
         else:
             mapped_args.append(arg)
     remaining_args = mapped_args

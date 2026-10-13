@@ -528,7 +528,11 @@ python src/run.py --task create_merged_file \
     --workers 10
 ```
 
-`--merged-resolutions` accepts `res1`, `res2`, numeric meter values such as `0.05`, or centimeter labels such as `1cm,10cm`.
+`--merged-resolutions` accepts `res1`, `res2`, numeric meter values such as `0.05`, centimeter labels such as `1cm,10cm`, or `full`.
+
+**Full resolution (`full`)** writes `merged.<format>` (`merged.laz`, `merged.copc.laz` or `merged.ply`) with every input point and no subsampling. The LAS/LAZ inputs are streamed file by file (sorted file names) in record order, so no COPC staging is needed. With `--original-point-index` (the default; disable with `--no-original-point-index`), every point gets `OriginalPointIndex`: a uint64, its 0-based position in that order, written as the first ExtraByte and followed by the `PredInstance*` dimensions. This is the layout ForestStructure's ordered-COPC builder creates: ForestStructure restores the source order from it after COPC and reproduces Julia's results, which break ties by record order. The inputs must share one point format, ExtraBytes and CRS; scales are the finest of all inputs. Subsampled products carry no index, and merge/remap never transfer `OriginalPointIndex` as a prediction, so enriched originals never receive it.
+
+**Several segmentation outputs.** `--original-with-predictions-dir` also takes comma-separated folders that hold versions of the same originals with different attributes, for example one remap output per segmentation run. Files are matched by name; each must hold the same points in the same record order in every folder (checked chunk by chunk). The joined originals keep the first folder's points and standard fields plus every folder's ExtraBytes, and then go through the selected products as one input (`merged.laz` with `OriginalPointIndex`, or subsampled products). An attribute in several folders is kept once when its values agree and is an error otherwise; attributes are never renamed. COPC inputs are refused because COPC conversion reorders points.
 `--merged-output-formats` accepts `laz`, `copc.laz`, and `ply`; it can contain one or several comma-separated formats.
 The task stages LAZ/LAS inputs to COPC in preservation mode with untwine when available, falling back to PDAL `writers.copc`, before merging and product downsampling. Existing matching `.copc.laz` files are reused so one source is not merged twice.
 `--staged-copc-dir` points to a reusable cache of already converted Original-with-predictions COPCs. This is recommended for repeat validation runs and production reruns where the enriched originals have not changed.
@@ -576,7 +580,7 @@ python src/run.py --task merge \
     --subsampled-target-folder /path/to/1cm \      # Optional; default: sibling subsampled_res1
     --tile-bounds-json /path/to/tile_bounds_tindex.json \
     --output-folder /path/to/out \                  # Optional work root; default: parent of segmented
-    --output-merged-laz /path/to/out/merged.laz \  # Optional; default: <work root>/merged.laz
+    --output-merged-laz /path/to/out/merged_tiles.laz \  # Optional; default: <work root>/merged_tiles.laz
     --original-copc-input-dir /path/to/original_copc \ # Optional; matching/validation source
     --original-laz-input-dir /path/to/raw_original \   # Optional; uploaded LAZ/LAS source to enrich
     --produce-merged-file \                         # Optional; prod-merged products after enrichment
@@ -865,7 +869,7 @@ neighbors; unrelated or already-updated layouts are not recovered this way.
 | `--filter-anchor` | centroid | Instance ownership anchor: `centroid`, `highest_point`, or `lowest_point` |
 | `--prediction-transfer-tolerance` | 0.1732 | Earlier model-to-dense transfer radius in XYZ metres |
 | `--overlap-threshold` | 0.3 | Required instance correspondence fraction |
-| `--disable-matching` | False | Leave IDs tile-local; shared tree points use nearest claimant core ownership |
+| `--disable-matching` | False | No cross-tile reconciliation: each tile's instances keep separate (still dataset-unique) IDs; shared tree points use nearest claimant core ownership |
 | `--reassign-small-instances` | False | Merge/filter: give small instances the nearest remaining instance ID within 5 m XY; not for RCT |
 | `--max-cluster-size` | 3000 | Small-instance reassignment: instances with fewer points are checked |
 | `--max-volume-for-merge` | 4.0 | Small-instance reassignment: maximum bounding-box volume in m³ |
@@ -880,7 +884,8 @@ neighbors; unrelated or already-updated layouts are not recovered this way.
 | `--original-with-predictions-dir` | None | create_merged_file: enriched originals (or `--input-dir`) |
 | `--staged-copc-dir` | None | Reusable Original-with-predictions COPC cache for products |
 | `--standardization-json` | None | tool_standard `collection_summary.json` for the product schema guard |
-| `--merged-resolutions` | res1,res2 | Product resolutions after strict original validation |
+| `--merged-resolutions` | res1,res2 | Product resolutions after strict original validation; `full` = every input point |
+| `--original-point-index` | True | Full-resolution product: add `OriginalPointIndex` (record order across inputs) as the first ExtraByte |
 | `--merged-output-formats` | copc.laz | Final product formats |
 
 ### Understanding `--workers`
@@ -977,14 +982,14 @@ Merge task (work root, see `--output-folder`):
 
 ```
 work_root/
-├── output_tiles/                    # Processed tiles: tile_00000.laz, ... (regular LAZ)
-│   ├── tile_00000.laz               # One per prediction tile, sorted by prediction filename
+├── output_tiles/                    # Processed tiles (regular LAZ), named by tile: c00_r00.laz, ...
+│   ├── c00_r00.laz                  # One per tile; every instance ID in exactly one tile
 │   ├── instance_metadata.csv
 │   ├── PredInstance_summary.json    # <instance dimension>_summary.json
 │   ├── tile_bounds.json             # Effective layout, checksummed in the manifest
 │   └── smarttile_merge.json         # Manifest (baseline path, first-stage resolution)
 │                                    # Several collections: model_000/, model_001/, ...
-├── output_tiles_unfiltered_1cm/     # Unfiltered dense baseline
+├── output_tiles_unfiltered_1cm/     # Unfiltered dense baseline (not with --skip-unfiltered-tiles)
 ├── segmented_filtered/              # RCT only: filtered tree/treeinfo tables and meshes
 ├── merged.laz                       # Optional processed intermediate (single non-RCT collection)
 ├── merged_instance_metadata.csv
@@ -995,8 +1000,24 @@ work_root/
 └── remap_first_report.json
 ```
 
-`remap_first_report.json` `tile_sources` maps each `tile_NNNNN` index to its
-prediction and geometry files. Standalone remap writes the enriched originals,
+Output tiles take the `cXX_rYY` label of their tile (`tile_NNNNN` only when the
+input names carry no unique label); `remap_first_report.json` `tile_sources` and
+`tile_names` map each tile index to its prediction and geometry files and name.
+
+**One tile per instance.** Cross-tile reconciliation gives the parts of a tree
+that neighbouring tiles segmented differently one ID, but each part would stay in
+its own tile; per-tile tools such as DetailView would then classify one tree
+several times from partial geometry (dataset 645: 11% of the instances). After
+deduplication and small-cluster reassignment, every instance found in several
+tiles moves whole into one owner tile: the tile whose core holds the instance's
+XY centroid, else the one with most of its points (ties: lowest tile). Points are
+moved, never dropped. Instance IDs are unique across the dataset, and the merge
+fails if any ID still appears in more than one tile; `instance_consolidation` in
+the report counts the moved instances and points. An owner tile can extend a
+little beyond its planned buffer where a tree reaches over the border.
+
+Merge deletes each intermediate stage (index and tiles) as soon as the next stage
+has read it, so scratch holds about two stages at a time. Standalone remap writes the enriched originals,
 `instance_mapping.json` (RCT also `rct_instance_mapping.json` and tree tables) into
 the output folder and `<folder>_coverage.json` beside it; `create_merged_file`
 writes `original_with_predictions_copc/` and `prod_merged_*` into its `--output-dir`.

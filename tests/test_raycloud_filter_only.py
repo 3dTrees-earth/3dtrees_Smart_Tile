@@ -15,6 +15,7 @@ from test_merge_stages import write_cloud
 from test_remap_first_pipeline import add_extended_metadata, assert_extended_metadata
 from raycloud_instance_ids import encode_instance_ids, read_tile_namespace
 from raycloud_tree_files import filter_tree_sidecars
+from output_tiles import output_tile  # noqa: E402
 
 
 class RayCloudFilterOnlyTests(unittest.TestCase):
@@ -54,7 +55,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             self.assertEqual(json.loads((root / "output_tiles" / "smarttile_merge.json").read_text())
                              ["instance_summary"], "PredInstance_RCT_summary.json")
             for tile in range(2):
-                output = laspy.read(root / "output_tiles" / f"tile_{tile:05d}.laz")
+                output = laspy.read(output_tile(root / "output_tiles", tile))
                 self.assertEqual(output.PredInstance_RCT.tolist(), [(tile + 1) * 100000 + 1] * 2)
                 self.assertEqual(output.PredInstance_RCT.dtype, np.dtype("uint32"))
                 for suffix in ("trees", "trees_info"):
@@ -78,7 +79,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                     instance_dimension='PredInstance_RCT', matching=True)
             self.assertEqual(report['models'][0]['reconciliation']['accepted_pairs'], [])
             for tile in range(2):
-                cloud = laspy.read(root/f'output/tile_{tile:05d}.laz')
+                cloud = laspy.read(output_tile(root / 'output', tile))
                 np.testing.assert_allclose(cloud.x, [9.5, 10, 10.5])
                 np.testing.assert_array_equal(cloud.PredInstance_RCT, [(tile+1)*100000+1]*3)
                 np.testing.assert_array_equal(cloud.PredSemantic_RCT, [2+tile]*3)
@@ -115,7 +116,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             self.assertEqual([(r['tile'], r['local_instance']) for r in recovery['admitted']], [(1, 2)])
             self.assertEqual(recovery['blocked'], [])
             self.assertEqual(recovery['final_support']['missing_samples'], 0)
-            cloud = laspy.read(root / 'output/tile_00001.laz')
+            cloud = laspy.read(root / 'output/c01_r00.laz')
             self.assertEqual(cloud.PredInstance_RCT.tolist(), [200001, 200001, 200002, 200002])
             self.assertEqual(cloud.PredSemantic_RCT.tolist(), [7, 7, 9, 9])
             np.testing.assert_allclose(cloud.x, [11, 12, 9.5, 9.6])
@@ -140,7 +141,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             second = root / 'repeat/output'
             merge_collections(collections=[root / 'output'], target_dir=None, output_tiles=second,
                 tile_bounds_json=layout, ready=True, instance_dimension='PredInstance_RCT')
-            self.assertEqual(laspy.read(second / 'tile_00001.laz').PredInstance_RCT.tolist(),
+            self.assertEqual(laspy.read(second / 'c01_r00.laz').PredInstance_RCT.tolist(),
                              [200001, 200001, 200002, 200002])
 
     def test_one_conflicting_buffer_point_blocks_entire_recovery(self):
@@ -159,7 +160,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             self.assertEqual(recovery['admitted'], [])
             self.assertEqual([(r['tile'], r['local_instance'], r['conflicting_tile'],
                                r['conflicting_local_instance']) for r in recovery['blocked']], [(0, 2, 1, 2)])
-            self.assertEqual(laspy.read(root / 'output/tile_00000.laz').PredInstance_RCT.tolist(), [100001])
+            self.assertEqual(laspy.read(root / 'output/c00_r00.laz').PredInstance_RCT.tolist(), [100001])
             for suffix in ('trees', 'trees_info'):
                 table = root / f'segmented_filtered/c00_r00_filtered_{suffix}.txt'
                 self.assertEqual(table.read_text().splitlines()[2:], ['100001,tree-1'])
@@ -178,9 +179,9 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             self.assertEqual([(r['tile'], r['local_instance']) for r in recovery['admitted']], [(0, 2)])
             self.assertEqual([(r['tile'], r['local_instance'], r['conflicting_tile'])
                               for r in recovery['blocked']], [(1, 2, 0)])
-            self.assertEqual(laspy.read(root / 'output/tile_00000.laz').PredInstance_RCT.tolist(),
+            self.assertEqual(laspy.read(root / 'output/c00_r00.laz').PredInstance_RCT.tolist(),
                              [100001, 100001, 100002, 100002])
-            self.assertEqual(laspy.read(root / 'output/tile_00001.laz').PredInstance_RCT.tolist(),
+            self.assertEqual(laspy.read(root / 'output/c01_r00.laz').PredInstance_RCT.tolist(),
                              [200001, 200001])
 
     def test_recovery_conflict_uses_one_centimeter_xyz_radius(self):
@@ -271,7 +272,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                 self.assertEqual({i["instance"]: i["kept"] for i in tile["instances"]},
                                  {1: True, 2: False})
             for tile in range(2):
-                cloud = laspy.read(root / "output_tiles" / f"tile_{tile:05d}.laz")
+                cloud = laspy.read(output_tile(root / "output_tiles", tile))
                 self.assertEqual(cloud.PredInstance_RCT.tolist(), [(tile + 1) * 100000 + 1])
                 for suffix in ("trees", "trees_info"):
                     sidecar = root / "segmented_filtered" / f"c{tile:02d}_r00_filtered_{suffix}.txt"
@@ -348,7 +349,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                               tile_bounds_json=layout, ready=True, instance_dimension="PredInstance_RCT")
             for tile in range(2):
                 expected = (tile + 1) * 100000 + 3
-                file = second / f"tile_{tile:05d}.laz"
+                file = output_tile(second, tile)
                 self.assertEqual(laspy.read(file).PredInstance_RCT.tolist(), [expected, expected])
                 self.assertEqual(read_tile_namespace(file)["tile_id"], tile + 1)
                 for suffix in ("trees", "trees_info"):
@@ -363,7 +364,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                 file.unlink()
             merge_collections(collections=[source], target_dir=None, output_tiles=root / "output",
                               tile_bounds_json=layout, ready=True, instance_dimension="PredInstance_RCT")
-            cloud = laspy.read(root / "output/tile_00000.laz")
+            cloud = laspy.read(root / "output/c01_r00.laz")
             self.assertEqual(cloud.PredInstance_RCT.tolist(), [200001, 200001])
 
     def test_remap_validates_namespaces_in_single_prediction_read(self):
@@ -397,7 +398,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             self.assertEqual(list(reads.values()), [1, 1])
             self.assertEqual(laspy.read(root / 'enriched/raw.las').PredInstance_RCT.tolist(),
                              [1, 2])
-            file = output / 'tile_00000.laz'
+            file = output / 'c00_r00.laz'
             cloud = laspy.read(file)
             cloud.PredInstance_RCT = [200001] * len(cloud.points)
             cloud.write(file)  # Labels now contradict tile 1's namespace VLR.
@@ -414,7 +415,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                         instance="PredInstance_RCT")
             merge_collections(collections=[source], target_dir=None, output_tiles=root / "output",
                               tile_bounds_json=layout, ready=True, instance_dimension="PredInstance_RCT")
-            self.assertEqual(laspy.read(root / "output/tile_00000.laz").PredInstance_RCT.tolist(), [0, 100001])
+            self.assertEqual(laspy.read(root / "output/c00_r00.laz").PredInstance_RCT.tolist(), [0, 100001])
 
     def test_compact_ids_and_qsm_payloads_are_shared_across_originals(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -9,6 +9,7 @@ import run
 from test_merge_stages import write_cloud
 from test_remap_first_pipeline import layout
 import laspy
+from output_tiles import output_tile  # noqa: E402
 
 
 class RunFilterTaskTests(unittest.TestCase):
@@ -21,7 +22,7 @@ class RunFilterTaskTests(unittest.TestCase):
             params = Parameters(task="filter", input_dir=source, output_dir=root / "output",
                                 tile_bounds_json=layout(root, 1), _cli_parse_args=False)
             run.run_filter_task(params)
-            self.assertEqual(len(laspy.read(root / "output/tile_00000.laz").points), 3)
+            self.assertEqual(len(laspy.read(output_tile(root / "output", 0)).points), 3)
 
     def test_filter_requires_layout_and_refuses_in_place_operation(self):
         with tempfile.TemporaryDirectory() as tmp:

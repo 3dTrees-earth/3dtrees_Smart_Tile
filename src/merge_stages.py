@@ -24,10 +24,13 @@ from parallel_tiles import map_tiles
 DUPLICATE_RADIUS = 0.01
 # A model may downgrade the LAS point format and carry native fields (notably
 # SAT scan_angle) as ExtraBytes. Dense targets remain their authoritative source.
+# OriginalPointIndex describes a file's own record order (full-resolution
+# prod-merged products for ForestStructure); it is never a prediction, so it is
+# neither transferred between tiles nor written onto enriched originals.
 STANDARD_DIMENSIONS = frozenset(
     name for point_format in range(11)
     for name in laspy.PointFormat(point_format).standard_dimension_names
-)
+) | {"OriginalPointIndex"}
 
 
 @dataclass
