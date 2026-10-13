@@ -359,3 +359,90 @@ validator results and artifact hashes are in
 [`2026-10-13-gfz-boundary-fix.json`](2026-10-13-gfz-boundary-fix.json).
 This local acceptance does not establish an arbitrary-density memory bound or
 close the earlier remap/export and downstream release-certification gaps.
+
+## Same-instance ties, PLY indices and missing-value declarations — 2026-10-13
+
+Source commit `f2d8ecb` closes the three reproduced remap/export defects above.
+The complete frozen-source suite passed **513 tests and 90 subtests** with zero
+failures, errors or skips in **119.25 seconds**. It ran in the same pinned
+scientific image as the earlier GFZ acceptance, with no network, read-only
+source, 10 CPUs and a 50 GiB limit.
+
+### Implemented behavior
+
+Same-instance remapping now delegates to the ordinary nearest-query
+implementation with an instance-equality filter. Cache identity, candidate
+selection and both numerical-tie passes use that filter. Near-equal distances
+are resolved relative to the true minimum and stable source order, independent
+of disk batches. The regressions include the original two-point failure,
+three-point near-tie chains, exact ties, other/missing instance labels,
+cache enabled/disabled and serial/parallel remapping. The old implementation
+failed 23 of the 31 new cases; all pass on this commit.
+
+Full-resolution PLY stores `OriginalPointIndex` as **uint32**, with range
+`0..4294967295`. Existing indices retained when generation is disabled are
+checked too; negative or larger values fail before publication. The separate
+PLY writer point-count ceiling is 4,294,967,295. Boundary tests use actual PDAL
+output, including the maximum index, overflow and partial-conversion failure.
+LAZ/COPC keep their **uint64** order-index contract. Other unsupported 64-bit
+integer PLY attributes are rejected explicitly. Subsampled PLY carrying an
+existing uint64 index still rejects it; this change targets full-resolution PLY.
+
+LAS/LAZ/COPC conversions preserve ExtraBytes `no_data` declarations using the
+shared metadata helper. The helper translates a raw sentinel through source
+and output scales/offsets, rejects unrepresentable or ambiguous encodings, and
+repairs only the fixed-size descriptor payload. Point data and COPC hierarchy
+offsets do not move. Conversion candidates remain private until validation;
+failure tests preserve existing destinations and publish no partial collection.
+Incompatible collection metadata fails before staging, and the cache signature
+now includes scales, offsets and missing-value declarations.
+
+A dedicated eight-point fixture contains actual missing Amplitude, Reflectance,
+Deviation and scaled-sentinel values. Full-resolution LAZ/COPC preserve all eight
+records; 10 cm LAZ/COPC preserve the expected six selected records and their exact
+missing-value masks. The nonzero-offset sentinel maps from raw `-7` to physical
+`8.75`. The old-source negative control fails on the missing Amplitude declaration.
+Regressions also exercise large-integer precision, integer narrowing, floating
+sentinels, stale caches and rollback. PLY does not support LAS ExtraBytes
+missing-value declarations; this metadata acceptance applies to LAS/LAZ/COPC.
+
+### GFZ replay on the fixed source
+
+The new runs use two complete adjoining GFZ files, **867,599 original points**,
+with existing SAT, ForestMamba, RCT and species results. Each offline container
+has 4 CPUs and 20 GiB memory including swap; source and inputs are read-only.
+No inference or production services ran.
+
+| Acceptance | Result |
+| --- | --- |
+| Same-instance remap at 1 cm and 10 cm, workers 1/cache off and workers 4/cache 32 MiB | **17/17 checks passed** |
+| Original points matched in every remap | **867,599/867,599** |
+| Direct and joined-attribute exports, full/10 cm × LAZ/COPC/PLY | **24/24 checks passed; 12 products** |
+| Full-resolution points per product | **867,599** |
+| 10 cm points per product | **139,401** |
+| Full LAZ/COPC source fields checked | **36**, plus complete uint64 order index |
+| Full PLY order index | **uint32**, exact values `0..867598` |
+| Source/snapshot hash checks | **332/332 passed** |
+
+Remap checks compare every output field and descriptor with the prior
+independently accepted GFZ references; the new synthetic regressions establish
+the numerical-tie correction. Product validation independently reads outputs
+with laspy/NumPy, verifies source-record membership, voxel uniqueness, all
+LAS/COPC fields, interpreted missing declarations, PLY geometry/ExtraBytes,
+CRS comments and direct/joined parity. The GFZ crop contains no actual sentinel
+points, so the dedicated fixture provides that evidence. All fixture hashes
+remain unchanged. Independent review additionally opened the actual output
+headers and PLY payloads.
+
+Remap acceptance took **34.16 s** with peak cgroup memory **0.934 GiB**;
+product acceptance took **47.97 s** with peak **1.308 GiB**. Neither had an
+OOM or memory-limit event. Two export-harness failures were retained separately:
+an EPSG-only CRS assumption before execution and a NumPy dtype-construction
+typo during comparison. Both were corrected without changing SmartTile code.
+
+Commands, exact source/runtime identity, checks, measurements and hashes are in
+[`2026-10-13-remap-export-fixes.json`](2026-10-13-remap-export-fixes.json).
+These results close the three reproduced defects, not the broader release gate.
+No new full 16,426,961-point filter run or downstream ForestStructure/Potree run
+is claimed. The prior full-GFZ filter result remains separate evidence; hard
+dense-cell memory bounds and downstream certification remain open.
