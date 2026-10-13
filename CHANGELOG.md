@@ -9,6 +9,9 @@
 - Tiles are encoded with the finest scale of all sources per axis (previously the first source's), so no source loses precision.
 - Center-of-mass tiles are exact voxel means of the original points at every resolution, rounded once onto the LAS grid. 10 cm is no longer a mean of 1 cm means (3DT-2203).
 - Tiling rejects geographic, geocentric and non-metre CRSs, inputs with different CRSs, and inputs mixing files with and without a CRS (3DT-1898).
+- PLY products keep the exact case of application properties (`treeID`, `PredSemantic`, `OriginalPointIndex`); PDAL lowercases them, so the header-only rewrite that adds `comment crs:` restores them, with no PDAL fork (3DT-2352).
+- Original enrichment memory no longer depends on point density: a spill block above 8 M points is streamed cell by cell (2 m query cells, in point-index order) instead of loaded whole. 483 `3700.laz`, one 4 m region with about 99 M points: 10.9 -> 0.8 GiB for the block reads, same speed, identical results.
+- Subsampled prod-merged products are reproducible: SmartTile selects the original point nearest each voxel's exact mean on an absolute grid instead of PDAL's voxel filter, whose grid followed the read order (645: two runs differed by 4,388 of 80 M points). Points are written in GPS-time order, since voxel order tripled the LAZ size (645 10 cm: 2.52 -> 0.81 GB, smaller than the originals).
 - One CRS record per output; instance IDs widen to uint32 instead of wrapping (3DT-2200, 3DT-2172).
 
 ### Performance (10 CPUs)

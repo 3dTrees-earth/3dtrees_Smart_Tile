@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Safe LAS/COPC writer encoding helpers for SmartTile subsampling."""
+"""Safe LAS/COPC writer encoding for the PDAL COPC fallback."""
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
@@ -24,15 +23,6 @@ def _header_bounds(header) -> Tuple[float, float, float, float, float, float]:
         float(header.z_min),
         float(header.z_max),
     )
-
-
-def xy_bounds_from_pdal_bounds(bounds_str: str) -> Tuple[float, float, float, float]:
-    """Parse a PDAL XY bounds string like ``([minx,maxx],[miny,maxy])``."""
-    values = [float(value) for value in re.findall(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", bounds_str)]
-    if len(values) < 4:
-        raise ValueError(f"Could not parse XY bounds string: {bounds_str!r}")
-    min_x, max_x, min_y, max_y = values[:4]
-    return min_x, max_x, min_y, max_y
 
 
 def _xyz_bounds_from_xy(
@@ -103,14 +93,6 @@ def safe_las_writer_encoding_options(
         "Could not choose safe LAS writer encoding for "
         f"{source_file}: scales={scales.tolist()}, "
         f"bounds_min={bounds_min.tolist()}, bounds_max={bounds_max.tolist()}"
-    )
-
-
-def safe_las_writer_encoding_options_for_pdal_bounds(source_file: Path, bounds_str: str) -> dict:
-    """Return safe writer options for one PDAL XY bounds string."""
-    return safe_las_writer_encoding_options(
-        source_file,
-        xy_bounds=xy_bounds_from_pdal_bounds(bounds_str),
     )
 
 

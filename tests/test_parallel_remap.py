@@ -193,3 +193,26 @@ def test_region_routed_queries_equal_one_process_across_many_regions(tmp_path):
         assert any(np.isinf(models[0][1]).any() for models in serial)          # uncovered points
         assert any((models[0][2]["PredInstance_RCT"] > 0).any() for models in serial)
 
+
+
+def test_streamed_oversized_blocks_give_identical_enriched_originals(tmp_path, monkeypatch):
+    import original_blocks
+    import remap_first_pipeline as pipeline
+    monkeypatch.setattr(pipeline, "MAX_BATCH_POINTS", 8)
+    monkeypatch.setattr(pipeline, "spatial_query_worker_count", lambda n: n)
+    originals = tmp_path / "originals"
+    originals.mkdir()
+    xs = np.arange(60) * .02
+    write_cloud(originals / "a.laz", xs)
+    model = tmp_path / "sat"
+    model.mkdir()
+    write_cloud(model / "a.laz", xs, np.arange(60) % 5 + 1, np.full(60, 3), instance="satPredInstance")
+    outputs = []
+    for cap in (None, 7):  # 7 points: every block is streamed cell by cell
+        if cap:
+            monkeypatch.setattr(original_blocks, "BLOCK_POINT_CAP", cap)
+        output = tmp_path / f"out{cap}"
+        strict_remap(collections=[model], baseline_collections=[model], originals=originals,
+                     output=output, workers=2)
+        outputs.append(laspy.read(output / "a.laz").points.array)
+    np.testing.assert_array_equal(outputs[0], outputs[1])

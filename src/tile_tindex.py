@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sqlite3
-import struct
 import subprocess
 import tempfile
 from pathlib import Path
@@ -240,53 +238,6 @@ def update_tile_bounds_json_from_files(
     return updated
 
 
-def get_source_files_from_tindex(tindex_file: Path) -> List[str]:
-    """Return source point-cloud paths from a tindex database."""
-    conn = sqlite3.connect(str(tindex_file))
-    cursor = conn.cursor()
-    cursor.execute('SELECT table_name FROM gpkg_contents WHERE data_type = "features" LIMIT 1')
-    result = cursor.fetchone()
-    if not result:
-        conn.close()
-        return []
-
-    table_name = result[0]
-    cursor.execute(f'SELECT DISTINCT Location FROM "{table_name}"')
-    files = [row[0] for row in cursor.fetchall()]
-    conn.close()
-    return files
-
-
-def get_source_bounds_from_tindex(tindex_file: Path) -> Dict[str, Tuple[float, float, float, float]]:
-    """Return source-file bounds from tindex GeoPackage geometries."""
-    conn = sqlite3.connect(str(tindex_file))
-    cursor = conn.cursor()
-    cursor.execute("SELECT table_name, column_name FROM gpkg_geometry_columns LIMIT 1")
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return {}
-    table_name, geom_col = row
-
-    cursor.execute(f'SELECT Location, "{geom_col}" FROM "{table_name}"')
-    bounds_map = {}
-    for filepath, geom_blob in cursor.fetchall():
-        if not geom_blob or not filepath:
-            continue
-        try:
-            flags = geom_blob[3]
-            envelope_type = (flags >> 1) & 0x07
-            header_size = 8
-            if envelope_type in (1, 2):
-                minx, maxx, miny, maxy = struct.unpack_from("<dddd", geom_blob, header_size)
-                bounds_map[filepath] = (minx, miny, maxx, maxy)
-        except (struct.error, IndexError):
-            continue
-
-    conn.close()
-    return bounds_map
-
-
 def parse_proj_bounds(proj_bounds: str) -> Optional[Tuple[float, float, float, float]]:
     """Parse '([xmin,xmax],[ymin,ymax])' into (xmin, ymin, xmax, ymax)."""
     try:
@@ -299,27 +250,4 @@ def parse_proj_bounds(proj_bounds: str) -> Optional[Tuple[float, float, float, f
         return (xmin, ymin, xmax, ymax)
     except (ValueError, IndexError):
         return None
-
-
-def bounds_overlap(
-    a: Tuple[float, float, float, float],
-    b: Tuple[float, float, float, float],
-) -> bool:
-    """Return whether two (minx, miny, maxx, maxy) boxes overlap."""
-    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
-
-
-def get_bounds(
-    filepath: str,
-    source_bounds: Dict[str, Tuple[float, float, float, float]],
-    bounds_by_basename: Optional[Dict[str, Tuple[float, float, float, float]]] = None,
-) -> Optional[Tuple[float, float, float, float]]:
-    """Look up source bounds by exact path, with basename fallback."""
-    file_bounds = source_bounds.get(filepath)
-    if file_bounds is not None:
-        return file_bounds
-    if bounds_by_basename is not None:
-        return bounds_by_basename.get(Path(filepath).name)
-    return None
-
 

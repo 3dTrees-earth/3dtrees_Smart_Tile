@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Output-path and COPC-conversion helpers for SmartTile subsampling products."""
+"""COPC conversion of reduced LAZ products (tile outputs, prod-merged files)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from subsample_encoding import encoding_summary, safe_las_writer_encoding_options
 
@@ -16,44 +16,6 @@ def get_pdal_path() -> str:
     """Return the PDAL executable path."""
     pdal_path = shutil.which("pdal")
     return pdal_path if pdal_path else "pdal"
-
-
-def laz_output_path(output_file: Path) -> Path:
-    """Normalize an output path to regular compressed LAZ."""
-    name = output_file.name
-    if name.endswith(".copc.laz"):
-        name = name[: -len(".copc.laz")] + ".laz"
-    elif not name.endswith(".laz"):
-        name = output_file.stem + ".laz"
-    return output_file.parent / name
-
-
-def copc_output_path(output_file: Path) -> Path:
-    """Normalize an output path to COPC LAZ."""
-    name = output_file.name
-    if name.endswith(".copc.laz"):
-        return output_file
-    if name.endswith(".laz"):
-        name = name[: -len(".laz")] + ".copc.laz"
-    return output_file.parent / f"{output_file.stem}.copc.laz"
-
-
-def temporary_laz_path(target_output: Path, pipeline_dir: Path) -> Path:
-    """Return a temporary LAZ path outside chunk directories for COPC conversion."""
-    pipeline_dir.mkdir(parents=True, exist_ok=True)
-    stem = target_output.name
-    if stem.endswith(".copc.laz"):
-        stem = stem[: -len(".copc.laz")]
-    elif stem.endswith(".laz"):
-        stem = stem[: -len(".laz")]
-    return pipeline_dir / f"_{stem}_for_copc.laz"
-
-
-def subsample_output_files(output_dir: Path, output_copc: bool) -> List[Path]:
-    """List subsampling outputs for the selected output format."""
-    if output_copc:
-        return sorted(output_dir.glob("*.copc.laz"))
-    return sorted(path for path in output_dir.glob("*.laz") if not path.name.endswith(".copc.laz"))
 
 
 def convert_laz_output_to_copc(
@@ -72,9 +34,9 @@ def convert_laz_output_to_copc(
 
     try:
         from crs_records import validate_single_crs_record
-        from main_tile import _convert_laz_to_copc
+        from tile_copc import convert_laz_to_copc
 
-        converted = _convert_laz_to_copc(
+        converted = convert_laz_to_copc(
             input_laz,
             output_copc,
             preserve_extra_dims=preserve_extra_dims,

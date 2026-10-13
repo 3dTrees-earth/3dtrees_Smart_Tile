@@ -7,6 +7,14 @@ trees were rebuilt for a few dozen points each. Here an original is first
 spilled into XY blocks of whole cache regions, in parallel point ranges, and
 then queried block by block. Each point keeps its index so results can be
 written back in the original point order.
+
+Blocks are sized from the header extent, so stray far points or dense scanner
+positions can concentrate most points in one block (483: one 4 m region with
+about 99 M points). A block above BLOCK_POINT_CAP is therefore streamed into
+its 2 m query cells, ordered by cache region, and each cell is streamed in
+batches without loading it whole: memory no longer depends on density.
+Results do not depend on the layout: queries group points by 2 m cell, and
+every point is written back by its index.
 """
 from __future__ import annotations
 
@@ -26,6 +34,8 @@ from spatial_query_cache import REGION_SIZE
 SPILL = np.dtype([("i", "<u4"), ("X", "<i4"), ("Y", "<i4"), ("Z", "<i4")])
 READ_POINTS = 1_000_000
 BLOCK_POINTS = 4_000_000
+# The parent holds one block at a time: about 60 B per point while sorting.
+BLOCK_POINT_CAP = 8_000_000
 MAX_BLOCK = 64.0
 
 
@@ -104,24 +114,71 @@ def _block_key(path):
     return int(bx), int(by)
 
 
-def block_batches(directory, header, origin):
+def _block_point_count(files):
+    return sum(path.stat().st_size for path in files) // SPILL.itemsize
+
+
+def _split_into_cells(block, files, header, origin):
+    """Stream an oversized block into one file per 2 m query cell.
+
+    Spill files are in ascending point-index order and are read in that
+    order, so each cell file is too. Cells are returned grouped by 4 m cache
+    region, so consecutive cells reuse the region's search trees.
+    """
+    cells = block / "cells"
+    cells.mkdir()
+    for path in files:
+        with open(path, "rb") as handle:
+            while len(records := np.fromfile(handle, dtype=SPILL, count=READ_POINTS)):
+                keys = np.floor(coordinates(records, header, origin)[:, :2] / CELL_SIZE).astype(np.int64)
+                order = np.lexsort((records["i"], keys[:, 1], keys[:, 0]))
+                keys, records = keys[order], records[order]
+                starts = np.flatnonzero(np.r_[True, np.any(keys[1:] != keys[:-1], axis=1)])
+                for first, end in zip(starts, np.r_[starts[1:], len(records)]):
+                    with open(cells / f"{keys[first, 0]}_{keys[first, 1]}.bin", "ab") as out:
+                        out.write(records[first:end].tobytes())
+        path.unlink()
+    per_region = int(round(REGION_SIZE / CELL_SIZE))
+
+    def key(path):
+        cx, cy = (int(v) for v in path.stem.split("_"))
+        return cx // per_region, cy // per_region, cx, cy
+    return sorted(cells.iterdir(), key=key)
+
+
+def _sorted_batches(files, header, origin):
+    records = np.concatenate([np.fromfile(path, dtype=SPILL) for path in files])
+    xyz = coordinates(records, header, origin)
+    cells = np.floor(xyz[:, :2] / CELL_SIZE).astype(np.int64)
+    order = np.lexsort((records["i"], cells[:, 1], cells[:, 0]))
+    records, xyz = records[order], xyz[order]
+    for start in range(0, len(records), MAX_BATCH_POINTS):
+        end = start + MAX_BATCH_POINTS
+        yield records["i"][start:end].astype(np.int64), xyz[start:end]
+
+
+def block_batches(directory, header, origin, point_cap=None):
     """Yield (point indices, local XYZ) batches block by block.
 
     Within a block, points are ordered by 2 m query cell and then by point
     index, so batches are spatially compact and their order is deterministic.
+    A block above ``point_cap`` (default BLOCK_POINT_CAP) is streamed cell by
+    cell in the same order (cell, then point index), never loaded whole.
     """
+    point_cap = BLOCK_POINT_CAP if point_cap is None else point_cap
     if not Path(directory).exists():  # an original without points spills nothing
         return
     for block in sorted(Path(directory).iterdir(), key=_block_key):
-        files = sorted(block.iterdir())
-        records = np.concatenate([np.fromfile(path, dtype=SPILL) for path in files])
-        xyz = coordinates(records, header, origin)
-        cells = np.floor(xyz[:, :2] / CELL_SIZE).astype(np.int64)
-        order = np.lexsort((records["i"], cells[:, 1], cells[:, 0]))
-        records, xyz = records[order], xyz[order]
-        for start in range(0, len(records), MAX_BATCH_POINTS):
-            end = start + MAX_BATCH_POINTS
-            yield records["i"][start:end].astype(np.int64), xyz[start:end]
+        files = sorted(path for path in block.iterdir() if path.is_file())
+        if _block_point_count(files) <= point_cap:
+            yield from _sorted_batches(files, header, origin)
+        else:
+            for cell in _split_into_cells(block, files, header, origin):
+                with open(cell, "rb") as handle:
+                    while len(records := np.fromfile(handle, dtype=SPILL, count=MAX_BATCH_POINTS)):
+                        yield records["i"].astype(np.int64), coordinates(records, header, origin)
+                cell.unlink()
+            (block / "cells").rmdir()
         for path in files:
-            path.unlink()
+            path.unlink(missing_ok=True)
         block.rmdir()

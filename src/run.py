@@ -280,7 +280,7 @@ def run_tile_task(params: Parameters):
         from main_tile import plan_tiling
         from tile_centroids import subsample_tiles_single_scan
         plan = plan_tiling(input_dir, output_dir, tile_length, tile_buffer, tiling_threshold,
-                           grid_origin=grid_origin, defer_occupancy=True)
+                           grid_origin=grid_origin)
         output_dirs = list(subsample_tiles_single_scan(
             plan, output_dir, [r for r, _ in tile_outputs], [f for _, f in tile_outputs],
             workers=spatial_query_worker_count(workers), converters=min(TILE_CONVERTERS, workers),
@@ -347,7 +347,8 @@ def run_merge_task(params: Parameters):
     tile_bounds = _require_tile_bounds_json(params.tile_bounds_json)
     collections = (comma_paths(params.segmented_folders) if params.segmented_folders else
                    [Path(params.subsampled_10cm_folder or params.segmented_remapped_folder)])
-    work = Path(params.output_folder or
+    # --output-dir (or its alias --output-folder) is the work root.
+    work = Path(params.output_folder or params.output_dir or
                 (Path(params.output_tiles_folder).parent if params.output_tiles_folder else
                  Path(params.output_merged_laz).parent if params.output_merged_laz else
                  collections[0].parent))
@@ -469,7 +470,12 @@ def run_create_merged_file_task(params: Parameters):
 
 
 def run_filter_task(params: Parameters):
-    """Filter core ownership and deduplicate already-dense tiles."""
+    """Filter core ownership and deduplicate already-dense tiles.
+
+    ``--output-dir`` is the work root, as for merge: tiles go to
+    ``<output-dir>/output_tiles`` (or ``--output-tiles-folder``), the report
+    and the unfiltered copy beside them inside ``--output-dir``.
+    """
     from remap_first_pipeline import merge_collections
 
     if not params.input_dir or not params.output_dir:
@@ -480,8 +486,9 @@ def run_filter_task(params: Parameters):
         sys.exit(1)
     tile_bounds = _require_tile_bounds_json(params.tile_bounds_json)
     try:
+        output_tiles = Path(params.output_tiles_folder or Path(params.output_dir) / "output_tiles")
         merge_collections(collections=[Path(params.input_dir)], target_dir=None,
-                          output_tiles=Path(params.output_dir), tile_bounds_json=tile_bounds,
+                          output_tiles=output_tiles, tile_bounds_json=tile_bounds,
                           ready=True, matching=not params.disable_matching, workers=params.workers,
                           instance_dimension=params.instance_dimension,
                           overlap_threshold=params.overlap_threshold, filter_anchor=params.filter_anchor,

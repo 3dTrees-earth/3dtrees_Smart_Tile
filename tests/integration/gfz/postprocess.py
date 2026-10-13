@@ -26,7 +26,7 @@ def run(*args, **kwargs):
 def filtering(model):
     run('dense_' + model.lower(), 'smart', ['python','/run/commands/artifacts.py','dense',model])
     args = ['python','-u','/src/run.py','--task','filter',
-        '--input-dir','/run/dense/' + model, '--output-dir',f'/run/03_filter/{model}/output_tiles',
+        '--input-dir','/run/dense/' + model, '--output-dir',f'/run/03_filter/{model}',
         '--tile-bounds-json','/run/01_tiles/tile_bounds_tindex.json',
         '--instance-dimension','PredInstance_' + model,'--filter-anchor','centroid',
         '--overlap-threshold','0.3','--workers','10']

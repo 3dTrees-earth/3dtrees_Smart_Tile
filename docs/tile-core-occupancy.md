@@ -27,8 +27,3 @@ with the existing inclusive tree-anchor convention.
 Use a fresh output directory for every run. The single read publishes its
 outputs only after every tile passed its checks, but it does not remove files
 from an older layout already present in `subsampled_res*/`.
-
-The older pre-scan path (`tile_core_occupancy.select_occupied_tile_jobs`:
-bounded chunks of at most one million points, a separate source scan before the
-full-resolution COPC tiles, and rejection of stale empty-core tile outputs) is
-still in `main_tile.run_tiling_pipeline` but is not used by `run.py`.

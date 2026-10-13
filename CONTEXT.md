@@ -265,8 +265,8 @@ product.
   on subsampled points, copy them from a real nearest source point.
 - `nearest-to-centroid` in the tile task keeps the original point nearest each
   voxel's exact mean, on the same single read and fixed voxel grid as center of
-  mass. PDAL `filters.voxelcentroidnearestneighbor` is used only for
-  `create_merged_file` products.
+  mass. `create_merged_file` products use the same rule on an absolute grid
+  (`select_voxel_points`); PDAL only reads and merges the chunks.
 - The tile task reads each source point once for both subsampling methods (`tile_centroids`):
   no full-resolution tiles, occupancy counted in the same read, exact integer
   voxel means rounded half-to-even once. Every resolution comes from original
@@ -291,11 +291,12 @@ aligned with `src/run.py` and the strict pipeline when task behavior changes.
 - `src/run.py`: CLI entry point and task routing; `src/parameters.py`: settings.
 - `src/main_tile.py`, `src/tile_*.py` (`tile_crs`, `tile_tindex`, `tile_copc`,
   `tile_bounds_graph`, `tile_core_occupancy`, `tile_file_matching`): tile
-  planning (`plan_tiling`), occupancy publication and tile geometry/matching helpers.
+  planning (`plan_tiling`), occupancy publication, LAZ-to-COPC conversion and
+  tile geometry/matching helpers.
 - `src/tile_centroids.py`: the tile task's single read for both subsampling
-  methods; `src/main_subsample.py`: output names/labels and bounds helpers (its
-  older pipeline is not called by `run.py`); `src/subsample_*.py`: COM headers,
-  COPC output conversion; `src/original_blocks.py`: block-ordered enrichment input.
+  methods; `src/main_subsample.py`: output names/labels and bounds helpers;
+  `src/subsample_*.py`: COM headers, COPC output conversion;
+  `src/original_blocks.py`: block-ordered enrichment input.
 - `src/remap_first_pipeline.py`: merge/filter/remap orchestration and original
   enrichment; stages in `src/merge_stages.py` (dense transfer, reconciliation,
   deduplication), `src/dense_instance_ownership.py` (core filter, shared-point
@@ -375,7 +376,7 @@ and dimensions against the original source files.
 - If the team wants to supersede the published ToolShed v2.2 wrapper, create a
   forward version such as `2.2+galaxy16` or `2.2.1+galaxy0`; do not attempt to
   publish a lower `2.1.0+galaxy0` wrapper as a new revision.
-- `main_subsample.py` and `main_create_merged_file.py` are still large. Prefer
+- `main_create_merged_file.py` is still large. Prefer
   extracting focused helpers instead of adding new modes inline.
 - COPC finalization can be scratch-disk heavy even when memory is bounded.
   Preserve the current warnings and staged-COPC reuse behavior.

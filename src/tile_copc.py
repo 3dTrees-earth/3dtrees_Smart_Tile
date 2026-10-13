@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""COPC finalization and conversion helpers for SmartTile tiling."""
+"""LAZ/LAS to COPC conversion (Untwine, PDAL fallback) with CRS validation."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from copc_metadata import first_crs_source, first_srs_assignment, srs_assignment_from_file
+from copc_metadata import srs_assignment_from_file
 from crs_records import validate_single_crs_record
 
 
@@ -97,193 +97,6 @@ def _output_has_no_extra_dimensions(path: Path) -> bool:
         return not _has_extra_dimensions(path)
     except Exception:
         return False
-
-
-def finalize_tile_to_copc(args: Tuple) -> Tuple[str, bool, str]:
-    """Merge a tile's LAS part files into one COPC tile."""
-    label, tiles_dir, log_dir, tile_bounds = args
-    final_tile = tiles_dir / f"{label}.copc.laz"
-
-    if final_tile.exists() and final_tile.stat().st_size > 0:
-        return (label, True, "Already exists")
-
-    tile_dir = tiles_dir / label
-    if not tile_dir.exists():
-        return (label, True, "No data in bounds")
-
-    parts = sorted(tile_dir.glob("part_*.las"))
-    if not parts:
-        if not any(tile_dir.iterdir()):
-            tile_dir.rmdir()
-        return (label, True, "No data in bounds")
-
-    try:
-        success, message = finalize_tile_to_copc_untwine(
-            parts,
-            final_tile,
-            log_dir,
-            label,
-            tile_bounds=tile_bounds,
-        )
-        if not success:
-            return (label, False, message)
-
-        crs_source = first_crs_source(parts)
-        if crs_source is not None:
-            valid_crs, crs_message = validate_single_crs_record(crs_source, final_tile)
-            if not valid_crs and message.startswith("untwine"):
-                try:
-                    final_tile.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                success, message = finalize_tile_to_copc_pdal(
-                    parts,
-                    final_tile,
-                    log_dir,
-                    label,
-                    tile_bounds,
-                )
-                if not success:
-                    return (label, False, f"{message}; after untwine CRS validation failed: {crs_message}")
-                valid_crs, crs_message = validate_single_crs_record(crs_source, final_tile)
-            if not valid_crs:
-                return (label, False, f"COPC CRS validation failed: {crs_message}")
-
-        for part in parts:
-            if part.exists():
-                part.unlink()
-        if tile_dir.exists() and not any(tile_dir.iterdir()):
-            tile_dir.rmdir()
-
-        return (label, True, f"{len(parts)} parts merged ({message})")
-    except Exception as exc:
-        return (label, False, str(exc))
-
-
-def finalize_tile_to_copc_pdal(
-    parts: List[Path],
-    final_tile: Path,
-    log_dir: Path,
-    label: str,
-    tile_bounds: Optional[Tuple[float, float, float, float]] = None,
-    preserve_extra_dims: bool = False,
-) -> Tuple[bool, str]:
-    """Finalize a tile with PDAL writers.copc."""
-    writer_opts = {
-        "type": "writers.copc",
-        "filename": str(final_tile),
-        "forward": "all",
-    }
-    if preserve_extra_dims:
-        writer_opts["extra_dims"] = "all"
-    if tile_bounds is not None:
-        bxmin, bymin, bxmax, bymax = tile_bounds
-        writer_opts["offset_x"] = (bxmin + bxmax) / 2.0
-        writer_opts["offset_y"] = (bymin + bymax) / 2.0
-
-    if len(parts) == 1:
-        pipeline = {
-            "pipeline": [
-                {"type": "readers.las", "filename": str(parts[0])},
-                writer_opts,
-            ]
-        }
-    else:
-        readers = [{"type": "readers.las", "filename": str(path)} for path in parts]
-        pipeline = {"pipeline": readers + [{"type": "filters.merge"}, writer_opts]}
-
-    pipeline_file = log_dir / f"{label}_pipeline.json"
-    with open(pipeline_file, "w") as handle:
-        json.dump(pipeline, handle)
-
-    try:
-        result = subprocess.run(
-            [get_pdal_path(), "pipeline", str(pipeline_file)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        if pipeline_file.exists():
-            pipeline_file.unlink()
-
-    if result.returncode != 0:
-        return (False, f"COPC conversion failed: {result.stderr[:200]}")
-    return (True, "OK")
-
-
-def finalize_tile_to_copc_untwine(
-    parts: List[Path],
-    final_tile: Path,
-    log_dir: Path,
-    label: str,
-    tile_bounds: Optional[Tuple[float, float, float, float]] = None,
-    preserve_extra_dims: bool = False,
-) -> Tuple[bool, str]:
-    """Finalize a tile using untwine, falling back to PDAL when unavailable."""
-    if not preserve_extra_dims:
-        untwine_cmd = shutil.which("untwine")
-        if untwine_cmd:
-            success, message = _run_untwine(
-                parts,
-                final_tile,
-                first_srs_assignment(parts),
-                strip_extra_dims=True,
-            )
-            if success and _output_has_no_extra_dimensions(final_tile):
-                return (True, "untwine-standard-dimensions")
-            if success:
-                message = "untwine retained extra dimensions after standard-field staging"
-            try:
-                final_tile.unlink(missing_ok=True)
-            except OSError:
-                pass
-        success, message = finalize_tile_to_copc_pdal(
-            parts,
-            final_tile,
-            log_dir,
-            label,
-            tile_bounds=tile_bounds,
-            preserve_extra_dims=False,
-        )
-        if success:
-            return (True, "pdal-stripped")
-        return (False, message)
-
-    untwine_cmd = shutil.which("untwine")
-    if not untwine_cmd:
-        success, message = finalize_tile_to_copc_pdal(
-            parts,
-            final_tile,
-            log_dir,
-            label,
-            tile_bounds=tile_bounds,
-            preserve_extra_dims=True,
-        )
-        if success:
-            return (True, "pdal")
-        return (False, message)
-
-    try:
-        input_args = []
-        for part in parts:
-            input_args.extend(["-i", str(part)])
-        srs_arg = first_srs_assignment(parts)
-        srs_args = ["--a_srs", srs_arg] if srs_arg else []
-
-        result = subprocess.run(
-            [untwine_cmd] + input_args + ["-o", str(final_tile)] + srs_args,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            return (False, f"untwine failed: {result.stderr[:200]}")
-        if not final_tile.exists() or final_tile.stat().st_size == 0:
-            return (False, "untwine produced no output")
-        return (True, "untwine")
-    except Exception as exc:
-        return (False, f"untwine error: {exc}")
 
 
 def convert_laz_to_copc(

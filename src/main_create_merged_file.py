@@ -3,8 +3,8 @@
 Create prod-merged point-cloud products from Original-with-predictions files.
 
 Prod-merged products use original uploaded points as geometry and select real
-points with PDAL's nearest-to-centroid voxel subsampling when a lower product
-resolution is requested.
+points with deterministic nearest-to-centroid voxel subsampling when a lower
+product resolution is requested.
 """
 
 from __future__ import annotations
@@ -233,9 +233,9 @@ def prepare_copc_inputs(
         output_copc = copc_dir / f"{key}.copc.laz"
         print(f"    Converting {input_file.name} -> {output_copc.name}")
         if converter is None:
-            from main_tile import _convert_laz_to_copc
+            from tile_copc import convert_laz_to_copc
 
-            converter = _convert_laz_to_copc
+            converter = convert_laz_to_copc
         if not converter(input_file, output_copc, preserve_extra_dims=True):
             raise RuntimeError(f"LAZ/LAS -> COPC conversion failed: {input_file}")
         write_copc_stage_manifest_entry(input_file, output_copc)
@@ -360,9 +360,9 @@ def _copc_union_bounds(input_files: List[Path]) -> Tuple[float, float, float, fl
 
 
 # PDAL holds a whole chunk in memory (dataset 645: about 330 B per point with
-# prediction dimensions), and up to --workers chunks run at once: bound the
-# chunk size, not only the chunk count, so memory does not grow with the
-# dataset (10 workers x 2 M points: about 7 GB).
+# prediction dimensions), and up to --workers chunks run at once. Target this
+# average point count when planning spatial strips. Uneven density can still
+# put more points in one strip; this is not a hard per-chunk memory limit.
 PRODUCT_CHUNK_POINTS = 2_000_000
 
 
@@ -372,7 +372,8 @@ def _prod_merged_chunk_bounds(
     num_spatial_chunks: int,
 ) -> List[str]:
     import laspy
-    from main_subsample import _aligned_edges, get_file_xy_scales
+    from main_subsample import get_file_xy_scales
+    from subsample_com import aligned_edges
 
     minx, maxx, miny, maxy = _copc_union_bounds(input_files)
     if maxx - minx == 0 or maxy - miny == 0:
@@ -386,7 +387,7 @@ def _prod_merged_chunk_bounds(
     raw_x_step = (maxx - minx) / chunks
     x_step = max(resolution, math.ceil(raw_x_step / resolution) * resolution)
     scale_x = min(get_file_xy_scales(input_file)[0] for input_file in input_files)
-    edges = _aligned_edges(minx, maxx, x_step, resolution)
+    edges = aligned_edges(minx, maxx, x_step, resolution)
 
     bounds = []
     for chunk_idx, (chunk_minx, chunk_maxx) in enumerate(edges):
@@ -395,6 +396,41 @@ def _prod_merged_chunk_bounds(
             continue
         bounds.append(f"([{chunk_minx},{query_maxx}],[{miny},{maxy}])")
     return bounds
+
+
+def select_voxel_points(points, resolution: float):
+    """Indices of one original point per voxel, in acquisition order.
+
+    The voxel grid is absolute (floor of coordinate / resolution), the same
+    for every chunk; chunk edges are aligned to it. Each voxel keeps the
+    point nearest the exact mean of its points (tiling's rule); ties, even
+    between identical coordinates, go to the first point in a canonical
+    order over all fields, so the result does not depend on read order.
+    The kept points are returned in GPS-time order where present: LAZ
+    compresses differences between consecutive points (645 10 cm: 30.4 ->
+    10.5 B per point compared with voxel order).
+    """
+    import numpy as np
+    from tile_centroids import _nearest_to_mean
+
+    if len(points) == 0:
+        return np.empty(0, dtype=np.int64)
+    canonical = np.argsort(points.array, kind="stable")  # all fields, lexicographic
+    xyz = np.stack([np.asarray(points.x), np.asarray(points.y), np.asarray(points.z)], axis=1)[canonical]
+    keys = np.floor(xyz / resolution).astype(np.int64)
+    group = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))  # stable: canonical order within a voxel
+    keys, members = keys[group], canonical[group]
+    starts = np.flatnonzero(np.r_[True, np.any(keys[1:] != keys[:-1], axis=1)])
+    counts = np.diff(np.r_[starts, len(keys)]).astype(np.int64)
+    raw = np.stack([np.asarray(points.array[axis]) for axis in ("X", "Y", "Z")], axis=1).astype(np.int64)[members]
+    sums = np.add.reduceat(raw, starts, axis=0)
+    chosen = members[_nearest_to_mean(raw, starts, counts, sums, tuple(points.scales))]
+    rank = np.empty(len(points), dtype=np.int64)
+    rank[canonical] = np.arange(len(points))
+    # GPS time first; equal times (returns of one pulse) by canonical rank, not read order.
+    keys = (rank[chosen],) + ((np.asarray(points.gps_time)[chosen],)
+                              if "gps_time" in points.point_format.dimension_names else ())
+    return chosen[np.lexsort(keys)]
 
 
 def _chunked_prod_merged_pipeline(
@@ -412,15 +448,17 @@ def _chunked_prod_merged_pipeline(
         }
         for path in input_files
     ]
+    # PDAL only reads and merges the chunk; SmartTile selects the points
+    # (select_voxel_points). PDAL's voxel filter places its grid by point
+    # order, which varies between COPC reads, so products were not repeatable.
     stages = [*readers]
     if len(readers) > 1:
         stages.append({"type": "filters.merge"})
     stages.extend([
-        {"type": "filters.voxelcentroidnearestneighbor", "cell": resolution},
         {
             "type": "writers.las",
             "filename": str(output_file),
-            "compression": True,
+            "compression": False,
             "minor_version": 4,
             "forward": "all",
             "extra_dims": "all",
@@ -441,9 +479,10 @@ def _create_prod_merged_chunk(
 ) -> Optional[Path]:
     """Create one bounded prod-merged LAZ chunk and return it when non-empty."""
     chunk_file = work_dir / f"{output_stem}_chunk{chunk_idx:04d}.laz"
+    raw_file = work_dir / f"{output_stem}_chunk{chunk_idx:04d}.raw.las"
     pipeline = _chunked_prod_merged_pipeline(
         copc_input_files,
-        chunk_file,
+        raw_file,
         bounds_str,
         resolution,
         scale_offset_options,
@@ -451,9 +490,24 @@ def _create_prod_merged_chunk(
     result = _run_pdal_pipeline(pipeline, work_dir / f"_chunk{chunk_idx:04d}.json")
     if result.returncode != 0:
         raise RuntimeError(f"PDAL prod-merged chunk {chunk_idx + 1} failed: {_pdal_error(result)}")
-    if not chunk_file.exists() or chunk_file.stat().st_size == 0:
+    if not raw_file.exists() or raw_file.stat().st_size == 0:
         return None
-    return chunk_file
+    try:
+        return chunk_file if _select_chunk_points(raw_file, chunk_file, resolution) else None
+    finally:
+        raw_file.unlink(missing_ok=True)
+
+
+def _select_chunk_points(raw_file: Path, chunk_file: Path, resolution: float) -> bool:
+    """Write the selected points of one raw chunk as LAZ; False when it is empty."""
+    import laspy
+
+    cloud = laspy.read(str(raw_file))
+    if len(cloud.points) == 0:
+        return False
+    cloud.points = cloud.points[select_voxel_points(cloud.points, resolution)]
+    cloud.write(str(chunk_file))
+    return True
 
 
 def _create_prod_merged_chunks(
@@ -629,9 +683,16 @@ def _preserve_and_validate_las_metadata(source_metadata_file: Path, output_file:
 
 def _finalize_product(output_file: Path, output_format: str, dimension_sources: List[Path],
                       metadata_source: Path) -> None:
-    """Validate a written LAS/COPC product, or record the CRS of a PLY product."""
+    """Validate a written LAS/COPC product, or record the CRS of a PLY product
+    and restore the case of its application properties (PDAL lowercases them)."""
     if parse_merged_output_formats(output_format)[0] == "ply":
-        add_crs_comment_to_ply(output_file, crs_comment_from_file(metadata_source))
+        import laspy
+
+        names = {"OriginalPointIndex"}
+        for source in dimension_sources:
+            with laspy.open(str(source)) as reader:
+                names.update(reader.header.point_format.extra_dimension_names)
+        add_crs_comment_to_ply(output_file, crs_comment_from_file(metadata_source), restore_names=sorted(names))
         return
     valid, message = _validate_preserved_product_dims(dimension_sources, output_file)
     if valid:

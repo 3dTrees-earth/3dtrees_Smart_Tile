@@ -15,7 +15,7 @@ from pydantic import Field, AliasChoices, field_validator
 from pathlib import Path
 from typing import Optional
 
-from worker_budget import DEFAULT_FILE_WORKERS, allocated_cpu_count
+from worker_budget import allocated_cpu_count
 
 
 class Parameters(BaseSettings):
@@ -619,19 +619,6 @@ def print_params(params: Parameters):
 
     print("=" * 60)
 
-
-# Legacy compatibility: provide dict-like access for modules that need it
-# Legacy dict exports for backwards compatibility with modules that import them directly
-TILE_PARAMS = {
-    'tile_length': 100,
-    'tile_buffer': 20,
-    'workers': DEFAULT_FILE_WORKERS,
-    'resolution_1': 0.01,
-    'resolution_2': 0.1,
-    'output_copc_res1': True,
-    'output_copc_res2': False,
-    'subsampling_method': 'center-of-mass',
-}
 
 if __name__ == "__main__":
     """CLI for viewing/testing parameter configuration."""

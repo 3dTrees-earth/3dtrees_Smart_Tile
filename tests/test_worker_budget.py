@@ -6,10 +6,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from worker_budget import (  # noqa: E402
-    DEFAULT_FILE_WORKERS,
-    available_cpu_count,
-)
+from worker_budget import available_cpu_count  # noqa: E402
 
 
 class WorkerBudgetTests(unittest.TestCase):

@@ -328,12 +328,14 @@ Coarse predictions must enter through the merge task with a target folder first:
 ```bash
 python src/run.py --task filter \
     --input-dir /path/to/segmented_remapped \
-    --output-dir /path/to/filtered_tiles \
+    --output-dir /path/to/filter_run \
     --tile-bounds-json /path/to/tile_bounds_tindex.json \
     --instance-dimension PredInstance
 ```
 
-The filter task writes regular LAZ tiles in deterministic order, preserves all
+`--output-dir` is the work root for merge and filter alike: tiles go to
+`<output-dir>/output_tiles` (or `--output-tiles-folder`), and the report and the
+unfiltered copy stay inside `<output-dir>`. The filter task writes regular LAZ tiles in deterministic order, preserves all
 kept-point dimensions, and includes ownership decisions and an ID/source mapping
 in the report. `--filter-anchor centroid` (default), `highest_point`, or
 `lowest_point` selects instance ownership for both merge and filter. Ownership
@@ -578,6 +580,8 @@ python src/run.py --task create_merged_file \
     --workers 10
 ```
 
+**Input requirement:** instance IDs must already be distinct across all input files (each `PredInstance*` value names one instance in the whole set). `create_merged_file` combines files as they are and never renumbers IDs, so files segmented separately, each numbering from 1, would merge different trees under one ID. Original-with-predictions files from merge or remap meet this: their IDs are compacted across the dataset.
+
 `--merged-resolutions` accepts `res1`, `res2`, numeric meter values such as `0.05`, centimeter labels such as `1cm,10cm`, or `full`.
 
 **Full resolution (`full`)** writes `merged.<format>` (`merged.laz`, `merged.copc.laz` or `merged.ply`) with every input point and no subsampling. The LAS/LAZ inputs are streamed file by file (sorted file names) in record order, so no COPC staging is needed. With `--original-point-index` (the default; disable with `--no-original-point-index`), every point gets `OriginalPointIndex`: a uint64, its 0-based position in that order, written as the first ExtraByte and followed by the `PredInstance*` dimensions. This is the layout ForestStructure's ordered-COPC builder creates: ForestStructure restores the source order from it after COPC and reproduces Julia's results, which break ties by record order. The inputs must share one point format, ExtraBytes and CRS; scales are the finest of all inputs. Subsampled products carry no index, and merge/remap never transfer `OriginalPointIndex` as a prediction, so enriched originals never receive it.
@@ -587,11 +591,11 @@ python src/run.py --task create_merged_file \
 The task stages LAZ/LAS inputs to COPC in preservation mode with untwine when available, falling back to PDAL `writers.copc`, before merging and product downsampling. Existing matching `.copc.laz` files are reused so one source is not merged twice.
 `--staged-copc-dir` points to a reusable cache of already converted Original-with-predictions COPCs. This is recommended for repeat validation runs and production reruns where the enriched originals have not changed.
 `--standardization-json` points to the standardization `collection_summary.json` and validates that expected non-constant source dimensions survived into the staged COPCs and final LAS/COPC prod-merged products.
-LAZ and COPC outputs use LAS/COPC metadata forwarding. PLY outputs carry point dimensions as PLY properties, but do not preserve LAS/COPC VLR metadata. PLY has no CRS field, so every PLY SmartTile produces (prod-merged products and RCT tree meshes) records its CRS in the header as `comment crs: EPSG:<code>`, or as single-line standardized WKT when the CRS has no EPSG code. This is the convention QGIS (MDAL) reads; other readers ignore comments. PDAL's PLY writer cannot add comments, so product PLYs get the line in a header-only rewrite after writing; the binary payload is copied unchanged. PDAL's PLY reader ignores the comment: a PLY -> LAS conversion needs `readers.ply.default_srs`. Coordinates stay absolute float64; ASCII PLY written by PDAL without an explicit `precision` rounds to 6 significant digits (about 10 m for UTM northings), so SmartTile writes binary PLY.
+LAZ and COPC outputs use LAS/COPC metadata forwarding. PLY outputs carry point dimensions as PLY properties, but do not preserve LAS/COPC VLR metadata. PLY has no CRS field, so every PLY SmartTile produces (prod-merged products and RCT tree meshes) records its CRS in the header as `comment crs: EPSG:<code>`, or as single-line standardized WKT when the CRS has no EPSG code. This is the convention QGIS (MDAL) reads; other readers ignore comments. PDAL's PLY writer cannot add comments, so product PLYs get the line in a header-only rewrite after writing; the binary payload is copied unchanged. PDAL's PLY writer also lowercases every property name (`treeID` becomes `treeid`); the same rewrite restores the exact names of the input's ExtraBytes and `OriginalPointIndex` (3DT-2352), so exact lookups such as ForestMamba's `pcd["treeID"]` work. `x`, `y`, `z`, `red`, `green`, `blue` stay lowercase; names that differ only in case are rejected. PDAL's PLY reader ignores the comment: a PLY -> LAS conversion needs `readers.ply.default_srs`. Coordinates stay absolute float64; ASCII PLY written by PDAL without an explicit `precision` rounds to 6 significant digits (about 10 m for UTM northings), so SmartTile writes binary PLY.
 `--workers` sets the number of bounded COPC product chunks for prod-merged creation; by default it is the allocated CPU count.
 For COPC output, SmartTile first writes bounded LAZ chunks and then prefers direct `untwine` chunk-to-COPC finalization. This keeps RAM bounded and avoids a giant merged temporary LAZ, but it still needs scratch disk for the chunk files and untwine hierarchy/output staging. Direct untwine output is accepted only when its point count exactly matches the source chunk total; otherwise SmartTile falls back to the PDAL merge/conversion path.
 When multiple product formats are selected for the same resolution, SmartTile generates one canonical set of nearest-to-centroid chunk LAZ files and writes all selected formats from those same chunks. This avoids repeated chunk computation and keeps LAZ, COPC LAZ, and PLY point counts aligned for a given resolution.
-Chunked nearest-to-centroid product generation is designed to preserve product metadata, CRS, scales, offsets, and dimensions. It should not be treated as a bit-for-bit reproducible operation: different chunking, PDAL/untwine versions, or parallel execution details may change the selected representative point at voxel boundaries while preserving the same spatial extent and metadata contract.
+Subsampled products are reproducible. PDAL only reads and merges each chunk; SmartTile then keeps, per voxel of an absolute grid (chunk edges are aligned to it), the original point nearest the voxel's exact mean, with ties broken by a canonical order over all fields, so the read order does not matter. PDAL's `filters.voxelcentroidnearestneighbor`, used before, placed its grid by the order of the points it received, which varies between COPC reads (645: two runs differed by 4,388 of 80 M points). Kept points are written in GPS-time order: LAZ compresses differences between consecutive points, and voxel order tripled the file size (645 10 cm: 2.52 -> 0.81 GB). Spatial chunk planning targets an average of 2 M input points per chunk; uneven density can produce larger chunks, so this is not a hard memory cap.
 
 ### Local Validation
 
@@ -699,7 +703,7 @@ In the tile task, at most two tile outputs are assembled or converted at once.
 **Algorithm**: Voxel-based downsampling using the selected `--subsampling-method`.
 
 - `center-of-mass` (default): the exact mean X/Y/Z of the original points in each populated voxel. Tile outputs carry XYZ only.
-- `nearest-to-centroid`: in the tile task, the original point nearest the voxel's exact mean (ties: lowest X, then Y, then Z), on the same single read and voxel grid as center of mass. Product downsampling (`create_merged_file`) still uses PDAL `filters.voxelcentroidnearestneighbor`.
+- `nearest-to-centroid`: in the tile task, the original point nearest the voxel's exact mean (ties: lowest X, then Y, then Z), on the same single read and voxel grid as center of mass. Product subsampling (`create_merged_file`) uses the same rule on an absolute voxel grid, chunk by chunk.
 
 **Tile-task subsampling (single read, `src/tile_centroids.py`, both methods)**:
 1. Sources are read once in parallel point ranges (`--workers` processes). Each point is encoded into every buffered tile it falls in and spilled to XY blocks aligned to every voxel grid. Tiles use the finest scale of all sources per axis and tile-centre offsets, so no source loses precision; a single-cloud bypass keeps the source's own encoding.
@@ -1315,7 +1319,7 @@ htop -p $(pgrep -f "python src/run.py")
 | `parameters.py` | Pydantic-based parameter definitions with CLI support |
 | `main_tile.py`, `tile_*.py` | Tile task: CRS unit check, tile index, bounds and job list (`plan_tiling`), occupancy publication |
 | `tile_centroids.py` | Tile task: one read of every source point, block reduction to every `--tile-outputs` resolution, occupancy counted in the same read |
-| `main_subsample.py`, `subsample_*.py` | Output names and resolution labels, file bounds/scales, center-of-mass headers, COPC output conversion; the older per-tile subsampling pipeline in `main_subsample.py` is not called by `run.py` |
+| `main_subsample.py`, `subsample_*.py` | Output names and resolution labels, file bounds/scales, center-of-mass headers, COPC output conversion |
 | `remap_first_pipeline.py` | Remap-first merge (`merge_collections`), final remap (`strict_remap`), original enrichment |
 | `merge_stages.py` | Dense 10 cm → 1 cm transfer, cross-tile reconciliation, deduplication |
 | `dense_instance_ownership.py` | Core filter by centroid/highest/lowest anchor, shared-point and tree/background ownership |

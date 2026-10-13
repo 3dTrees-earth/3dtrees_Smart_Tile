@@ -4,11 +4,8 @@ import subprocess
 import sys
 import unittest
 
-import laspy
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from subsample_com import aligned_edges, iter_copc_center_of_mass_windows, _query_copc_window
+from subsample_com import aligned_edges
 
 
 class SubsampleWindowTests(unittest.TestCase):
@@ -30,44 +27,3 @@ class SubsampleWindowTests(unittest.TestCase):
     def test_unrepresentable_step_fails_instead_of_looping(self):
         with self.assertRaisesRegex(ValueError, "cannot advance"):
             aligned_edges(1e16, 1e16 + 4, .01, .01)
-
-
-class RoundedCopcReader:
-    """The integer-coordinate inclusion rule used by laspy.CopcReader.query."""
-    def __init__(self, las):
-        self.header = las.header
-        self.points = las.points
-
-    def query(self, bounds):
-        mins = np.round((bounds.mins - self.header.offsets) / self.header.scales)
-        maxs = np.round((bounds.maxs - self.header.offsets) / self.header.scales)
-        keep = np.ones(len(self.points), dtype=bool)
-        for axis, name in enumerate(("X", "Y", "Z")):
-            values = getattr(self.points, name)
-            keep &= (values >= mins[axis]) & (values <= maxs[axis])
-        return self.points[keep]
-
-
-class CopcWindowOwnershipTests(unittest.TestCase):
-    def assert_partition(self, offsets):
-        header = laspy.LasHeader(point_format=0, version="1.4")
-        header.scales = np.array([.01, .01, .01])
-        header.offsets = np.array(offsets)
-        las = laspy.LasData(header)
-        # Both sides, exact internal edges, corners, and inclusive outer edges.
-        coords = np.array([(x, y, 0) for x in (0, 499, 500, 501, 999, 1000, 1001)
-                           for y in (0, 499, 500, 501, 999, 1000, 1001)])
-        las.X, las.Y, las.Z = coords.T
-        las.intensity = np.arange(len(coords))
-        las.update_header()
-        reader = RoundedCopcReader(las)
-        owned = [_query_copc_window(reader, b)
-                 for b in iter_copc_center_of_mass_windows(las.header, .01)]
-        ids = np.concatenate([p.intensity for p in owned])
-        np.testing.assert_array_equal(np.sort(ids), np.arange(len(coords)))
-
-    def test_exact_grid_boundaries_have_one_owner(self):
-        self.assert_partition([0, 0, 0])
-
-    def test_non_grid_offsets_and_negative_coordinates_have_one_owner(self):
-        self.assert_partition([-5.003, 2.577, 0])

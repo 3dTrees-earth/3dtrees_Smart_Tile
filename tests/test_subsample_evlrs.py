@@ -1,9 +1,6 @@
 from pathlib import Path
 import sys
-import tempfile
-import types
 import unittest
-from unittest import mock
 
 import laspy
 from laspy.vlrs.known import WktCoordinateSystemVlr
@@ -11,7 +8,7 @@ from laspy.vlrs.vlrlist import VLRList
 from pyproj import CRS
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from subsample_com import make_center_of_mass_header, center_of_mass_subsample_copc
+from subsample_com import make_center_of_mass_header
 
 
 class SubsampleEvlrTests(unittest.TestCase):
@@ -38,15 +35,3 @@ class SubsampleEvlrTests(unittest.TestCase):
         self.assertEqual([v.record_id for v in header.vlrs if v.user_id == "LASF_Projection"], [2112])
         self.assertFalse(any(v.user_id == "LASF_Projection" for v in header.evlrs))
         self.assertTrue(header.parse_crs().equals(source.header.parse_crs()))
-
-    def test_plain_laz_subsampling_writes_extended_crs(self):
-        source = self.source()
-        reader = types.SimpleNamespace(header=source.header, query=lambda _: source.points)
-        with tempfile.TemporaryDirectory() as tmp, mock.patch("laspy.copc.CopcReader.open") as opened:
-            opened.return_value.__enter__.return_value = reader
-            output = Path(tmp) / "coarse.laz"
-            self.assertEqual(center_of_mass_subsample_copc(Path("source.copc.laz"), output, .1), 2)
-            with laspy.open(output) as result:
-                self.assertTrue(result.header.parse_crs().equals(source.header.parse_crs()))
-                self.assertFalse(any(v.user_id == "copc" for v in result.header.evlrs))
-                self.assertEqual(result.header.point_count, 2)

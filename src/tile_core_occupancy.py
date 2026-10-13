@@ -1,63 +1,12 @@
-"""Select populated cores before writing buffered tiles or scheduling models."""
+"""Publish the tiles whose core contains source points (counted by the single-scan read)."""
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import laspy
 import numpy as np
 
 from prepare_tile_jobs import write_job_list
-
-
-def occupied_cores(source_files, tiles, *, chunk_size=1_000_000):
-    """Return one boolean per declared core, using inclusive XY boundaries.
-
-    All sources contribute to occupancy. Once a core is populated it needs no
-    further checks; stop reading when every core is populated. No point payload
-    is retained between chunks, and no bounds-only inference counts as a hit.
-    """
-    cores = np.asarray([tile['core'] for tile in tiles], dtype=np.float64)
-    if (cores.shape != (len(tiles), 2, 2) or not np.all(np.isfinite(cores))
-            or np.any(cores[:, :, 0] > cores[:, :, 1])):
-        raise ValueError('Core occupancy requires finite, ordered XY core bounds')
-    occupied = np.zeros(len(tiles), dtype=bool)
-    for source in source_files:
-        if occupied.all():
-            break
-        with laspy.open(source) as reader:
-            for chunk in reader.chunk_iterator(max(1, min(int(chunk_size), 1_000_000))):
-                if not len(chunk):
-                    continue
-                x, y = np.asarray(chunk.x), np.asarray(chunk.y)
-                candidates = np.flatnonzero(
-                    ~occupied & (cores[:, 0, 0] <= x.max())
-                    & (cores[:, 0, 1] >= x.min())
-                    & (cores[:, 1, 0] <= y.max())
-                    & (cores[:, 1, 1] >= y.min()))
-                for i in candidates:
-                    (x0, x1), (y0, y1) = cores[i]
-                    occupied[i] = np.any((x >= x0) & (x <= x1) & (y >= y0) & (y <= y1))
-                if occupied.all():
-                    break
-    return occupied
-
-
-def select_occupied_tile_jobs(source_files, bounds_json, jobs_file, tiles_dir, *, chunk_size):
-    """Publish only cores containing source points as active tiles and jobs.
-
-    Refuse stale outputs from an older layout rather than letting
-    directory-based subsampling pick them up on a resume.
-    """
-    bounds_json, jobs_file, tiles_dir = map(Path, (bounds_json, jobs_file, tiles_dir))
-    tiles = json.loads(bounds_json.read_text())['tiles']
-    keep = occupied_cores(source_files, tiles, chunk_size=chunk_size)
-    for tile, populated in zip(tiles, keep):
-        label = f"c{tile['col']:02d}_r{tile['row']:02d}"
-        if not populated and ((tiles_dir / f'{label}.copc.laz').exists() or (tiles_dir / label).exists()):
-            raise FileExistsError(
-                f'Empty-core tile {label} has existing output; use a fresh output directory')
-    return publish_occupied_tiles(bounds_json, jobs_file, keep)
 
 
 def publish_occupied_tiles(bounds_json, jobs_file, keep):

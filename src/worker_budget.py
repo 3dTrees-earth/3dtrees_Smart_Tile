@@ -7,10 +7,6 @@ import os
 from pathlib import Path
 
 
-DEFAULT_FILE_WORKERS = 2
-BYTES_PER_GB = 1024**3
-
-
 def available_cpu_count() -> int:
     """Return the available CPU count, falling back to one."""
     return max(1, os.cpu_count() or 1)

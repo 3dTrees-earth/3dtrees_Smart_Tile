@@ -123,7 +123,7 @@ class TilePipelineTests(unittest.TestCase):
                 with mock.patch.object(main_tile, "build_tindex") as tindex, \
                         mock.patch.object(main_tile, "calculate_tile_bounds") as bounds:
                     with self.assertRaisesRegex(ValueError, rf"Unsupported input CRS for tiling: {name}\.las: {crs}"):
-                        main_tile.run_tiling_pipeline(root / "in", root / "out", tile_length=300, tile_buffer=20)
+                        main_tile.plan_tiling(root / "in", root / "out", 300, 20)
                 tindex.assert_not_called()
                 bounds.assert_not_called()
 

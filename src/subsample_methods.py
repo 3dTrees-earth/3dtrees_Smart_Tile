@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Optional
 
 
@@ -26,15 +25,3 @@ def normalize_subsampling_method(method: Optional[str]) -> str:
         allowed = ", ".join(sorted(SUBSAMPLING_METHODS))
         raise ValueError(f"Unknown subsampling method {method!r}; expected one of: {allowed}")
     return normalized
-
-
-def voxel_subsampling_filter(resolution: float, method: str) -> dict:
-    """Return the PDAL filter stage for methods implemented by PDAL."""
-    method = normalize_subsampling_method(method)
-    if method == SUBSAMPLING_METHOD_NEAREST_TO_CENTROID:
-        return {"type": "filters.voxelcentroidnearestneighbor", "cell": resolution}
-    raise ValueError(f"{method} is implemented by SmartTile, not a PDAL filter stage")
-
-
-def is_copc_file(path: Path) -> bool:
-    return path.name.lower().endswith(".copc.laz")
