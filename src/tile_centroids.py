@@ -31,6 +31,8 @@ import time
 import laspy
 import numpy as np
 
+from output_publication import publish_files, validate_output_paths
+
 # One spilled point: XYZ in its tile's LAS encoding plus a bit per resolution.
 RECORD = np.dtype([("X", "<i4"), ("Y", "<i4"), ("Z", "<i4"), ("m", "u1")])
 CHUNK_POINTS = 1_000_000
@@ -494,6 +496,7 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
         raise ValueError("Tile centroids need tiles and positive resolutions")
     if len(resolutions) > 8:
         raise ValueError("At most eight resolutions per scan")
+    validate_output_paths(sources, [path for _, paths, _ in outputs for path in paths.values()])
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     workers = max(1, int(workers))
@@ -590,10 +593,8 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
                    if occupied[index] and tile_points[index] and tile.label not in written]
         if missing:
             raise ValueError(f"Tiles without outputs: {missing}")
-        # Publish only after every tile and resolution passed its checks.
-        for path, final in staged:
-            final.parent.mkdir(parents=True, exist_ok=True)
-            path.replace(final)
+        # Publish as one collection; a late failure rolls back every new file.
+        publish_files(staged, inputs=sources)
     print(f"  Tile centroids: {len(written)} tiles, {resolutions} m, in {time.monotonic() - started:.1f} s: "
           f"spill {spilled - started:.1f} s, reduce/write {reduced - spilled:.1f} s "
           f"(waiting on blocks {waited[0]:.1f} s), remaining conversion/assembly {time.monotonic() - reduced:.1f} s")

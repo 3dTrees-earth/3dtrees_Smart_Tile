@@ -163,9 +163,10 @@ class CreateMergedFileTests(unittest.TestCase):
             )
             created = tmp_path / "prod_merged_10cm.laz"
 
-            def create_file(*args, **kwargs):
-                created.write_text("laz")
-                return [created]
+            def create_file(_inputs, selected_outputs, *args, **kwargs):
+                path = selected_outputs[0][0]
+                path.write_text("laz")
+                return [path]
 
             with mock.patch(
                 "main_create_merged_file.prepare_copc_inputs",
@@ -400,8 +401,8 @@ class CreateMergedFileTests(unittest.TestCase):
             output = tmp_path / "prod_merged_10cm.copc.laz"
             source.write_text("copc")
 
-            def run_pipeline(*_, **__):
-                output.write_text("copc")
+            def run_pipeline(pipeline, *_, **__):
+                Path(pipeline["pipeline"][-1]["filename"]).write_text("copc")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline), \
@@ -422,8 +423,11 @@ class CreateMergedFileTests(unittest.TestCase):
                         )
 
         self.assertEqual(created, output)
-        validate_dims.assert_called_once_with([source], output)
-        validate.assert_called_once_with(source, output)
+        validate_dims.assert_called_once()
+        staged_output = validate_dims.call_args.args[1]
+        self.assertEqual(staged_output.name, output.name)
+        self.assertNotEqual(staged_output, output)
+        validate.assert_called_once_with(source, staged_output)
 
     def test_single_laz_pipeline_validates_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -432,8 +436,8 @@ class CreateMergedFileTests(unittest.TestCase):
             output = tmp_path / "prod_merged_10cm.laz"
             source.write_text("copc")
 
-            def run_pipeline(*_, **__):
-                output.write_text("laz")
+            def run_pipeline(pipeline, *_, **__):
+                Path(pipeline["pipeline"][-1]["filename"]).write_text("laz")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline), \
@@ -454,36 +458,25 @@ class CreateMergedFileTests(unittest.TestCase):
                         )
 
         self.assertEqual(created, output)
-        validate_dims.assert_called_once_with([source], output)
-        validate.assert_called_once_with(source, output)
+        validate_dims.assert_called_once()
+        staged_output = validate_dims.call_args.args[1]
+        self.assertEqual(staged_output.name, output.name)
+        self.assertNotEqual(staged_output, output)
+        validate.assert_called_once_with(source, staged_output)
 
-    def test_single_product_removes_stale_output_before_rewrite(self):
+    def test_single_product_rejects_existing_output_without_rewriting(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             source = tmp_path / "source.copc.laz"
             output = tmp_path / "prod_merged_10cm.laz"
             source.write_text("copc")
-            output.write_text("stale")
-
-            def run_pipeline(*_, **__):
-                self.assertFalse(output.exists())
-                output.write_text("fresh")
-                return mock.Mock(returncode=0, stdout="", stderr="")
-
-            with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline), \
-                    mock.patch("main_create_merged_file._select_chunk_points", side_effect=_copy_raw_chunk):
-                with mock.patch(
-                    "main_create_merged_file._validate_preserved_product_dims",
-                    return_value=(True, "ok"),
-                ):
-                    with mock.patch(
-                        "main_create_merged_file._preserve_and_validate_las_metadata",
-                        return_value=(True, "ok"),
-                    ):
-                        created = create_prod_merged_file([source], output, 0.1, "laz")
-
-            self.assertEqual(created, output)
-            self.assertEqual(output.read_text(), "fresh")
+            output.write_text("previous result")
+            with mock.patch("main_create_merged_file._run_pdal_pipeline") as pipeline:
+                with self.assertRaisesRegex(FileExistsError, "existing output"):
+                    create_prod_merged_file([source], output, 0.1, "laz")
+            pipeline.assert_not_called()
+            self.assertEqual(output.read_text(), "previous result")
+            self.assertEqual(source.read_text(), "copc")
 
     def test_chunked_product_failure_cleans_scratch_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -502,7 +495,7 @@ class CreateMergedFileTests(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, "chunk 1 failed"):
                             create_chunked_prod_merged_files_for_resolution([source], [(output, "laz")], 0.1, 2)
 
-            self.assertFalse((tmp_path / "_prod_merged_10cm_shared_chunks").exists())
+            self.assertFalse(list(tmp_path.glob(".smarttile-output-*")))
 
     def test_chunked_product_failure_can_keep_scratch_for_debug(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -522,7 +515,7 @@ class CreateMergedFileTests(unittest.TestCase):
                             with self.assertRaisesRegex(RuntimeError, "chunk 1 failed"):
                                 create_chunked_prod_merged_files_for_resolution([source], [(output, "laz")], 0.1, 2)
 
-            self.assertTrue((tmp_path / "_prod_merged_10cm_shared_chunks").exists())
+            self.assertEqual(len(list(tmp_path.glob(".smarttile-output-*/_prod_merged_10cm_shared_chunks"))), 1)
 
     def test_create_prod_merged_chunks_skips_empty_spatial_chunks_and_preserves_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:

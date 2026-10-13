@@ -5,6 +5,7 @@ RCT namespacing), so no extra pass over the tiles is needed.
 """
 from __future__ import annotations
 
+from urllib.parse import quote
 
 import numpy as np
 
@@ -76,7 +77,7 @@ def instance_summary(stats: InstanceStatistics, aliases=None, *, origin=None):
 
 
 def summary_file_name(instance_dimension: str) -> str:
-    return f"{instance_dimension}_summary.json"
+    return f"{quote(instance_dimension, safe='')}_summary.json"
 
 
 def summary_document(model, stats, aliases, *, origin, resolution_1, id_encoding, reassignment_enabled):

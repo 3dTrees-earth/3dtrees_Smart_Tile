@@ -55,3 +55,50 @@ uses an average point-count target, not a hard density-independent memory cap.
 These are local integration and validation results. They do not establish a
 production deployment, recovery of individual production datasets, or completion
 of the wider SmartTile v2.4 release certification.
+
+## Review fixes — 2026-10-13
+
+Five reviewed data-safety defects are fixed on top of `7f496bb`:
+
+- Instance tiling checks the complete input collection before processing and
+  promotes compatible integer ExtraBytes without truncation. Regressions cover
+  ID 70000 with uint16/uint32 inputs in both file orders, carried attributes,
+  and incompatible metadata.
+- Remap scratch files use internal identifiers instead of attribute names.
+  Instance tile directories and summary filenames encode attribute names;
+  absolute paths and traversal names cannot select files outside the job.
+- Product and tile publication share destination validation. Input aliases,
+  duplicate destinations, and existing results are rejected before writing.
+  Products, including vector sidecars, are staged and rolled back on ordinary
+  publication failure; tile jobs publish their complete directory only after
+  all requested outputs and layout files succeed. This is not a power-loss or
+  process-crash durability guarantee. Repeated builds need fresh destinations.
+- Disabling OriginalPointIndex generation preserves existing values.
+- Full-resolution merge and attribute join retain ExtraBytes scales, offsets,
+  and no_data through the canonical metadata helpers, rejecting incompatible
+  shared-field definitions.
+
+The final source and regression tests passed the complete local tool suite:
+**429 passed, 91 subtests passed**, exit 0, in 117.52 seconds. The command was the
+same as above, with JUnit output enabled. The scientific-runtime image was
+`smarttile:v2.4a-fast`, image ID
+`sha256:b8c79e45dc52a363f8273f83a27b57c9954e8befaa8ea2fe20883bbfff119a52`.
+Source and test dependencies were mounted read-only; networking was disabled;
+the limits remained 10 CPUs, 50 GiB memory including swap, and 8 GiB scratch.
+Regressions include input symlink/hardlink aliases, concurrent destination
+creation, late publication failure, and failure after ordinary tiles but
+before instance tiles complete. `git diff --check` passes.
+
+The unchanged Galaxy wrapper at `d51eeb2b` also passed all **13 Planemo cases**
+against this fixed source: 0 errors, 0 failures, 0 skips, exit 0. The final report
+confirms output assertions for four tile cases, three merge cases, four product
+exports (full-resolution LAZ, subsampled COPC and PLY), and two remap cases. Summed
+test-case time was 557.79 seconds. This used an isolated local Galaxy instance
+and disposable PostgreSQL database; tool jobs mounted the source read-only and
+ran without network access, with 10 CPUs and a 50 GiB memory limit.
+
+These fixes do not close the review's same-instance nearest-point tie issue:
+numerically tied candidates can still be selected differently across prediction
+batches. Dense spatial cells also lack a strict worst-case memory bound. Wider
+downstream release certification remains incomplete, so this is not production
+approval or certification of all three end-to-end scenarios.

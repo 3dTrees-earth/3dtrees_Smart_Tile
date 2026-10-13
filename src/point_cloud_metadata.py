@@ -68,6 +68,17 @@ def extra_bytes_attribute_equal(left, right) -> bool:
     return np.array_equal(left, right, equal_nan=numeric_nan)
 
 
+def extra_bytes_metadata_equal(left, right) -> bool:
+    """Compare the scaling and missing-value semantics of two ExtraBytesParams."""
+    return all(extra_bytes_attribute_equal(getattr(left, name), getattr(right, name))
+               for name in ("scales", "offsets", "no_data"))
+
+
+def extra_bytes_params_compatible(left, right) -> bool:
+    """Whether a shared field can retain one storage type and interpretation."""
+    return np.dtype(left.type) == np.dtype(right.type) and extra_bytes_metadata_equal(left, right)
+
+
 def extra_bytes_params_from_dimension_info(
     dim_info,
     name: Optional[str] = None,

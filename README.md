@@ -185,6 +185,11 @@ python src/run.py --task tile \
     --output-dir /path/to/output
 ```
 
+The tile output directory must be absent or empty, and must not overlap the
+input directory. Tiles, their layout and the overview are prepared together
+and published only after the complete task succeeds. Existing results are
+never overwritten.
+
 ### Basic Merge Task
 
 Transfer predictions to the 1 cm target geometry first, remove non-owned instances,
@@ -582,11 +587,23 @@ python src/run.py --task create_merged_file \
 
 **Input requirement:** instance IDs must already be distinct across all input files (each `PredInstance*` value names one instance in the whole set). `create_merged_file` combines files as they are and never renumbers IDs, so files segmented separately, each numbering from 1, would merge different trees under one ID. Original-with-predictions files from merge or remap meet this: their IDs are compacted across the dataset.
 
+Selected product paths must not already exist or alias an input, including
+through a symlink or hard link. All selected products and their metadata
+sidecars are validated before publication; a publication error rolls back the
+new files. Choose new output paths for a repeat run. This protects against
+ordinary task failures, not an operating-system crash or power loss.
+
 `--merged-resolutions` accepts `res1`, `res2`, numeric meter values such as `0.05`, centimeter labels such as `1cm,10cm`, or `full`.
 
 **Full resolution (`full`)** writes `merged.<format>` (`merged.laz`, `merged.copc.laz` or `merged.ply`) with every input point and no subsampling. The LAS/LAZ inputs are streamed file by file (sorted file names) in record order, so no COPC staging is needed. With `--original-point-index` (the default; disable with `--no-original-point-index`), every point gets `OriginalPointIndex`: a uint64, its 0-based position in that order, written as the first ExtraByte and followed by the `PredInstance*` dimensions. This is the layout ForestStructure's ordered-COPC builder creates: ForestStructure restores the source order from it after COPC and reproduces Julia's results, which break ties by record order. The inputs must share one point format, ExtraBytes and CRS; scales are the finest of all inputs. Subsampled products carry no index, and merge/remap never transfer `OriginalPointIndex` as a prediction, so enriched originals never receive it.
 
 **Several segmentation outputs.** `--original-with-predictions-dir` also takes comma-separated folders that hold versions of the same originals with different attributes, for example one remap output per segmentation run. Files are matched by name; each must hold the same points in the same record order in every folder (checked chunk by chunk). The joined originals keep the first folder's points and standard fields plus every folder's ExtraBytes, and then go through the selected products as one input (`merged.laz` with `OriginalPointIndex`, or subsampled products). An attribute in several folders is kept once when its values agree and is an error otherwise; attributes are never renamed. COPC inputs are refused because COPC conversion reorders points.
+
+With `--no-original-point-index`, full-resolution products preserve an existing
+`OriginalPointIndex` unchanged. Full merge and attribute joins retain ExtraBytes
+scales, offsets and missing-value declarations; shared attributes must have
+compatible storage and metadata definitions.
+
 `--merged-output-formats` accepts `laz`, `copc.laz`, and `ply`; it can contain one or several comma-separated formats.
 The task stages LAZ/LAS inputs to COPC in preservation mode with untwine when available, falling back to PDAL `writers.copc`, before merging and product downsampling. Existing matching `.copc.laz` files are reused so one source is not merged twice.
 `--staged-copc-dir` points to a reusable cache of already converted Original-with-predictions COPCs. This is recommended for repeat validation runs and production reruns where the enriched originals have not changed.

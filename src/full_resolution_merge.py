@@ -18,7 +18,12 @@ from typing import List
 import laspy
 import numpy as np
 
-from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
+from point_cloud_metadata import (
+    copy_single_source_header,
+    extra_bytes_params_compatible,
+    extra_bytes_params_from_dimension_info,
+    write_retained_evlrs,
+)
 
 ORIGINAL_POINT_INDEX = "OriginalPointIndex"
 # Addressable through lidR selectors 2.. after the order key (ForestStructure).
@@ -27,15 +32,9 @@ READ_POINTS = 1_000_000
 INT32 = np.iinfo(np.int32)
 
 
-def _extra_bytes_params(dimension):
-    """Clone one ExtraByte definition without changing its storage semantics."""
-    return laspy.ExtraBytesParams(name=dimension.name, type=dimension.dtype, description=dimension.description,
-                                  offsets=dimension.offsets, scales=dimension.scales, no_data=dimension.no_data)
-
-
 def _schema(header):
-    return (header.point_format.id,
-            [(d.name, str(d.dtype)) for d in header.point_format.extra_dimensions])
+    return {dimension.name: extra_bytes_params_from_dimension_info(dimension, header=header)
+            for dimension in header.point_format.extra_dimensions}
 
 
 def merged_header(inputs: List[Path], original_point_index: bool) -> laspy.LasHeader:
@@ -45,13 +44,16 @@ def merged_header(inputs: List[Path], original_point_index: bool) -> laspy.LasHe
         with laspy.open(path) as reader:
             headers.append(reader.header)
     first = headers[0]
+    extras = _schema(first)
     for path, header in zip(inputs[1:], headers[1:]):
-        if _schema(header) != _schema(first):
+        actual = _schema(header)
+        if (header.point_format.id != first.point_format.id or list(actual) != list(extras)
+                or any(not extra_bytes_params_compatible(extras[name], actual[name]) for name in extras)):
             raise ValueError(f"{path.name}: point format or ExtraBytes differ from {inputs[0].name}; "
                              "a full-resolution merge needs one schema")
         if header.parse_crs() != first.parse_crs():
             raise ValueError(f"{path.name}: CRS differs from {inputs[0].name}")
-    names = [d.name for d in first.point_format.extra_dimensions]
+    names = list(extras)
     if original_point_index and ORIGINAL_POINT_INDEX in names:
         raise ValueError(f"Inputs already contain {ORIGINAL_POINT_INDEX}; disable --original-point-index")
     scales = np.min([h.scales for h in headers], axis=0)
@@ -61,15 +63,13 @@ def merged_header(inputs: List[Path], original_point_index: bool) -> laspy.LasHe
     if np.any((mins - offsets) / scales < INT32.min) or np.any((maxs - offsets) / scales > INT32.max):
         offsets = np.floor(mins)
     header = copy_single_source_header(first, offsets=offsets, scales=scales)
-    extras = {d.name: d for d in first.point_format.extra_dimensions}
     header.remove_extra_dims(names)
     if original_point_index:
         header.add_extra_dim(laspy.ExtraBytesParams(
             name=ORIGINAL_POINT_INDEX, type=np.uint64,
             description="Record index in input order"))
     ordered = [n for n in SELECTIVE_DIMENSIONS if n in extras] + [n for n in names if n not in SELECTIVE_DIMENSIONS]
-    for name in ordered:
-        header.add_extra_dim(_extra_bytes_params(extras[name]))
+    header.add_extra_dims([extras[name] for name in ordered])
     return header
 
 
@@ -77,7 +77,8 @@ def write_full_resolution(inputs: List[Path], output: Path, *, compress: bool, o
     """Concatenate every input record in order into one LAS/LAZ; return the point count."""
     header = merged_header(inputs, original_point_index)
     standard = [n for n in header.point_format.standard_dimension_names if n not in ("X", "Y", "Z")]
-    extras = [d.name for d in header.point_format.extra_dimensions if d.name != ORIGINAL_POINT_INDEX]
+    extras = [d.name for d in header.point_format.extra_dimensions
+              if not original_point_index or d.name != ORIGINAL_POINT_INDEX]
     written = expected = 0
     with laspy.open(output, mode="w", header=header, do_compress=compress) as writer:
         for path in inputs:
@@ -92,8 +93,10 @@ def write_full_resolution(inputs: List[Path], output: Path, *, compress: bool, o
                             record[axis] = chunk[axis]
                     else:
                         record.x, record.y, record.z = chunk.x, chunk.y, chunk.z
-                    for name in standard + extras:
+                    for name in standard:
                         record[name] = chunk[name]
+                    for name in extras:
+                        record.array[name] = chunk.array[name]
                     if original_point_index:
                         record[ORIGINAL_POINT_INDEX] = np.arange(written, written + len(chunk), dtype=np.uint64)
                     writer.write_points(record)

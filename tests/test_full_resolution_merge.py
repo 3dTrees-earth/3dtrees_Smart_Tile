@@ -84,6 +84,60 @@ def test_index_can_be_disabled_and_is_never_duplicated(tmp_path):
         create_full_resolution_product([indexed / "x.las"], tmp_path / "y.laz", "laz", original_point_index=True)
 
 
+def test_disabling_index_generation_preserves_existing_indices(tmp_path):
+    source = tmp_path / "indexed.las"
+    cloud = write_cloud(source, np.array([[500000.0, 5000000.0, z] for z in range(3)]), index=True)
+    cloud.OriginalPointIndex = [5, 6, 2 ** 40]
+    cloud.write(source)
+    output = tmp_path / "full.laz"
+    create_full_resolution_product([source], output, "laz", original_point_index=False)
+    assert laspy.read(output).OriginalPointIndex.tolist() == [5, 6, 2 ** 40]
+
+
+def metadata_cloud(path, **overrides):
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    options = dict(name="confidence", type=np.uint16, no_data=[65535], scales=[0.1], offsets=[2.0])
+    options.update(overrides)
+    header.add_extra_dim(laspy.ExtraBytesParams(**options))
+    header.add_extra_dim(laspy.ExtraBytesParams(name="normal", type="3i2", no_data=[-32768] * 3,
+                                             scales=[0.1, 0.2, 0.3], offsets=[1.0, 2.0, 3.0]))
+    cloud = laspy.LasData(header)
+    cloud.x, cloud.y, cloud.z = [1, 2], [3, 4], [5, 6]
+    cloud.points.array["confidence"] = [12, 65535]
+    cloud.points.array["normal"] = [[3, 4, 5], [-32768, -32768, -32768]]
+    cloud.write(path)
+    return laspy.read(path)
+
+
+def test_full_merge_preserves_extra_byte_metadata_and_raw_values(tmp_path):
+    source = tmp_path / "metadata.las"
+    original = metadata_cloud(source)
+    output = tmp_path / "full.laz"
+    create_full_resolution_product([source], output, "laz", original_point_index=True)
+    result = laspy.read(output)
+    descriptors = {entry.format_name(): entry for vlr in result.header.vlrs
+                   for entry in getattr(vlr, "extra_bytes_structs", ())}
+    assert descriptors["confidence"].no_data.tolist() == [65535]
+    assert list(descriptors["confidence"].scale) == [0.1]
+    assert list(descriptors["confidence"].offset) == [2.0]
+    assert descriptors["normal"].no_data.tolist() == [-32768] * 3
+    assert list(descriptors["normal"].scale) == [0.1, 0.2, 0.3]
+    assert list(descriptors["normal"].offset) == [1.0, 2.0, 3.0]
+    for name in ("confidence", "normal"):
+        assert np.array_equal(result.points.array[name], original.points.array[name])
+
+
+@pytest.mark.parametrize("change", [{"no_data": [65534]}, {"scales": [0.2]}, {"offsets": [3.0]}])
+def test_full_merge_rejects_incompatible_extra_byte_definitions(tmp_path, change):
+    first, second = tmp_path / "first.las", tmp_path / "second.las"
+    metadata_cloud(first)
+    metadata_cloud(second, **change)
+    output = tmp_path / "full.laz"
+    with pytest.raises(ValueError, match="schema"):
+        create_full_resolution_product([first, second], output, "laz", original_point_index=True)
+    assert not output.exists()
+
+
 def test_mismatched_schema_is_rejected(tmp_path):
     folder, _ = inputs(tmp_path)
     write_cloud(folder / "c.las", np.array([[500000.0, 5000000.0, 1.0]]), extras=("species_id",))

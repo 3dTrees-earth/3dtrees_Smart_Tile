@@ -214,8 +214,9 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
             with tempfile.TemporaryDirectory(prefix=".enrich-", dir=output_dir.parent) as scratch:
                 scratch = Path(scratch)
                 tick = time.monotonic()
-                spill_original(file, origin, scratch / "blocks", process_workers, labels=labels, label_dir=scratch)
-                label_stores = {name: np.load(scratch / f"{name}.npy", mmap_mode="r") for name in labels}
+                label_paths = {name: scratch / f"label_{i:04d}.npy" for i, name in enumerate(labels)}
+                spill_original(file, origin, scratch / "blocks", process_workers, label_paths=label_paths)
+                label_stores = {name: np.load(path, mmap_mode="r") for name, path in label_paths.items()}
                 batches = block_batches(scratch / "blocks", source_header, origin)
                 if labels:
                     batches = ((i, xyz, {n: np.asarray(v[i]) for n, v in label_stores.items()})
@@ -240,7 +241,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                         for name in selected[i]:
                             if name not in store:
                                 store[name] = np.lib.format.open_memmap(
-                                    scratch / f"{name}.npy", mode="w+", dtype=values[name].dtype,
+                                    scratch / f"prediction_{len(store):04d}.npy", mode="w+", dtype=values[name].dtype,
                                     shape=(total, *values[name].shape[1:]))
                             store[name][index] = values[name]
                         instance = models[i].instance

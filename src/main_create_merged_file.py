@@ -22,6 +22,8 @@ from typing import List, Optional, Tuple
 from ply_crs import add_crs_comment_to_ply, crs_comment_from_file
 
 from product_formats import parse_merged_output_formats
+from output_publication import OutputTransaction
+from vector_extra_bytes import VECTOR_SCHEMA_SIDECAR_SUFFIX
 from point_cloud_metadata import (
     copc_files,
     load_standardization_dims,
@@ -144,13 +146,6 @@ def _cleanup_chunk_work_dir(work_dir: Path, success: bool) -> None:
         return
     if success or not _keep_failed_chunk_work_dir():
         shutil.rmtree(work_dir, ignore_errors=True)
-
-
-def _remove_existing_output(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as exc:
-        raise RuntimeError(f"Could not remove existing output before rewrite: {path}: {exc}") from exc
 
 
 def _is_reusable_copc(path: Path) -> bool:
@@ -842,56 +837,57 @@ def create_chunked_prod_merged_files_for_resolution(
     if not outputs:
         return []
 
-    chunk_bounds = _prod_merged_chunk_bounds(copc_input_files, resolution, num_spatial_chunks)
-    if not chunk_bounds:
-        raise RuntimeError("No spatial chunks available for prod-merged output")
+    destinations = [Path(path) for path, _ in outputs]
+    with OutputTransaction(destinations, inputs=copc_input_files,
+                           sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX,),
+                           keep_failed=_keep_failed_chunk_work_dir()) as publication:
+        outputs = [(publication.path(path), fmt) for path, fmt in outputs]
+        chunk_bounds = _prod_merged_chunk_bounds(copc_input_files, resolution, num_spatial_chunks)
+        if not chunk_bounds:
+            raise RuntimeError("No spatial chunks available for prod-merged output")
 
-    for output_file, _output_format in outputs:
-        _remove_existing_output(output_file)
+        first_output = outputs[0][0]
+        work_dir = first_output.parent / f"_{first_output.stem}_shared_chunks"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        scale_offset_options = _scale_offset_options(copc_input_files[0])
 
-    first_output = outputs[0][0]
-    work_dir = first_output.parent / f"_{first_output.stem}_shared_chunks"
-    if work_dir.exists():
-        shutil.rmtree(work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
-    scale_offset_options = _scale_offset_options(copc_input_files[0])
-
-    chunk_files: List[Path] = []
-    created: List[Path] = []
-    success = False
-    try:
-        chunk_files = _create_prod_merged_chunks(
-            copc_input_files,
-            work_dir,
-            "prod_merged",
-            chunk_bounds,
-            resolution,
-            scale_offset_options,
-            chunk_workers=chunk_workers,
-        )
-
-        if not chunk_files:
-            raise RuntimeError("No prod-merged chunks were created")
-
-        for output_file, output_format in outputs:
-            _merge_prod_chunks(
-                chunk_files,
-                output_file,
-                output_format,
+        chunk_files: List[Path] = []
+        created: List[Path] = []
+        success = False
+        try:
+            chunk_files = _create_prod_merged_chunks(
+                copc_input_files,
                 work_dir,
-                source_metadata_file=copc_input_files[0],
-                scale_offset_options=scale_offset_options,
+                "prod_merged",
+                chunk_bounds,
+                resolution,
+                scale_offset_options,
+                chunk_workers=chunk_workers,
             )
-            if not output_file.exists() or output_file.stat().st_size == 0:
-                raise RuntimeError(f"Prod-merged output was not created: {output_file}")
-            created.append(output_file)
-        success = len(created) == len(outputs) and all(
-            path.exists() and path.stat().st_size > 0 for path in created
-        )
-    finally:
-        _cleanup_chunk_work_dir(work_dir, success)
 
-    return created
+            if not chunk_files:
+                raise RuntimeError("No prod-merged chunks were created")
+
+            for output_file, output_format in outputs:
+                _merge_prod_chunks(
+                    chunk_files,
+                    output_file,
+                    output_format,
+                    work_dir,
+                    source_metadata_file=copc_input_files[0],
+                    scale_offset_options=scale_offset_options,
+                )
+                if not output_file.exists() or output_file.stat().st_size == 0:
+                    raise RuntimeError(f"Prod-merged output was not created: {output_file}")
+                created.append(output_file)
+            success = len(created) == len(outputs) and all(
+                path.exists() and path.stat().st_size > 0 for path in created
+            )
+        finally:
+            _cleanup_chunk_work_dir(work_dir, success)
+
+        publication.commit()
+        return destinations
 
 
 def create_prod_merged_file(
@@ -904,18 +900,21 @@ def create_prod_merged_file(
     if not copc_input_files:
         raise ValueError("No COPC input files provided")
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    _remove_existing_output(output_file)
-    pipeline = prod_merged_pipeline(copc_input_files, output_file, resolution, output_format)
-    pipeline_file = output_file.parent / f"_{output_file.stem}_pipeline.json"
-    result = _run_pdal_pipeline(pipeline, pipeline_file)
+    destination = Path(output_file)
+    with OutputTransaction([destination], inputs=copc_input_files,
+                           sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX,)) as publication:
+        output_file = publication.path(destination)
+        pipeline = prod_merged_pipeline(copc_input_files, output_file, resolution, output_format)
+        pipeline_file = output_file.parent / f"_{output_file.stem}_pipeline.json"
+        result = _run_pdal_pipeline(pipeline, pipeline_file)
 
-    if result.returncode != 0:
-        raise RuntimeError(f"PDAL prod-merged pipeline failed: {_pdal_error(result, 500)}")
-    if not output_file.exists() or output_file.stat().st_size == 0:
-        raise RuntimeError(f"Prod-merged output was not created: {output_file}")
-    _finalize_product(output_file, output_format, copc_input_files, copc_input_files[0])
-    return output_file
+        if result.returncode != 0:
+            raise RuntimeError(f"PDAL prod-merged pipeline failed: {_pdal_error(result, 500)}")
+        if not output_file.exists() or output_file.stat().st_size == 0:
+            raise RuntimeError(f"Prod-merged output was not created: {output_file}")
+        _finalize_product(output_file, output_format, copc_input_files, copc_input_files[0])
+        publication.commit()
+        return destination
 
 
 def create_prod_merged_files(
@@ -937,67 +936,73 @@ def create_prod_merged_files(
     with ``original_point_index``, numbers every point (``OriginalPointIndex``).
     Subsampled products are built from staged COPCs and carry no index.
     """
-    outputs = []
-    expected_dims = None
-    if standardization_json:
-        expected_dims = load_standardization_dims(Path(standardization_json))
-        print(
-            f"  Standardization JSON: validating expected dimensions from {standardization_json}",
-            flush=True,
-        )
-
     output_formats = parse_merged_output_formats(output_format_selector)
     selections = parse_merged_resolutions(resolution_selector, res1, res2)
-    if any(label == "full" for label, _ in selections):
-        from full_resolution_merge import create_full_resolution_product
-
-        inputs = point_cloud_files(original_with_predictions_dir)
-        for output_format in output_formats:
-            output_file = prod_merged_output_path(output_dir, "full", output_format)
-            print(f"  Creating {output_file.name} at full resolution from {len(inputs)} file(s) in record order"
-                  + (f" with {'OriginalPointIndex'}" if original_point_index else ""))
-            _remove_existing_output(output_file)
-            create_full_resolution_product(inputs, output_file, output_format,
-                                           original_point_index=original_point_index)
-            _finalize_product(output_file, output_format, inputs, inputs[0])
-            if output_format in {"laz", "copc.laz"}:
-                _validate_expected_dims([output_file], expected_dims, output_file.name)
-            outputs.append(output_file)
-    selections = [(label, resolution) for label, resolution in selections if label != "full"]
-    if not selections:
-        return outputs
-    print("  Preparing COPC inputs with SmartTile untwine/PDAL fallback conversion")
-    copc_input_files = prepare_copc_inputs(
-        original_with_predictions_dir,
-        output_dir,
-        staged_copc_dir=staged_copc_dir,
-    )
-    _validate_expected_dims(copc_input_files, expected_dims, "staged Original-with-predictions COPCs")
-    for label, resolution in selections:
-        selected_outputs = [
-            (prod_merged_output_path(output_dir, label, output_format), output_format)
-            for output_format in output_formats
-        ]
-        for output_file, output_format in selected_outputs:
-            warning = expensive_prod_merged_warning(label, resolution, output_format)
-            if warning:
-                print(f"  Warning: {warning}")
+    # Preserve the public result order: full-resolution products first.
+    selections.sort(key=lambda selection: selection[0] != "full")
+    destinations = [prod_merged_output_path(output_dir, label, fmt)
+                    for label, _ in selections for fmt in output_formats]
+    inputs = [*point_cloud_files(original_with_predictions_dir), *copc_files(original_with_predictions_dir)]
+    with OutputTransaction(destinations, inputs=inputs,
+                           sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX,),
+                           keep_failed=_keep_failed_chunk_work_dir()) as publication:
+        expected_dims = None
+        if standardization_json:
+            expected_dims = load_standardization_dims(Path(standardization_json))
             print(
-                f"  Creating {output_file.name} at {resolution:g}m "
-                f"with nearest-to-centroid"
+                f"  Standardization JSON: validating expected dimensions from {standardization_json}",
+                flush=True,
             )
 
-        # Always chunked: the chunk size, not the worker count, bounds memory.
-        created_outputs = create_chunked_prod_merged_files_for_resolution(
-            copc_input_files,
-            selected_outputs,
-            resolution,
-            num_spatial_chunks or 1,
-            chunk_workers=chunk_workers,
-        )
+        if any(label == "full" for label, _ in selections):
+            from full_resolution_merge import create_full_resolution_product
 
-        for created, output_format in zip(created_outputs, output_formats):
-            if parse_merged_output_formats(output_format)[0] in {"laz", "copc.laz"}:
-                _validate_expected_dims([created], expected_dims, created.name)
-            outputs.append(created)
-    return outputs
+            inputs = point_cloud_files(original_with_predictions_dir)
+            for output_format in output_formats:
+                output_file = publication.path(prod_merged_output_path(output_dir, "full", output_format))
+                print(f"  Creating {output_file.name} at full resolution from {len(inputs)} file(s) in record order"
+                      + (f" with {'OriginalPointIndex'}" if original_point_index else ""))
+                create_full_resolution_product(inputs, output_file, output_format,
+                                               original_point_index=original_point_index)
+                _finalize_product(output_file, output_format, inputs, inputs[0])
+                if output_format in {"laz", "copc.laz"}:
+                    _validate_expected_dims([output_file], expected_dims, output_file.name)
+        selections = [(label, resolution) for label, resolution in selections if label != "full"]
+        if not selections:
+            publication.commit()
+            return destinations
+        print("  Preparing COPC inputs with SmartTile untwine/PDAL fallback conversion")
+        copc_input_files = prepare_copc_inputs(
+            original_with_predictions_dir,
+            output_dir,
+            staged_copc_dir=staged_copc_dir,
+        )
+        _validate_expected_dims(copc_input_files, expected_dims, "staged Original-with-predictions COPCs")
+        for label, resolution in selections:
+            selected_outputs = [
+                (publication.path(prod_merged_output_path(output_dir, label, output_format)), output_format)
+                for output_format in output_formats
+            ]
+            for output_file, output_format in selected_outputs:
+                warning = expensive_prod_merged_warning(label, resolution, output_format)
+                if warning:
+                    print(f"  Warning: {warning}")
+                print(
+                    f"  Creating {output_file.name} at {resolution:g}m "
+                    f"with nearest-to-centroid"
+                )
+
+            # Always chunked: the chunk size, not the worker count, bounds memory.
+            created_outputs = create_chunked_prod_merged_files_for_resolution(
+                copc_input_files,
+                selected_outputs,
+                resolution,
+                num_spatial_chunks or 1,
+                chunk_workers=chunk_workers,
+            )
+
+            for created, output_format in zip(created_outputs, output_formats):
+                if parse_merged_output_formats(output_format)[0] in {"laz", "copc.laz"}:
+                    _validate_expected_dims([created], expected_dims, created.name)
+        publication.commit()
+        return destinations

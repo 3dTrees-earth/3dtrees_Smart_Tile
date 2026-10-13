@@ -38,16 +38,72 @@ from pathlib import Path
 import shutil
 import tempfile
 import time
+from urllib.parse import quote
 
 import laspy
 import numpy as np
 
 from tile_centroids import (CHUNK_POINTS, Tile, _block_key, _init_worker, _nearest_to_mean,
                             _write_blocks, block_cells, choose_block_size, route, sample_xy)
+from point_cloud_metadata import extra_bytes_metadata_equal, extra_bytes_params_from_dimension_info
+from prediction_collections import assign_prediction_values, promote_collection_extra_dim
 
 WIDE_INSTANCE = 50.0  # metres: wider instances are reported with a warning
 REUSE_GAP = 5.0  # metres between one ID's boxes in two files
 REUSE_LIMIT = (10, 0.05)  # fail above max(10 IDs, 5% of the IDs)
+
+
+def _collection_schema(sources, dimensions, attributes):
+    """Preflight all carried fields and promote compatible ExtraBytes losslessly.
+
+    ExtraBytes are spilled as raw values; their scaling and no-data descriptors
+    must therefore agree across the collection and survive in the output.
+    """
+    names = [*dimensions, *attributes]
+    if len(set(names)) != len(names):
+        raise ValueError("Instance dimensions and carried attributes must be distinct")
+    standard = {d.name: d for d in laspy.PointFormat(0).dimensions}
+    schema, attribute_types, first = {}, {}, None
+    for source in sources:
+        with laspy.open(source) as reader:
+            header = reader.header
+            if first is None:
+                first = header
+            available = set(header.point_format.dimension_names)
+            missing = [name for name in names if name not in available]
+            if missing:
+                raise ValueError(f"{source.name}: missing dimensions {missing}")
+            for name in names:
+                info = header.point_format.dimension_by_name(name)
+                if info.is_standard:
+                    if name in dimensions or name not in standard or info.num_bits > standard[name].num_bits:
+                        raise ValueError(f"{source.name}: {name} cannot be carried by instance tiles (point format 0)")
+                    attribute_types[name] = info.dtype or np.dtype("uint8")
+                    continue
+                if name in standard:
+                    raise ValueError(f"{source.name}: ExtraByte {name} conflicts with a standard output dimension")
+                incoming = extra_bytes_params_from_dimension_info(info, header=header)
+                if name in dimensions:
+                    dtype = np.dtype(incoming.type)
+                    if dtype.subdtype or dtype.kind not in "iu":
+                        raise ValueError(f"{source.name}: instance dimension {name} must contain scalar integer labels")
+                    if ((incoming.scales is not None and np.any(np.asarray(incoming.scales) != 1)) or
+                            (incoming.offsets is not None and np.any(np.asarray(incoming.offsets) != 0))):
+                        raise ValueError(f"{source.name}: scaled instance dimension {name} needs explicit normalization")
+                if name not in schema:
+                    schema[name] = incoming
+                    continue
+                current = schema[name]
+                if not extra_bytes_metadata_equal(current, incoming):
+                    raise ValueError(f"{source.name}: incompatible schema for {name}")
+                left, right = np.dtype(current.type), np.dtype(incoming.type)
+                if left.shape != right.shape or (left.base.kind in "iu") != (right.base.kind in "iu"):
+                    raise ValueError(f"{source.name}: incompatible schema for {name}")
+                promoted = promote_collection_extra_dim(current, info)
+                if left.base.kind in "iu" and np.dtype(promoted.type).base.kind not in "iu":
+                    raise ValueError(f"{source.name}: no lossless integer schema for {name}")
+                schema[name] = promoted
+    return first, schema, [schema[name].type if name in schema else attribute_types[name] for name in attributes]
 
 
 def _reader(source):
@@ -193,7 +249,7 @@ def _record_dtype(dimension_dtypes):
 
 def _spill(task):
     """Second read: route each point of one range to its owner tile, per dimension."""
-    (task_id, source, start, count, dimensions, owners, tiles, attributes, attribute_dtypes,
+    (task_id, source, start, count, dimensions, dimension_dirs, owners, tiles, attributes, attribute_dtypes,
      resolutions, cells, spill_dir) = task
     full_mask = np.uint8((1 << len(resolutions)) - 1)
     cores = [tile.core for tile in tiles]
@@ -226,7 +282,8 @@ def _spill(task):
                     records["XYZ"[axis]] = encoded.astype(np.int32)
                 records["instance"] = ids[rows]
                 for i, attribute in enumerate(attributes):
-                    records[f"a{i}"] = np.asarray(chunk[attribute])[rows]
+                    values = chunk.array[attribute] if attribute in chunk.array.dtype.names else chunk[attribute]
+                    records[f"a{i}"] = np.asarray(values)[rows]
                 records["m"] = full_mask
                 coords = np.stack([records[a] * tile.scales[i] + tile.offsets[i]
                                    for i, a in enumerate(("X", "Y", "Z"))], axis=1)
@@ -234,7 +291,7 @@ def _spill(task):
                 source_rows, blocks, bits = route(coords, records["m"], resolutions, cells)
                 routed = records[source_rows]
                 routed["m"] = bits
-                _write_blocks(Path(spill_dir) / d / tile.label, name, routed, blocks)
+                _write_blocks(Path(spill_dir) / dimension_dirs[d] / tile.label, name, routed, blocks)
                 counts[d][int(index)] += len(rows)
     return counts
 
@@ -265,16 +322,16 @@ def _reduce(task):
                                                 scales=np.asarray(scales), offsets=np.asarray(offsets))
         for axis in ("X", "Y", "Z"):
             out.array[axis] = chosen[axis]
-        out[instance_field] = chosen["instance"]
+        assign_prediction_values(out, instance_field, chosen["instance"], raw=True)
         for i, attribute in enumerate(attributes):
-            out[attribute] = chosen[f"a{i}"]
+            assign_prediction_values(out, attribute, chosen[f"a{i}"], raw=attribute in out.array.dtype.names)
         out.array.tofile(fragment)
         results.append((len(chosen), len(records)))
     shutil.rmtree(block)
     return results
 
 
-def _output_header(source_header, dimension, dimension_type, attributes, scales, offsets):
+def _output_header(source_header, dimension, schema, attributes, scales, offsets):
     """Point format 0 with the source CRS, plus the instance and requested attributes.
 
     Requested standard dimensions of format 0 (intensity, classification, ...)
@@ -286,21 +343,18 @@ def _output_header(source_header, dimension, dimension_type, attributes, scales,
     base = _make_tile_header(source_header, offsets=np.asarray(offsets), scales=np.asarray(scales))
     header = make_center_of_mass_header(base, dimension_reduction=True)
     standard = set(header.point_format.dimension_names)
-    extra = [laspy.ExtraBytesParams(name=dimension, type=dimension_type)]
+    extra = [schema[dimension]]
     for attribute in attributes:
         if attribute in standard:
             continue
-        if attribute in set(source_header.point_format.standard_dimension_names):
-            raise ValueError(f"{attribute} is not carried by instance tiles (point format 0); "
-                             "use format 0 dimensions or ExtraBytes")
-        extra.append(laspy.ExtraBytesParams(name=attribute, type=source_header.point_format.dimension_by_name(attribute).dtype))
+        extra.append(schema[attribute])
     header.add_extra_dims(extra)
     return header
 
 
 def output_directory(output_dir, dimension, resolution):
     from main_subsample import resolution_label
-    return Path(output_dir) / f"instance_tiles_{dimension}_{resolution_label(resolution)}"
+    return Path(output_dir) / f"instance_tiles_{quote(dimension, safe='')}_{resolution_label(resolution)}"
 
 
 def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions, attributes=(),
@@ -312,6 +366,7 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
     "outputs": {resolution: {"directory", "tiles", "points"}}}}.
     """
     from point_cloud_metadata import write_retained_evlrs
+    from output_publication import publish_files, validate_output_paths
 
     resolutions = tuple(float(r) for r in resolutions)
     if not resolutions or any(not math.isfinite(r) or r <= 0 for r in resolutions):
@@ -321,22 +376,16 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
     if not dimensions:
         raise ValueError("Instance tiles need at least one instance dimension")
     sources = [Path(s) for s in sources]
-    with laspy.open(sources[0]) as reader:
-        header = reader.header
-    attribute_dtypes = []
-    for source in sources:
-        with laspy.open(source) as reader:
-            names = set(reader.header.point_format.dimension_names)
-            missing = [d for d in (*dimensions, *attributes) if d not in names]
-            if missing:
-                raise ValueError(f"{source.name}: missing dimensions {missing}")
-    for attribute in attributes:
-        attribute_dtypes.append(header.point_format.dimension_by_name(attribute).dtype)
+    if not sources:
+        raise ValueError("Instance tiles need at least one input file")
+    header, schema, attribute_dtypes = _collection_schema(sources, dimensions, attributes)
+    dimension_dirs = {d: f"dimension_{i:03d}" for i, d in enumerate(dimensions)}
+    validate_output_paths(sources, [output_directory(output_dir, d, r) for d in dimensions for r in resolutions])
     workers = max(1, int(workers))
     tasks, counts = _ranges(sources, workers)
     started = time.monotonic()
     context = multiprocessing.get_context("spawn")
-    results = {}
+    results, products = {}, []
     with tempfile.TemporaryDirectory(prefix=".instance-tiles-", dir=output_dir) as scratch, \
             ProcessPoolExecutor(max_workers=workers, mp_context=context, initializer=_init_worker) as pool:
         scratch = Path(scratch)
@@ -361,7 +410,7 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
         block = choose_block_size(total, area, resolutions, sample_xy(sources))
         cells = block_cells(resolutions, block)
         spill_dir = scratch / "blocks"
-        spill_tasks = [(i, s, a, n, tuple(dimensions), owners, tiles, tuple(attributes), attribute_dtypes,
+        spill_tasks = [(i, s, a, n, tuple(dimensions), dimension_dirs, owners, tiles, tuple(attributes), attribute_dtypes,
                         resolutions, cells, str(spill_dir)) for i, (s, a, n) in enumerate(tasks)]
         tile_points = {d: np.zeros(len(tiles), dtype=np.int64) for d in dimensions}
         for result in pool.map(_spill, spill_tasks):
@@ -371,15 +420,14 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
         for d in dimensions:
             if int(tile_points[d].sum()) != total:
                 raise ValueError(f"{d}: routed {int(tile_points[d].sum()):,} of {total:,} points")
-            instance_type = header.point_format.dimension_by_name(d).dtype
-            staged = scratch / "out" / d
+            staged = scratch / "out" / dimension_dirs[d]
             written = {r: [] for r in resolutions}
             points = {r: 0 for r in resolutions}
             for index, tile in enumerate(tiles):
-                tile_dir = spill_dir / d / tile.label
+                tile_dir = spill_dir / dimension_dirs[d] / tile.label
                 if not tile_dir.exists():
                     continue
-                out_header = _output_header(header, d, instance_type, attributes, tile.scales, tile.offsets)
+                out_header = _output_header(header, d, schema, attributes, tile.scales, tile.offsets)
                 out_dtype = out_header.point_format.dtype()
                 fragments = [staged / tile.label / str(slot) for slot in range(len(resolutions))]
                 for folder in fragments:
@@ -411,11 +459,11 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
             results[d]["outputs"] = {}
             for resolution in resolutions:
                 directory = output_directory(output_dir, d, resolution)
-                directory.mkdir(parents=True, exist_ok=True)
                 for target, label in written[resolution]:
-                    target.replace(directory / f"{label}.laz")
+                    products.append((target, directory / f"{label}.laz"))
                 results[d]["outputs"][resolution] = {"directory": directory, "tiles": len(written[resolution]),
                                                      "points": points[resolution]}
+        publish_files(products, inputs=sources)
     print(f"  Instance tiles {list(dimensions)} at {list(resolutions)} m: {total:,} points read twice in "
           f"{spilled - started:.1f} s; written in {time.monotonic() - spilled:.1f} s")
     return results

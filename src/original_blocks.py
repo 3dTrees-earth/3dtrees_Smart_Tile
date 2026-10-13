@@ -80,23 +80,25 @@ def _spill(task):
                     handle.write(records[order[first:end]].tobytes())
 
 
-def spill_original(path, origin, directory, workers, labels=(), label_dir=None):
+def spill_original(path, origin, directory, workers, *, label_paths=None):
     """Write every point of `path` to its XY block under `directory`; return the block edge.
 
-    ``labels`` names dimensions of the original whose values are also stored,
-    by point index, as ``label_dir/<name>.npy`` (read with ``np.load(..., mmap_mode="r")``).
+    ``label_paths`` maps original dimension names to caller-allocated scratch
+    files, storing their values by point index. Attribute names are data, never
+    filesystem paths.
     """
+    label_paths = label_paths or {}
     with laspy.open(path) as reader:
         header = reader.header
         count = int(header.point_count)
         extent = (header.x_min, header.x_max, header.y_min, header.y_max)
-        label_types = {name: header.point_format.dimension_by_name(name).dtype for name in labels}
+        label_types = {name: header.point_format.dimension_by_name(name).dtype for name in label_paths}
     if count >= 2**32:
         raise ValueError(f"{path}: more than 2^32 points per original are not supported")
     size = block_size(count, extent)
     stores = {}
     for name, dtype in label_types.items():
-        stores[name] = str(Path(label_dir) / f"{name}.npy")
+        stores[name] = str(label_paths[name])
         np.lib.format.open_memmap(stores[name], mode="w+", dtype=dtype, shape=(count,)).flush()
     if not count:
         return size

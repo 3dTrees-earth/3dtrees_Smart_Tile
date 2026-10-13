@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from attribute_join import join_attribute_collections  # noqa: E402
+from attribute_join import join_attribute_collections, join_file  # noqa: E402
 from parameters import Parameters  # noqa: E402
 import run  # noqa: E402
 
@@ -79,3 +79,42 @@ def test_create_merged_file_joins_collections_into_one_full_product(tmp_path):
     total = sum(len(xyz) for xyz in clouds.values())
     assert np.array_equal(merged.OriginalPointIndex, np.arange(total))
     assert not list((tmp_path / "out").glob(".joined-originals-*"))
+
+
+def metadata_version(path, *, name="confidence", **overrides):
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    options = dict(name=name, type="3i2", no_data=[-32768] * 3,
+                   scales=[0.1, 0.2, 0.3], offsets=[1.0, 2.0, 3.0])
+    options.update(overrides)
+    header.add_extra_dim(laspy.ExtraBytesParams(**options))
+    cloud = laspy.LasData(header)
+    cloud.x, cloud.y, cloud.z = [1, 2], [3, 4], [5, 6]
+    cloud.points.array[name] = [[3, 4, 5], [-32768, -32768, -32768]]
+    cloud.write(path)
+    return laspy.read(path)
+
+
+def test_join_preserves_metadata_from_each_collection(tmp_path):
+    first, second = tmp_path / "first.las", tmp_path / "second.las"
+    sources = [metadata_version(first, name="sat_confidence"), metadata_version(second, name="fm_confidence")]
+    output = tmp_path / "joined.laz"
+    join_file([first, second], output)
+    result = laspy.read(output)
+    descriptors = {entry.format_name(): entry for vlr in result.header.vlrs
+                   for entry in getattr(vlr, "extra_bytes_structs", ())}
+    for name, source in zip(("sat_confidence", "fm_confidence"), sources):
+        assert descriptors[name].no_data.tolist() == [-32768] * 3
+        assert list(descriptors[name].scale) == [0.1, 0.2, 0.3]
+        assert list(descriptors[name].offset) == [1.0, 2.0, 3.0]
+        assert np.array_equal(result.points.array[name], source.points.array[name])
+
+
+@pytest.mark.parametrize("change", [{"no_data": [-32767] * 3}, {"scales": [0.2] * 3}, {"offsets": [0.0] * 3}])
+def test_join_rejects_incompatible_definitions_of_shared_attributes(tmp_path, change):
+    first, second = tmp_path / "first.las", tmp_path / "second.las"
+    metadata_version(first)
+    metadata_version(second, **change)
+    output = tmp_path / "joined.laz"
+    with pytest.raises(ValueError, match="confidence.*schema"):
+        join_file([first, second], output)
+    assert not output.exists()

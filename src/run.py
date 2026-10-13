@@ -209,6 +209,38 @@ TILE_CONVERTERS = 2
 
 
 def run_tile_task(params: Parameters):
+    """Publish the complete tile job, including its layout, only after success."""
+    import json
+    from output_publication import DirectoryTransaction
+
+    if not params.input_dir or not params.output_dir:
+        print("Error: --input-dir and --output-dir are required for tile task")
+        sys.exit(1)
+    input_dir, output_dir = Path(params.input_dir), Path(params.output_dir)
+    if not input_dir.is_dir():
+        print(f"Error: Input directory does not exist: {input_dir}")
+        sys.exit(1)
+    try:
+        with DirectoryTransaction(output_dir, inputs=[input_dir]) as transaction:
+            _write_tile_task(params.model_copy(update={"output_dir": transaction.path}))
+            # The GeoPackage stores source paths, but the layout points at the
+            # job's own tindex. Record its published location, not scratch.
+            bounds = transaction.path / "tile_bounds_tindex.json"
+            if bounds.exists():
+                layout = json.loads(bounds.read_text())
+                if "tindex" in layout:
+                    relative = Path(layout["tindex"]).relative_to(transaction.path)
+                    layout["tindex"] = str(output_dir.resolve() / relative)
+                    bounds.write_text(json.dumps(layout, indent=2) + "\n")
+            transaction.commit()
+    except Exception as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+    print(f"Tile task complete: {output_dir}")
+    return input_dir
+
+
+def _write_tile_task(params: Parameters):
     """
     Run the tile task: index, tile layout, and one subsampled output per --tile-outputs entry.
 
@@ -218,21 +250,8 @@ def run_tile_task(params: Parameters):
     """
     from subsample_methods import SUBSAMPLING_METHOD_CENTER_OF_MASS, normalize_subsampling_method
 
-    # Required arguments
-    if not params.input_dir:
-        print("Error: --input-dir is required for tile task")
-        sys.exit(1)
-    if not params.output_dir:
-        print("Error: --output-dir is required for tile task")
-        sys.exit(1)
-
-    # Validate input directory
     input_dir = Path(params.input_dir)
     output_dir = Path(params.output_dir)
-
-    if not input_dir.exists():
-        print(f"Error: Input directory does not exist: {input_dir}")
-        sys.exit(1)
 
     # Get parameters from Pydantic model
     tile_length = params.tile_length
@@ -308,7 +327,7 @@ def run_tile_task(params: Parameters):
 
         print()
         print("=" * 60)
-        print("Tile Task Complete")
+        print("Tile Outputs Prepared")
         print("=" * 60)
         for (resolution, output_format), directory in zip(tile_outputs, output_dirs):
             print(f"Subsampled {resolution} m ({output_format}): {directory}")

@@ -237,3 +237,72 @@ def test_several_resolutions_share_the_reads_and_keep_instances_whole(tmp_path, 
     # Tree 7 is about 7 m wide: above the 5 m warning limit, reported, not rejected.
     assert result["PredInstance_SAT"]["wide_instances"] == 1
     assert "wider than 5 m" in capsys.readouterr().out
+
+
+def write_schema_source(path, instance_type, instance, score_type=np.uint16, score=1111,
+                        score_scale=0.001, score_no_data=65535, dimension="PredInstance_SAT"):
+    header = laspy.LasHeader(point_format=0, version="1.4")
+    header.scales, header.offsets = np.full(3, 0.001), np.zeros(3)
+    header.add_extra_dim(laspy.ExtraBytesParams(name=dimension, type=instance_type, description="Tree identity"))
+    header.add_extra_dim(laspy.ExtraBytesParams(name="score", type=score_type, description="Calibrated score",
+                                              scales=[score_scale], offsets=[-1], no_data=[score_no_data]))
+    cloud = laspy.LasData(header)
+    cloud.x, cloud.y, cloud.z = [1.0 if instance < 65536 else 2.0], [1.0], [1.0]
+    cloud[dimension] = [instance]
+    cloud.points.array["score"] = score
+    cloud.write(path)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_collection_schema_preserves_large_ids_and_scaled_attributes_in_either_source_order(tmp_path, reverse):
+    from point_cloud_metadata import extra_bytes_params_from_dimension_info
+
+    a, b = tmp_path / "a.las", tmp_path / "b.las"
+    write_schema_source(a, np.uint16, 65535)
+    write_schema_source(b, np.uint32, 70000, score_type=np.uint32, score=70000)
+    out = tmp_path / "out"
+    out.mkdir()
+    write_instance_tiles([b, a] if reverse else [a, b], tiles()[:1], ["PredInstance_SAT"], out,
+                         resolutions=[0.01], attributes=["score"], workers=1)
+    cloud = read(out / "instance_tiles_PredInstance_SAT_1cm")["c00_r00"]
+    order = np.argsort(cloud.x)
+    np.testing.assert_array_equal(cloud.PredInstance_SAT[order], [65535, 70000])
+    assert cloud.PredInstance_SAT.dtype == np.uint32
+    np.testing.assert_array_equal(cloud.points.array["score"][order], [1111, 70000])
+    np.testing.assert_allclose(np.asarray(cloud.score)[order], [0.111, 69.0])
+    info = cloud.point_format.dimension_by_name("score")
+    params = extra_bytes_params_from_dimension_info(info, header=cloud.header)
+    assert params.type == np.dtype("uint32")
+    np.testing.assert_array_equal(params.scales, [0.001])
+    np.testing.assert_array_equal(params.offsets, [-1])
+    np.testing.assert_array_equal(params.no_data, [65535])
+    assert params.description == "Calibrated score"
+
+
+@pytest.mark.parametrize("different", [dict(score_scale=0.01), dict(score_no_data=65534),
+                                        dict(score_type=np.float32)])
+def test_incompatible_carried_attribute_schema_fails_before_publishing(tmp_path, different):
+    a, b = tmp_path / "a.las", tmp_path / "b.las"
+    write_schema_source(a, np.uint16, 1)
+    write_schema_source(b, np.uint32, 70000, **different)
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(ValueError, match="incompatible schema for score"):
+        write_instance_tiles([a, b], tiles()[:1], ["PredInstance_SAT"], out,
+                             resolutions=[0.01], attributes=["score"], workers=1)
+    assert list(out.iterdir()) == []
+
+
+def test_instance_dimension_names_are_data_not_scratch_paths(tmp_path):
+    dimension = "../../escaped"
+    source = tmp_path / "source.las"
+    write_schema_source(source, np.uint32, 70000, dimension=dimension)
+    out = tmp_path / "out"
+    out.mkdir()
+    result = write_instance_tiles([source], tiles()[:1], [dimension], out, resolutions=[0.01], workers=1)
+    directory = result[dimension]["outputs"][0.01]["directory"]
+    assert directory.parent == out
+    assert directory.name == "instance_tiles_..%2F..%2Fescaped_1cm"
+    cloud = read(directory)["c00_r00"]
+    np.testing.assert_array_equal(cloud[dimension], [70000])
+    assert not (tmp_path / "escaped").exists()

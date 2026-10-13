@@ -329,3 +329,45 @@ def test_tiles_use_the_finest_source_scale(tmp_path):
     # Every fine-source point survives unchanged at a 0.1 mm voxel size.
     got = {tuple(np.round(p, 4)) for p in np.c_[tile.x, tile.y, tile.z]}
     assert {tuple(np.round(p, 4)) for p in np.c_[fine.x, fine.y, fine.z]} <= got
+
+
+def test_tile_publication_failure_rolls_back_every_new_output(tmp_path, monkeypatch):
+    import os
+    import pytest
+    sources, las, tiles = make_inputs(tmp_path)
+    tiles = tiles[:1]
+    a, b = tmp_path / "out/a.laz", tmp_path / "out/b.laz"
+    outputs = [(.05, {tiles[0].label: a}, "laz"), (.5, {tiles[0].label: b}, "laz")]
+    link = os.link
+
+    def fail_second(source, destination):
+        if Path(destination) == b:
+            raise OSError("injected late tile publication failure")
+        return link(source, destination)
+
+    original_bytes = [source.read_bytes() for source in sources]
+    monkeypatch.setattr("output_publication.os.link", fail_second)
+    with pytest.raises(OSError, match="late tile publication"):
+        write_tile_centroids(sources, tiles, las[0].header, outputs, workers=1,
+                             work_dir=tmp_path / "out", metadata_source=sources[0])
+    assert not a.exists() and not b.exists()
+    assert [source.read_bytes() for source in sources] == original_bytes
+    assert not list((tmp_path / "out").glob(".tile-centroids-*"))
+
+
+def test_tile_existing_output_is_preserved_before_work(tmp_path, monkeypatch):
+    import pytest
+    sources, las, tiles = make_inputs(tmp_path)
+    output = tmp_path / "result.laz"
+    output.write_bytes(b"previous result")
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("point processing started before destination preflight")
+
+    monkeypatch.setattr("tile_centroids._range_tasks", unexpected)
+    with pytest.raises(FileExistsError, match="existing output"):
+        write_tile_centroids(sources, tiles[:1], las[0].header,
+                             [(.05, {tiles[0].label: output}, "laz")], workers=1,
+                             work_dir=tmp_path / "work", metadata_source=sources[0])
+    assert output.read_bytes() == b"previous result"
+    assert not (tmp_path / "work").exists()
