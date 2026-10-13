@@ -1,0 +1,811 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-13",
+  "tested_commit": "53ba60ef47b6f12859f016a4ed3a7449b3499b99",
+  "scope": "SmartTile only, with cached real GFZ segmentation/species outputs and isolated synthetic stress cases",
+  "runtime_image": "sha256:b8c79e45dc52a363f8273f83a27b57c9954e8befaa8ea2fe20883bbfff119a52",
+  "network": "none",
+  "source_modified": false,
+  "production_services_used": false,
+  "overall": "not_ready_for_all_requested_routes",
+  "scenarios": [
+    {
+      "id": 1,
+      "flow": "original -> tile -> SAT -> merge -> species -> remap -> visualization",
+      "result": "passed_SmartTile_crop",
+      "points": 553030,
+      "crop_m": [
+        9,
+        9
+      ],
+      "tile_cores": 4,
+      "workers": [
+        1,
+        4
+      ],
+      "all_cli_exit_codes_zero": true,
+      "coverage_fraction": 1.0,
+      "final_instance_count": 5,
+      "source_fields_order_crs_extra_metadata_preserved": true,
+      "worker_records_identical": true,
+      "conflicting_positive_geometry_claims": 0,
+      "wall_seconds": 202.48947173077613,
+      "peak_container_memory_bytes": 2842628096,
+      "limits": {
+        "cpus": 4,
+        "memory_gib": 20
+      },
+      "commands": [
+        {
+          "stage": "w1-tile",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/src-current/src/run.py",
+            "--task",
+            "tile",
+            "--input-dir",
+            "/work/fixtures/raw",
+            "--output-dir",
+            "/work/workers1/tile",
+            "--tile-length",
+            "60",
+            "--tile-buffer",
+            "20",
+            "--grid-origin-x",
+            "398663.428",
+            "--grid-origin-y",
+            "5646147.674",
+            "--tile-outputs",
+            "0.01:laz,0.1:laz",
+            "--subsampling-method",
+            "nearest-to-centroid",
+            "--workers",
+            "1"
+          ],
+          "exit_code": 0,
+          "wall_seconds": 18.87787867919542,
+          "log": "/work/logs/w1-tile.log"
+        },
+        {
+          "stage": "w1-merge",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/src-current/src/run.py",
+            "--task",
+            "merge",
+            "--subsampled-segmented-folder",
+            "/work/fixtures/sat",
+            "--subsampled-target-folder",
+            "/work/workers1/tile/subsampled_res1",
+            "--tile-bounds-json",
+            "/work/workers1/tile/tile_bounds_tindex.json",
+            "--output-dir",
+            "/work/workers1/merge",
+            "--original-laz-input-dir",
+            "/work/fixtures/raw",
+            "--original-laz-output-dir",
+            "/work/workers1/merge/original_with_predictions",
+            "--instance-dimension",
+            "PredInstance_SAT",
+            "--resolution-1",
+            ".01",
+            "--prediction-transfer-tolerance",
+            ".1732",
+            "--skip-merged-file",
+            "--no-transfer-original-dims-to-merged",
+            "--workers",
+            "1"
+          ],
+          "exit_code": 0,
+          "wall_seconds": 59.07984732789919,
+          "log": "/work/logs/w1-merge.log"
+        },
+        {
+          "stage": "w1-remap",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/src-current/src/run.py",
+            "--task",
+            "remap",
+            "--segmented-folders",
+            "/work/workers1/species",
+            "--original-laz-input-dir",
+            "/work/fixtures/raw",
+            "--original-laz-output-dir",
+            "/work/workers1/remap",
+            "--instance-dimension",
+            "PredInstance_SAT",
+            "--resolution-1",
+            ".01",
+            "--no-transfer-original-dims-to-merged",
+            "--workers",
+            "1"
+          ],
+          "exit_code": 0,
+          "wall_seconds": 12.980411653174087,
+          "log": "/work/logs/w1-remap.log"
+        },
+        {
+          "stage": "w4-tile",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/src-current/src/run.py",
+            "--task",
+            "tile",
+            "--input-dir",
+            "/work/fixtures/raw",
+            "--output-dir",
+            "/work/workers4/tile",
+            "--tile-length",
+            "60",
+            "--tile-buffer",
+            "20",
+            "--grid-origin-x",
+            "398663.428",
+            "--grid-origin-y",
+            "5646147.674",
+            "--tile-outputs",
+            "0.01:laz,0.1:laz",
+            "--subsampling-method",
+            "nearest-to-centroid",
+            "--workers",
+            "4"
+          ],
+          "exit_code": 0,
+          "wall_seconds": 19.02819460304454,
+          "log": "/work/logs/w4-tile.log"
+        },
+        {
+          "stage": "w4-merge",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/src-current/src/run.py",
+            "--task",
+            "merge",
+            "--subsampled-segmented-folder",
+            "/work/fixtures/sat",
+            "--subsampled-target-folder",
+            "/work/workers4/tile/subsampled_res1",
+            "--tile-bounds-json",
+            "/work/workers4/tile/tile_bounds_tindex.json",
+            "--output-dir",
+            "/work/workers4/merge",
+            "--original-laz-input-dir",
+            "/work/fixtures/raw",
+            "--original-laz-output-dir",
+            "/work/workers4/merge/original_with_predictions",
+            "--instance-dimension",
+            "PredInstance_SAT",
+            "--resolution-1",
+            ".01",
+            "--prediction-transfer-tolerance",
+            ".1732",
+            "--skip-merged-file",
+            "--no-transfer-original-dims-to-merged",
+            "--workers",
+            "4"
+          ],
+          "exit_code": 0,
+          "wall_seconds": 59.381639434956014,
+          "log": "/work/logs/w4-merge.log"
+        },
+        {
+          "stage": "w4-remap",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/src-current/src/run.py",
+            "--task",
+            "remap",
+            "--segmented-folders",
+            "/work/workers4/species",
+            "--original-laz-input-dir",
+            "/work/fixtures/raw",
+            "--original-laz-output-dir",
+            "/work/workers4/remap",
+            "--instance-dimension",
+            "PredInstance_SAT",
+            "--resolution-1",
+            ".01",
+            "--no-transfer-original-dims-to-merged",
+            "--workers",
+            "4"
+          ],
+          "exit_code": 0,
+          "wall_seconds": 10.151658597169444,
+          "log": "/work/logs/w4-remap.log"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "flow": "original_with_predictions -> tile + filter -> species -> remap -> visualization",
+      "result": "instance_route_passed_conventional_route_unsupported",
+      "points": 867599,
+      "models": [
+        "SAT",
+        "FM"
+      ],
+      "resolutions_m": [
+        0.01,
+        0.1
+      ],
+      "conventional_failure": "Ordinary tile drops instance dimensions; filter exits 1: expected one model instance dimension, got []",
+      "supported_route": "instance tiles -> cached species replay -> same-instance remap",
+      "coverage_fraction": 1.0,
+      "independent_species_mismatches": 0,
+      "unchanged_source_ids_and_fields": true,
+      "metadata_checked_against_untouched_source": true,
+      "positive_instances": {
+        "SAT": 12,
+        "FM": 17
+      },
+      "wall_seconds": 84.8615739280358,
+      "limits": {
+        "cpus": 4,
+        "memory_gib": 20,
+        "network": "none"
+      },
+      "commands": [
+        {
+          "name": "conventional_tile",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/src/run.py",
+            "--task",
+            "tile",
+            "--input-dir",
+            "/work/originals_without_sat_fm_species",
+            "--tile-length",
+            "10",
+            "--tile-buffer",
+            "2",
+            "--grid-origin-x",
+            "398700",
+            "--grid-origin-y",
+            "5646170",
+            "--output-dir",
+            "/work/conventional_tiles",
+            "--tile-outputs",
+            "0.01:laz",
+            "--subsampling-method",
+            "nearest-to-centroid",
+            "--workers",
+            "4"
+          ],
+          "returncode": 0,
+          "seconds": 18.005129914032295,
+          "log": "conventional_tile.log"
+        },
+        {
+          "name": "conventional_filter",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/src/run.py",
+            "--task",
+            "filter",
+            "--input-dir",
+            "/work/conventional_tiles/subsampled_res1",
+            "--output-dir",
+            "/work/conventional_filter",
+            "--tile-bounds-json",
+            "/work/conventional_tiles/tile_bounds_tindex.json",
+            "--instance-dimension",
+            "PredInstance_SAT",
+            "--workers",
+            "4"
+          ],
+          "returncode": 1,
+          "seconds": 0.40910110296681523,
+          "log": "conventional_filter.log"
+        },
+        {
+          "name": "instance_tile",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/src/run.py",
+            "--task",
+            "tile",
+            "--input-dir",
+            "/work/originals_without_sat_fm_species",
+            "--tile-length",
+            "10",
+            "--tile-buffer",
+            "2",
+            "--grid-origin-x",
+            "398700",
+            "--grid-origin-y",
+            "5646170",
+            "--output-dir",
+            "/work/instance_tiles",
+            "--instance-tiles",
+            "PredInstance_SAT,PredInstance_FM",
+            "--instance-resolutions",
+            "0.01,0.1",
+            "--instance-tile-dims",
+            "intensity,Amplitude,Reflectance,Deviation",
+            "--workers",
+            "4"
+          ],
+          "returncode": 0,
+          "seconds": 20.596346171107143,
+          "log": "instance_tile.log"
+        },
+        {
+          "name": "remap_1cm",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/src/run.py",
+            "--task",
+            "remap",
+            "--segmented-folders",
+            "/work/species_replay_SAT_1cm,/work/species_replay_FM_1cm",
+            "--original-laz-input-dir",
+            "/work/originals_without_sat_fm_species",
+            "--original-laz-output-dir",
+            "/work/remapped_1cm",
+            "--match-instances",
+            "--resolution-1",
+            "0.01",
+            "--remap-dims",
+            "species_id_SAT,species_prob_SAT,species_id_FM,species_prob_FM",
+            "--workers",
+            "4"
+          ],
+          "returncode": 0,
+          "seconds": 14.607615641085431,
+          "log": "remap_1cm.log"
+        },
+        {
+          "name": "remap_10cm",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/src/run.py",
+            "--task",
+            "remap",
+            "--segmented-folders",
+            "/work/species_replay_SAT_10cm,/work/species_replay_FM_10cm",
+            "--original-laz-input-dir",
+            "/work/originals_without_sat_fm_species",
+            "--original-laz-output-dir",
+            "/work/remapped_10cm",
+            "--match-instances",
+            "--resolution-1",
+            "0.1",
+            "--remap-dims",
+            "species_id_SAT,species_prob_SAT,species_id_FM,species_prob_FM",
+            "--workers",
+            "4"
+          ],
+          "returncode": 0,
+          "seconds": 6.7238055660855025,
+          "log": "remap_10cm.log"
+        }
+      ],
+      "fixture": {
+        "directory": "/fixture",
+        "files": [
+          "398700_5646160.laz",
+          "398720_5646160.laz"
+        ],
+        "provenance": "Real GFZ original-with-predictions from 2026-09-24; real model instance IDs and real historical species annotations. Four SAT/FM species fields are removed from copies of the originals and replayed onto exact selected source points after tiling. No synthetic annotation values.",
+        "limitation": "Two adjacent geographic files are a crop. Whole-instance ownership is verified for every source point in this crop; omitted northern files may contain more points of these same trees.",
+        "sha256_before": {
+          "398700_5646160.laz": "3cd61d322aee0d2267648cf1085bf10509168cfd11358fe72732664233b21262",
+          "398720_5646160.laz": "23d528396fc71dae7f99ab2247e0d55dc753afaf4a3413cf00a2ae851587824e"
+        },
+        "point_counts": {
+          "398700_5646160.laz": 213148,
+          "398720_5646160.laz": 654451
+        },
+        "total_points": 867599
+      },
+      "supersedes": "Initial species-removal fixture lost no_data; corrected fixture and complete rerun are used here."
+    },
+    {
+      "id": 3,
+      "flow": "multiple segmentations -> merge + source-order index -> ForestStructure",
+      "result": "partial_export_metadata_and_full_PLY_failures",
+      "points": 867599,
+      "model_views": [
+        "SAT",
+        "FM",
+        "RCT"
+      ],
+      "full_LAZ": "passed all source fields, physical record order, uint64 first ExtraByte OriginalPointIndex 0..N-1, CRS and missing-value metadata",
+      "full_COPC": "all interpreted fields, CRS, point count and complete uint64 order index pass; missing-value declarations fail",
+      "full_PLY": "fails at default uint64 OriginalPointIndex: PDAL writers.ply cannot write uint64_t",
+      "subsampled_10cm": {
+        "points": 139401,
+        "LAZ_COPC_PLY_geometry_and_prediction_values_equal": true,
+        "all_36_source_fields_membership": true,
+        "one_point_per_output_voxel": true,
+        "LAZ_COPC_missing_value_metadata": "failed"
+      },
+      "lost_no_data": {
+        "Amplitude": [
+          0
+        ],
+        "Reflectance": [
+          0
+        ],
+        "Deviation": [
+          -1
+        ]
+      },
+      "source_sentinel_occurrences": {
+        "Amplitude": 0,
+        "Reflectance": 0,
+        "Deviation": 0
+      },
+      "scale_representation": "Amplitude/Reflectance scale materialized into float64 without changing interpreted values",
+      "worker_comparison": {
+        "workers": [
+          1,
+          2
+        ],
+        "chunk_counts": [
+          1,
+          2
+        ],
+        "same_all_field_multiset": true,
+        "same_physical_record_order": false,
+        "order_difference_classified_as_bug": false
+      },
+      "failed_export_rollback": "no partial products; input SHA-256s unchanged",
+      "wall_seconds_supported_format_run": 62.46427401993424,
+      "limits": {
+        "cpus": 2,
+        "memory_gib": 8
+      },
+      "commands": [
+        {
+          "name": "all_models",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/tool/src/run.py",
+            "--task",
+            "create_merged_file",
+            "--original-with-predictions-dir",
+            "/work/input_all",
+            "--output-dir",
+            "/work/all_models",
+            "--merged-resolutions",
+            "full,10cm",
+            "--merged-output-formats",
+            "laz,copc.laz,ply",
+            "--workers",
+            "2"
+          ],
+          "returncode": 1,
+          "seconds": 7.483472805004567
+        },
+        {
+          "name": "joined_models",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/tool/src/run.py",
+            "--task",
+            "create_merged_file",
+            "--original-with-predictions-dir",
+            "/work/view_SAT,/work/view_FM,/work/view_RCT",
+            "--output-dir",
+            "/work/joined_models",
+            "--merged-resolutions",
+            "full,10cm",
+            "--merged-output-formats",
+            "laz,copc.laz,ply",
+            "--workers",
+            "2"
+          ],
+          "returncode": 1,
+          "seconds": 9.686437333934009
+        },
+        {
+          "name": "repeat_one_worker",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/tool/src/run.py",
+            "--task",
+            "create_merged_file",
+            "--original-with-predictions-dir",
+            "/work/input_all",
+            "--output-dir",
+            "/work/repeat_one_worker",
+            "--merged-resolutions",
+            "10cm",
+            "--merged-output-formats",
+            "laz",
+            "--workers",
+            "1"
+          ],
+          "returncode": 0,
+          "seconds": 8.331607380881906
+        },
+        {
+          "name": "all_models_las",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/tool/src/run.py",
+            "--task",
+            "create_merged_file",
+            "--original-with-predictions-dir",
+            "/work/input_all",
+            "--output-dir",
+            "/work/all_models_las",
+            "--merged-resolutions",
+            "full,10cm",
+            "--merged-output-formats",
+            "laz,copc.laz",
+            "--workers",
+            "2"
+          ],
+          "returncode": 0,
+          "seconds": 14.66937282611616
+        },
+        {
+          "name": "all_models_las_subsampled_ply",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/tool/src/run.py",
+            "--task",
+            "create_merged_file",
+            "--original-with-predictions-dir",
+            "/work/input_all",
+            "--output-dir",
+            "/work/all_models_las_subsampled_ply",
+            "--merged-resolutions",
+            "10cm",
+            "--merged-output-formats",
+            "ply",
+            "--workers",
+            "2"
+          ],
+          "returncode": 0,
+          "seconds": 8.43132330593653
+        },
+        {
+          "name": "joined_models_las",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/tool/src/run.py",
+            "--task",
+            "create_merged_file",
+            "--original-with-predictions-dir",
+            "/work/view_preserved_SAT,/work/view_preserved_FM,/work/view_preserved_RCT",
+            "--output-dir",
+            "/work/joined_models_las",
+            "--merged-resolutions",
+            "full,10cm",
+            "--merged-output-formats",
+            "laz,copc.laz",
+            "--workers",
+            "2"
+          ],
+          "returncode": 0,
+          "seconds": 17.71835508197546
+        },
+        {
+          "name": "joined_models_las_subsampled_ply",
+          "argv": [
+            "/opt/smarttile/bin/python",
+            "/tool/src/run.py",
+            "--task",
+            "create_merged_file",
+            "--original-with-predictions-dir",
+            "/work/view_preserved_SAT,/work/view_preserved_FM,/work/view_preserved_RCT",
+            "--output-dir",
+            "/work/joined_models_las_subsampled_ply",
+            "--merged-resolutions",
+            "10cm",
+            "--merged-output-formats",
+            "ply",
+            "--workers",
+            "2"
+          ],
+          "returncode": 0,
+          "seconds": 10.38899646513164
+        }
+      ],
+      "inputs": [
+        {
+          "name": "398700_5646160.laz",
+          "point_count": 213148,
+          "sha256": "3cd61d322aee0d2267648cf1085bf10509168cfd11358fe72732664233b21262"
+        },
+        {
+          "name": "398720_5646160.laz",
+          "point_count": 654451,
+          "sha256": "23d528396fc71dae7f99ab2247e0d55dc753afaf4a3413cf00a2ae851587824e"
+        }
+      ]
+    }
+  ],
+  "stress": {
+    "same_instance_numerical_tie_reproduced": true,
+    "two_point_species_by_batches": {
+      "one_batch": 10,
+      "two_batches": 20
+    },
+    "three_point_species_by_batches": {
+      "one_batch": 20,
+      "three_batches": 30
+    },
+    "ordinary_and_exact_tie_controls": "stable",
+    "dense_tiling_limit_is_hard": false,
+    "cases": [
+      {
+        "input_points": 9000000,
+        "maximum_returned_batch": 32768,
+        "every_index_once_pass": true,
+        "mode": "original",
+        "peak_rss_bytes": 208404480,
+        "elapsed_seconds": 2.4615954959299415
+      },
+      {
+        "input_points": 8000000,
+        "configured_block_points": 4000000,
+        "largest_reducer_leaf": 8000000,
+        "represented_points": 8000000,
+        "output_points": 400,
+        "mode": "tile",
+        "peak_rss_bytes": 1995313152,
+        "elapsed_seconds": 4.637215949827805
+      },
+      {
+        "input_points": 4000000,
+        "output_points": 400,
+        "mode": "product",
+        "peak_rss_bytes": 889851904,
+        "elapsed_seconds": 13.077857814962044
+      },
+      {
+        "input_points": 1000000,
+        "configured_block_points": 4000000,
+        "largest_reducer_leaf": 1000000,
+        "represented_points": 1000000,
+        "output_points": 400,
+        "mode": "tile",
+        "peak_rss_bytes": 241803264,
+        "elapsed_seconds": 0.21770840999670327
+      },
+      {
+        "input_points": 1000000,
+        "output_points": 400,
+        "mode": "product",
+        "peak_rss_bytes": 288256000,
+        "elapsed_seconds": 2.770489190937951
+      },
+      {
+        "input_points": 250000,
+        "output_points": 400,
+        "mode": "product",
+        "peak_rss_bytes": 127909888,
+        "elapsed_seconds": 0.6936652660369873
+      },
+      {
+        "input_points": 250000,
+        "configured_block_points": 4000000,
+        "largest_reducer_leaf": 250000,
+        "represented_points": 250000,
+        "output_points": 400,
+        "mode": "tile",
+        "peak_rss_bytes": 109817856,
+        "elapsed_seconds": 0.06961306603625417
+      },
+      {
+        "input_points": 4000000,
+        "configured_block_points": 4000000,
+        "largest_reducer_leaf": 4000000,
+        "represented_points": 4000000,
+        "output_points": 400,
+        "mode": "tile",
+        "peak_rss_bytes": 694964224,
+        "elapsed_seconds": 0.7970011110883206
+      },
+      {
+        "input_points": 4000000,
+        "maximum_returned_batch": 32768,
+        "every_index_once_pass": true,
+        "mode": "original",
+        "peak_rss_bytes": 512290816,
+        "elapsed_seconds": 0.6606286270543933
+      }
+    ],
+    "all_ten_processes_completed_without_OOM_or_timeout": true,
+    "limits": {
+      "cpus": 2,
+      "memory_gib": 8
+    },
+    "local_density_sample": {
+      "dataset": 483,
+      "filename": "3700.laz",
+      "points_sampled": 524288,
+      "largest_0_1m_xy_cell_sample_points": 196608,
+      "method": "16 systematic record-order windows; not a full count or random population estimate"
+    }
+  },
+  "limitations": [
+    "Geographic crops can truncate instances at omitted file boundaries",
+    "Actual cached predictions are reused; inference and downstream applications are outside the requested test scope",
+    "Measured memory peaks do not prove density-independent bounds",
+    "No actual missing-sentinel points occurred in the product fixture"
+  ],
+  "artifacts": {
+    "scenario1/summary.json": {
+      "sha256": "1dec1864377aecd2c555676391cbbd140a68898ace130fc94bbcc1a23fa7d1c4",
+      "bytes": 24201
+    },
+    "scenario1/fixture_provenance.json": {
+      "sha256": "497d7081b793edf18ad28981c46680bb791b04f2293ca08841f9ceaf201f3aa1",
+      "bytes": 9595
+    },
+    "scenario1/metadata_descriptor_validation.json": {
+      "sha256": "f8ab24936550a04b7d2a7f68ff7d3261d8ae3cbda2962fe614009f205e63f0de",
+      "bytes": 4696
+    },
+    "scenario1/commands.json": {
+      "sha256": "d570dc5c9ad1c5a69ac6fdc7b08cfc81856537174be7207564e082eb0b04fb23",
+      "bytes": 4386
+    },
+    "scenario1/runtime.json": {
+      "sha256": "96851048c8b406f4e8c2e0047c5091f3ce0752d6b5762136de72a37aac148782",
+      "bytes": 577
+    },
+    "instance-metadata-preserved/report.json": {
+      "sha256": "39045ab42968f787949af9aeae791d91992e1f64f47829834c15379a04c96430",
+      "bytes": 25361
+    },
+    "instance-metadata-preserved/driver.py": {
+      "sha256": "fc7aae3d3b2ad9e3200742ab4973858dc7a66b8cb2ff6b23113d644a5341f450",
+      "bytes": 13266
+    },
+    "instance-metadata-preserved/run.sh": {
+      "sha256": "d110ebe690f4d7d85e83ba999b0dc95d7606e0431028302e313b8dbb0f28bd31",
+      "bytes": 791
+    },
+    "products/report.json": {
+      "sha256": "362c09b826dda54ff618f4180ef6b66c8fb7399a69fbd526a8a5886cdb41ef5f",
+      "bytes": 8777
+    },
+    "products/report-interpreted.json": {
+      "sha256": "fc118fbb100a60334b49663352dd10e576b09b116b6ec88f387a39f1fb71e4cd",
+      "bytes": 9222
+    },
+    "products/initial-report.json": {
+      "sha256": "b2ddb620fe4a738bd13a734f140b7ebec54cf7dfbf3b3ccab7fa4d4dfc514551",
+      "bytes": 3275
+    },
+    "products/initial-driver.py": {
+      "sha256": "1108999fb244e49abc0e4ee97b0fea75f085fc439aa504d94732fd1f0e5c6938",
+      "bytes": 10821
+    },
+    "products/run_products.py": {
+      "sha256": "618b3826319c01e4a9713bb4fd808a1b3772fec20c0399525f02ecc971f8e162",
+      "bytes": 13692
+    },
+    "products/supplemental.json": {
+      "sha256": "4bb990c070085c0f6088baba035cf4623ada372a63661f5bcee0380abbcf0281",
+      "bytes": 27609
+    },
+    "products/supplemental_analysis.py": {
+      "sha256": "1af1e97ff4df73c67ab52d0e23c6d9302afc761255c1e8988e7ec1101e7059c1",
+      "bytes": 7665
+    },
+    "products/metadata_headers.json": {
+      "sha256": "0f2a20c6000af72d87badbe8de62c819ec0fc25e22a8c4838187c64504366da9",
+      "bytes": 5714
+    },
+    "stress/summary.json": {
+      "sha256": "f62d028c51e856302826b4f2244ca2ebf39fdf99bdffd11ae3fce7f1d35ac3e0",
+      "bytes": 18813
+    },
+    "stress/manifest.json": {
+      "sha256": "0d071fb8e7cb6d47c5628f94f85e4f934000eebea6dbfacc6da2ff5cebda2445",
+      "bytes": 2006
+    },
+    "source-manifest.json": {
+      "sha256": "327c4b9487b72e9875a72445dc0d34a8c009ae943e4567dd3584f88d4a1f1b86",
+      "bytes": 12962
+    }
+  }
+}
