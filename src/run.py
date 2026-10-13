@@ -271,7 +271,10 @@ def _write_tile_task(params: Parameters):
     print(f"Tile length: {tile_length}m")
     print(f"Tile buffer: {tile_buffer}m")
     print(f"Workers: {workers}")
-    print("Subsampling dimensions: minimal (standard dims only)")
+    print("Ordinary tile dimensions: minimal (standard dims only)")
+    if params.instance_tiles:
+        print(f"Instance tile dimensions: XYZ + required instance ({params.instance_tiles}) "
+              f"+ optional attributes ({params.instance_tile_dims or 'none'})")
     print(f"Subsampling method: {subsampling_method}")
     print(f"Tile outputs: {params.tile_outputs or 'from --resolution-1/2 and --output-copc-res1/2'}")
     if tiling_threshold is not None:

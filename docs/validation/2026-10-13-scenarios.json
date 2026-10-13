@@ -219,7 +219,7 @@
     {
       "id": 2,
       "flow": "original_with_predictions -> tile + filter -> species -> remap -> visualization",
-      "result": "instance_route_passed_conventional_route_unsupported",
+      "result": "passed_SmartTile_instance_mode_crop",
       "points": 867599,
       "models": [
         "SAT",
@@ -229,7 +229,7 @@
         0.01,
         0.1
       ],
-      "conventional_failure": "Ordinary tile drops instance dimensions; filter exits 1: expected one model instance dimension, got []",
+      "conventional_failure": "Control without --instance-tiles: ordinary tiles omit instance fields; filter exits 1. This is not a failure of the requested instance-preserving mode.",
       "supported_route": "instance tiles -> cached species replay -> same-instance remap",
       "coverage_fraction": 1.0,
       "independent_species_mismatches": 0,
@@ -399,7 +399,101 @@
         },
         "total_points": 867599
       },
-      "supersedes": "Initial species-removal fixture lost no_data; corrected fixture and complete rerun are used here."
+      "supersedes": "Initial species-removal fixture lost no_data; corrected fixture and complete rerun are used here. The initial classification of unflagged ordinary tiling as a scenario 2 blocker is superseded by the clarified instance-mode contract.",
+      "interpretation": "The existing --instance-tiles flag automatically carries each required instance attribute and assigns each whole instance to one owner tile; no separate buffer-filter task is needed. Consume instance_tiles_<dimension>_<resolution>, not optional ordinary subsampled_res* outputs.",
+      "instance_flag_followup": {
+        "base_commit": "4ac79e6048de2433411e363481017cb8f4f6f2da",
+        "runtime_changes": "CLI help and dimension logging only; tiling and remapping algorithms unchanged",
+        "result": "passed",
+        "point_count": 867599,
+        "limits": {
+          "cpus": 4,
+          "memory_gib": 20,
+          "network": "none"
+        },
+        "commands": [
+          {
+            "name": "automatic_id",
+            "argv": [
+              "/opt/smarttile/bin/python",
+              "/src/run.py",
+              "--task",
+              "tile",
+              "--input-dir",
+              "/work/input",
+              "--output-dir",
+              "/work/automatic_id",
+              "--tile-length",
+              "10",
+              "--tile-buffer",
+              "2",
+              "--grid-origin-x",
+              "398700",
+              "--grid-origin-y",
+              "5646170",
+              "--instance-tiles",
+              "PredInstance_SAT,PredInstance_FM",
+              "--instance-resolutions",
+              "0.01,0.1",
+              "--workers",
+              "4"
+            ],
+            "exit_code": 0,
+            "seconds": 21.85155869787559
+          },
+          {
+            "name": "attributes_and_ordinary",
+            "argv": [
+              "/opt/smarttile/bin/python",
+              "/src/run.py",
+              "--task",
+              "tile",
+              "--input-dir",
+              "/work/input",
+              "--output-dir",
+              "/work/attributes_and_ordinary",
+              "--tile-length",
+              "10",
+              "--tile-buffer",
+              "2",
+              "--grid-origin-x",
+              "398700",
+              "--grid-origin-y",
+              "5646170",
+              "--instance-tiles",
+              "PredInstance_SAT,PredInstance_FM",
+              "--instance-resolutions",
+              "0.01,0.1",
+              "--instance-tile-dims",
+              "intensity,Amplitude",
+              "--tile-outputs",
+              "0.01:laz",
+              "--workers",
+              "4"
+            ],
+            "exit_code": 0,
+            "seconds": 29.144174293847755
+          }
+        ],
+        "checks_passed": 38,
+        "contract": "Required instance field/ID values survive without optional attributes and with intensity/Amplitude plus simultaneous ordinary tile outputs; source record membership and one-owner-per-instance checked for SAT/FM at 1cm/10cm.",
+        "pytest": {
+          "passed": 38,
+          "subtests_passed": 16,
+          "seconds": 6.64,
+          "files": [
+            "tests/test_instance_tiles.py",
+            "tests/test_parameters_subsampling_method.py",
+            "tests/test_tile_task_publication.py"
+          ]
+        },
+        "artifacts": {
+          "/tmp/smarttile-instance-flag-validation-20261013/report.json": "d0518bfeab481fc8fa35147745cb49a7848045f821460b79051e2b6ff00d0bd1",
+          "/tmp/smarttile-instance-flag-validation-20261013/driver.py": "28268b76da52617c2cfe1330c17c838af882a557576a698f4f119bd66aa900a1",
+          "/tmp/smarttile-instance-contract-tests-20261013/results.xml": "5fef4de85861347262924028717df7899748eabee00dfe6e4d909b3593e3ac44",
+          "/tmp/smarttile-instance-contract-tests-20261013/source-manifest.json": "20243020037713056376f57f3771f27a163e0cc5363b6dea32ccd7040e1304be"
+        }
+      }
     },
     {
       "id": 3,

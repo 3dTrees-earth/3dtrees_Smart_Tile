@@ -122,7 +122,7 @@ CPU/memory caps. Machine-readable evidence is summarized in
 | Scenario | Local fixture and checks | Result |
 | --- | --- | --- |
 | 1 | 553,030 real points in a 9 × 9 m crop crossing four historical tile cores; fresh tiling, cached SAT merge, cached species transfer, strict remap; workers 1 and 4 | Passed: 100% coverage, five compact SAT IDs, no conflicting positive geometry claims, identical final records across worker settings, retained source fields/order/CRS/ExtraBytes metadata. |
-| 2, conventional tile/filter | Two adjoining enriched files, 867,599 points | Unsupported: ordinary nearest-to-centroid tiling omits instance fields; filter exits with `expected one model instance dimension, got []`. |
+| 2, control without `--instance-tiles` | Two adjoining enriched files, 867,599 points | Ordinary nearest-to-centroid tiling omits instance fields; filter exits with `expected one model instance dimension, got []`. This control did not enable the existing instance-preserving flag and is not a failure of the requested mode. |
 | 2, instance tiles | Same 867,599 points; SAT and FM at 1 cm and 10 cm; real species annotations replayed onto selected source points | Passed: 100% own-instance remap coverage, zero independent species ID/probability oracle mismatches, unchanged original coordinates/order/IDs/retained metadata. Each positive ID has one owner tile within the tested crop. |
 | 3, full-resolution LAZ | Same two files, both a combined collection and three model-specific attribute views joined by SmartTile | Passed: all 867,599 points and fields preserved, uint64 `OriginalPointIndex` is the first ExtraByte with complete 0..N−1 values in source record order; source `point_source_id`, CRS and missing-value metadata retained. |
 | 3, full-resolution COPC | Same inputs and attribute joins | Points, interpreted field values, CRS and index-based order recovery pass. Metadata fails: `Amplitude`, `Reflectance` and `Deviation` lose their missing-value declarations. |
@@ -145,6 +145,14 @@ the reproduced failure is loss of declarations. One-worker and two-worker
 point multiplicities. Physical record order differs as chunk planning changes
 from one to two chunks; the existing byte-identity guarantee is scoped to the
 same chunk configuration, so this ordering difference is not a new blocker.
+
+For scenario 2, the existing `--instance-tiles PredInstance_SAT,PredInstance_FM`
+mode carries each required instance attribute automatically, regardless of the
+optional `--instance-tile-dims` allowlist. It also places each whole instance in
+one owner tile, so a separate buffer-filter task is unnecessary. The successful
+instance-tile replay above is the applicable SmartTile path for the user's
+clarified scenario. The earlier classification of ordinary tiling without this
+flag as a scenario 2 blocker was too broad.
 
 The cached species values are replay fixtures, not fresh inference. Scenario 1
 verifies that fresh and historical tile cores match and that species fixture
@@ -176,7 +184,29 @@ its metadata results are superseded.
 
 All ten isolated stress processes completed under 2 CPUs/8 GiB without OOM or
 timeout. Successful stress execution does not establish a density-independent
-memory guarantee. The SmartTile-only readiness gate remains open because of the
-unsupported conventional scenario 2 route, export failures/metadata loss, and
-the reproduced numerical-tie and dense-cell resource gaps. Source code was not
+memory guarantee. The SmartTile-only readiness gate remains open because of
+export failures/metadata loss and the reproduced numerical-tie and dense-cell
+resource gaps. Source code was not
 changed during this validation pass.
+
+
+### Required instance attribute follow-up
+
+The existing `--instance-tiles` implementation already includes the selected
+instance field automatically; no tiling or remapping algorithm change was needed.
+CLI help, dimension logging and the README now make this requirement explicit.
+The scenario 2 interpretation above is corrected accordingly.
+
+A fresh local replay of the same 867,599-point GFZ crop passed for SAT and FM at
+1 cm and 10 cm, both with no optional attributes and with intensity/Amplitude
+plus simultaneous ordinary tile outputs. Every selected record has its source
+coordinates and instance ID, all source labels are represented, and each positive
+ID has exactly one owner tile. The ordinary outputs retain their separate
+geometry-only contract. Both CLI runs exited 0 under 4 CPUs/20 GiB with no
+network; source code and original files remained unchanged.
+
+The targeted instance, parameter and tile-publication suite passed **38 tests
+and 16 subtests** in 6.64 seconds. Three CLI-parsing regression cases cover
+omitted/empty/selected optional attributes and coexistence with ordinary outputs.
+The tests ran under 4 CPUs/12 GiB with read-only source and no network. Commands
+and artifact hashes are recorded in `2026-10-13-scenarios.json`.

@@ -129,24 +129,56 @@ def test_missing_dimension_is_rejected(tmp_path):
         write_instance_tiles(sources, tiles(), ["PredInstance_RCT"], out, resolutions=[0.5])
 
 
-def test_tile_task_writes_only_instance_tiles_per_dimension(tmp_path):
+@pytest.mark.parametrize("attributes, ordinary_outputs", [
+    pytest.param(None, False, id="default-attributes-instance-only"),
+    pytest.param("", True, id="empty-attributes-with-ordinary-tiles"),
+    pytest.param("intensity", True, id="optional-attribute-with-ordinary-tiles"),
+])
+def test_tile_cli_carries_instance_ids_without_requesting_them_as_attributes(tmp_path, attributes, ordinary_outputs):
     import run
     from parameters import Parameters
     sources = inputs(tmp_path)
-    params = Parameters(task="tile", input_dir=sources[0].parent, output_dir=tmp_path / "products",
-                        tile_length=10, tile_buffer=2, instance_tiles="PredInstance_SAT,PredInstance_FM",
-                        instance_resolutions="0.25,1", instance_tile_dims="intensity", workers=2,
-                        _cli_parse_args=False)
-    run.run_tile_task(params)
     products = tmp_path / "products"
-    assert not list(products.glob("subsampled_res*"))
+    args = ["--task", "tile", "--input-dir", str(sources[0].parent), "--output-dir", str(products),
+            "--tile-length", "10", "--tile-buffer", "2", "--workers", "2",
+            "--instance-tiles", "PredInstance_SAT,PredInstance_FM", "--instance-resolutions", "0.25,1"]
+    if attributes is not None:
+        args.extend(["--instance-tile-dims", attributes])
+    if ordinary_outputs:
+        args.extend(["--tile-outputs", "0.25:laz"])
+    run.run_tile_task(Parameters(_cli_parse_args=args))
+
+    def source_records(cloud, dimension):
+        # Source coordinates are on a 1 mm grid; tile offsets may differ.
+        xyz = np.rint(np.c_[cloud.x, cloud.y, cloud.z] * 1000).astype(np.int64)
+        fields = [xyz, np.asarray(cloud[dimension])[:, None]]
+        if attributes:
+            fields.append(np.asarray(cloud[attributes])[:, None])
+        return {tuple(row) for row in np.column_stack(fields)}
+
+    originals = [laspy.read(source) for source in sources]
+    ordinary = list(products.glob("subsampled_res*"))
+    assert bool(ordinary) == ordinary_outputs
+    for directory in ordinary:
+        ordinary_clouds = read(directory)
+        assert ordinary_clouds
+        assert all(not list(cloud.point_format.extra_dimension_names) for cloud in ordinary_clouds.values())
     for dimension, label in [(d, r) for d in ("PredInstance_SAT", "PredInstance_FM") for r in ("25cm", "100cm")]:
         clouds = read(products / f"instance_tiles_{dimension}_{label}")
+        expected_records = set().union(*(source_records(cloud, dimension) for cloud in originals))
+        expected_ids = set().union(*(set(np.asarray(cloud[dimension]).tolist()) for cloud in originals))
+        actual_ids = set()
         holders = {}
         for name, cloud in clouds.items():
+            assert list(cloud.point_format.extra_dimension_names) == [dimension]
+            expected_dtype = originals[0].point_format.dimension_by_name(dimension).dtype
+            assert cloud.point_format.dimension_by_name(dimension).dtype == expected_dtype
+            assert source_records(cloud, dimension) <= expected_records
+            actual_ids.update(np.asarray(cloud[dimension]).tolist())
             for uid in np.unique(cloud[dimension]):
                 if uid:
                     holders.setdefault(int(uid), []).append(name)
+        assert actual_ids == expected_ids
         assert holders and all(len(names) == 1 for names in holders.values())
         assert all(name.startswith("c") and "_r" in name for name in clouds)
 

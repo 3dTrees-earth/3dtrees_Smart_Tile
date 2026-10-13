@@ -121,7 +121,8 @@ class Parameters(BaseSettings):
         description="Tile task: comma-separated instance dimensions (e.g. PredInstance_SAT,PredInstance_FM) of inputs "
                     "that already carry predictions. Writes instance_tiles_<dimension>/ per dimension, in which every "
                     "instance is whole in exactly one tile (the tile whose core holds its centroid); background "
-                    "follows core ownership. Without --tile-outputs, only instance tiles are written.",
+                    "follows core ownership. Each collection always carries its instance dimension, independently "
+                    "of --instance-tile-dims. Without --tile-outputs, only instance tiles are written.",
         validation_alias=AliasChoices("instance-tiles", "instance_tiles"),
     )
 
@@ -144,7 +145,8 @@ class Parameters(BaseSettings):
     instance_tile_dims: Optional[str] = Field(
         None,
         description="Instance tiles: comma-separated extra dimensions to carry (default: XYZ and the instance "
-                    "dimension only). Point format 0 dimensions stay standard; others are ExtraBytes.",
+                    "dimension only). The instance dimension is always included; list only additional attributes "
+                    "here. Point format 0 dimensions stay standard; others are ExtraBytes.",
         validation_alias=AliasChoices("instance-tile-dims", "instance_tile_dims"),
     )
 

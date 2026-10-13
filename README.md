@@ -520,6 +520,13 @@ python src/run.py --task tile --input-dir /path/to/originals_with_predictions --
 - One collection per dimension and resolution: `instance_tiles_<dimension>_<resolution>/c00_r00.laz`,
   e.g. `instance_tiles_PredInstance_SAT_1cm/`. All resolutions come from the same two reads.
   Without `--tile-outputs`, only instance tiles are written.
+- The selected instance attribute is mandatory in every instance tile and is
+  carried automatically, including its original ID values. `--instance-tile-dims`
+  adds optional attributes; do not repeat the instance dimension there.
+  Feed the `instance_tiles_<dimension>_<resolution>/` collection to the species
+  tool. If `--tile-outputs` is also supplied, its separate `subsampled_res*/`
+  collections remain ordinary geometry tiles; they are not the instance-preserving
+  outputs. `--instance-dimension` alone does not enable instance tiling.
 - Each instance belongs to the tile whose core holds its XY centroid and is written
   there whole, so a tile extends as far as its instances reach. Background (ID 0)
   stays with the tile whose core holds each point.
