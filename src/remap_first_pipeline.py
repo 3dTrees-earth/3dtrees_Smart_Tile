@@ -296,7 +296,14 @@ def tile_overlaps(pairs, tile_bounds_json, origin):
             lo = np.array([max(x0, a0), max(y0, b0)])
             hi = np.array([min(x1, a1), min(y1, b1)])
             if np.all(hi > lo):
-                previous[j] = (lo - origin[:2], hi - origin[:2])
+                # Keep the precision of the declared global XY bounds when
+                # removing the common origin. Local ULPs alone can miss
+                # LAS-encoded points on a projected-coordinate boundary.
+                magnitude = np.maximum(1., np.maximum.reduce(
+                    (np.abs(lo), np.abs(hi), np.abs(origin[:2]))))
+                allowance = 8 * np.spacing(magnitude)
+                previous[j] = (lo - origin[:2] - allowance,
+                               hi - origin[:2] + allowance)
         result.append(previous)
     return result
 

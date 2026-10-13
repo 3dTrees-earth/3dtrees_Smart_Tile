@@ -46,10 +46,13 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
   predicting background or a removed instance cannot win a tree claim. Preserve
   the winner's instance ID and per-point attributes, and retain unshared buffer
   tails. Record these decisions in shared_point_ownership.
-- Declared buffered overlap membership uses the same inclusive eight-ULP
-  per-axis bound allowance for cached sources, disk sources and query points.
-  Derive it from local XY bounds only, independent of batch composition or Z;
-  preserve the geometric matching radius and core ownership boundaries.
+- Declared buffered overlaps require positive XY intersection before any
+  roundoff allowance. When localizing their bounds, carry an eight-ULP
+  per-axis allowance from the global XY bounds and common origin. Cached
+  sources, disk sources and query points then share the same inclusive
+  local-bound check and its eight-ULP allowance. Both guards are independent
+  of batch composition and Z; preserve the geometric matching radius and
+  core ownership boundaries.
 - After tree/tree resolution, retained trees override neighboring background
   within 0.01 m, preserving the tree owner's semantic values and attributes.
   Query actual surviving trees; removed instances cannot override background.

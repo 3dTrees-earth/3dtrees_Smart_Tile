@@ -854,6 +854,12 @@ spatial relaxation. Nearest ties within that numerical allowance of the true
 minimum distance choose the earlier tile and then source point. This prevents
 header-offset roundoff from changing attributes at coincident tile points.
 
+Buffered overlap bounds also preserve their global XY precision when the
+common origin is removed: a per-axis eight-ULP allowance based on the
+global bounds and origin prevents projected-coordinate boundary points
+from being excluded. Disjoint or edge-only tile pairs remain excluded;
+matching radii and core ownership boundaries are unchanged.
+
 The dense implementation is sequential and disk-backed. A fixed 32,768-point
 limit applies to stored/query batches, while small instance correspondence maps
 remain in memory. SQLite RTree indexes batch bounds; exact distances use each
