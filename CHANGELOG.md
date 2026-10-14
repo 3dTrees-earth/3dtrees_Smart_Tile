@@ -14,11 +14,26 @@
 - Subsampled prod-merged products are reproducible: SmartTile selects the original point nearest each voxel's exact mean on an absolute grid instead of PDAL's voxel filter, whose grid followed the read order (645: two runs differed by 4,388 of 80 M points). Points are written in GPS-time order, since voxel order tripled the LAZ size (645 10 cm: 2.52 -> 0.81 GB, smaller than the originals).
 - One CRS record per output; instance IDs widen to uint32 instead of wrapping (3DT-2200, 3DT-2172).
 
+### Production review fixes
+- Tiling fails instead of silently dropping points that lie outside the header bounds used to plan the grid (stale headers from third-party writers).
+- Tile offsets are whole metres (and lattice-exact at original resolution), so points on voxel faces are no longer floored into the lower voxel when a float tile centre is not a decimal.
+- The CRS check reads WKT stored in EVLRs, rejects vertical units other than metres and rejects unreadable CRS records.
+- Inputs whose names differ only in case or extension (Plot1.las, plot1.laz) fail instead of one being ignored; empty input files fail with a clear message; a zero-width extent gets one tile column/row; the tile grid is built from indices, so no float rounding can stall it (3DT-1565).
+- Subsampled prod-merged chunks are read with a margin and own whole voxel columns, so no point is lost between strips (pdal info rounded edge bounds; half-scale gaps with unaligned offsets) and products no longer depend on --workers. Chunk bounds come from LAS headers. Products use the finest input scale instead of the first input's.
+- The full-resolution product includes COPC-only sources like the subsampled products, and its COPC accepts scalarized vector ExtraBytes (it failed on every vector input).
+- A staged COPC is reused only when the staging manifest records its source; a header match could reuse old predictions.
+- Remap and merge refuse COPC-only originals instead of skipping them with exit 0.
+- Small-instance reassignment keeps tiles LAZ-compressed (it wrote uncompressed LAS into .laz files).
+- tile_bounds_tindex.json bounds are the union over every LAS tile output, not only the first (a coarse first output could hide 1 cm points from merge's overlap checks).
+- A failing product chunk cancels the remaining chunks.
+- Parameters come only from the command line; job environment variables such as `WORKERS` or `TASK` no longer change a run.
+
 ### Performance (10 CPUs)
 - Tiling reads every source point once (no full-resolution tile COPCs). 3109 (330 M points): 879–1,039 s → 160 s with 1 cm COPC + 10 cm LAZ (63 s with both as LAZ). 483 (3.68 B points): 641 s with 1 cm LAZ, 1,237 s with 1 cm COPC.
 - Merge stages run in worker processes; enrichment queries originals in spatial blocks. 645: total 4 h 09 min → 46 min, enrichment 3 h → 170 s. 3109 SAT: 21,200 s → about 4,930 s. Outputs are identical for any worker count.
 
 ### Interface changes
+- Removed the `filter` task: `merge --segmented-remapped-folder` does the same (production workflows never used it).
 - Instance tiles for inputs that already carry predictions: `--instance-tiles PredInstance_SAT,...` writes one collection per dimension and resolution in which every instance is whole in exactly one tile (per-instance voxels at each of `--instance-resolutions`, nearest original point to the voxel mean; background by core ownership; many instance IDs found in several files more than 5 m apart fail as reused IDs; instances wider than `--max-instance-extent`, default 50 m, only warn). Command line only, not exposed in the Galaxy wrapper. `--match-instances` remaps per-point values (e.g. species and probability) from such tiles onto the originals within each instance, so neighbouring trees never exchange values.
 - `--merged-resolutions full` writes a full-resolution prod-merged product of every input point in record order; `--original-point-index` (default on) adds `OriginalPointIndex` as the first ExtraByte so ForestStructure can restore source order after COPC and reproduce Julia's results. Merge and remap never transfer it onto originals.
 - `create_merged_file` joins several versions of the same originals (comma-separated `--original-with-predictions-dir`, e.g. one remap output per segmentation run) by record order before merging, so one product carries every run's attributes.

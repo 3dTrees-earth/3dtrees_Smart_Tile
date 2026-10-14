@@ -14,12 +14,6 @@ from copc_metadata import srs_assignment_from_file
 from crs_records import validate_single_crs_record
 
 
-def get_pdal_path() -> str:
-    """Return the PDAL executable path."""
-    pdal_path = shutil.which("pdal")
-    return pdal_path if pdal_path else "pdal"
-
-
 def _run_untwine(
     inputs: List[Path],
     output_copc: Path,
@@ -250,7 +244,7 @@ def convert_laz_to_copc_pdal(
         pipeline_file = Path(handle.name)
     try:
         result = subprocess.run(
-            [get_pdal_path(), "pipeline", str(pipeline_file)],
+            ["pdal", "pipeline", str(pipeline_file)],
             capture_output=True,
             text=True,
             check=False,

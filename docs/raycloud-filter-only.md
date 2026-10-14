@@ -57,17 +57,17 @@ use their one-based row positions as local IDs.
 
 Each output tile carries a versioned namespace VLR (`3DTrees`, record 24002),
 containing the stride, tile ID and original source filename. The merge manifest
-and report also record the mapping. A later filter pass uses this metadata to
-preserve encoded IDs and uses explicit table IDs, so gaps do not shift rows and
-an offset is never added twice. Co-locate the tree tables with the LAZ inputs
-for another merge/filter pass. Unfiltered baseline files retain source labels;
+and report also record the mapping. A later merge pass
+(`--segmented-remapped-folder`) uses this metadata to preserve encoded IDs and
+uses explicit table IDs, so gaps do not shift rows and an offset is never added
+twice. Co-locate the tree tables with the LAZ inputs for such a pass. Unfiltered baseline files retain source labels;
 they supply geometry for coverage validation, not final output IDs.
 
 Standalone remap accepts the encoded tiles and uses those IDs to resolve trees.
 It checks collection namespace headers first and validates labels during the
 indexing read, avoiding a second decompression pass over the prediction files.
 A legacy collection of multiple unencoded RCT tiles is rejected with a request
-to rerun merge/filter with its tree files. The intermediate merge task still
+to rerun merge with its tree files. The intermediate merge task still
 requires `--skip-merged-file`; original enrichment is the supported path to put
 predictions from multiple RCT tiles into one original cloud.
 

@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from pyproj import CRS  # noqa: E402
 
 from copc_metadata import crs_authority_string, crs_equivalent  # noqa: E402
-from crs_records import projection_record_list, validate_single_crs_record  # noqa: E402
+from crs_records import validate_single_crs_record  # noqa: E402
 
 # Same CRS, two serializations: PDAL's standardized EPSG text and a
 # non-canonical upload spelling as in dataset 3433.

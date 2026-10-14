@@ -9,7 +9,7 @@ make the metadata contract explicit in one place.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 
 PROJECTION_VLR_USER_ID = "LASF_Projection"
@@ -28,17 +28,6 @@ def laspy_laz_backend():
     except Exception:
         pass
     return None
-
-
-def projection_vlr_keys(header) -> set[tuple[str, int]]:
-    """Return CRS/projection VLR keys that should survive format conversion."""
-    keys = set()
-    for vlr in getattr(header, "vlrs", []):
-        user_id = getattr(vlr, "user_id", "")
-        record_id = getattr(vlr, "record_id", None)
-        if user_id == PROJECTION_VLR_USER_ID or record_id in PROJECTION_VLR_RECORD_IDS:
-            keys.add((user_id, record_id))
-    return keys
 
 
 def vlr_record_bytes(vlr) -> bytes:
@@ -84,17 +73,6 @@ def parse_crs(header) -> Optional[Any]:
         return header.parse_crs()
     except Exception:
         return None
-
-
-def crs_text(header) -> Optional[str]:
-    """Best-effort parseable CRS text; returns None when CRS metadata is unavailable."""
-    crs = parse_crs(header)
-    if crs is None:
-        return None
-    try:
-        return crs.to_wkt()
-    except Exception:
-        return str(crs)
 
 
 def crs_authority_from_crs(crs) -> Optional[str]:
@@ -153,31 +131,3 @@ def srs_assignment_from_file(path: Path) -> Optional[str]:
             return crs_authority_string(src.header)
     except Exception:
         return None
-
-
-def first_srs_assignment(paths: List[Path]) -> Optional[str]:
-    crs_source = first_crs_source(paths)
-    if crs_source is None:
-        return None
-    return srs_assignment_from_file(crs_source)
-
-
-def crs_metadata_present(header) -> bool:
-    return bool(projection_vlr_keys(header) or crs_text(header))
-
-
-def first_crs_source(paths: List[Path]) -> Optional[Path]:
-    """Return the first source file with CRS metadata, else the first source file."""
-    if not paths:
-        return None
-    import laspy
-
-    fallback = paths[0]
-    for path in paths:
-        try:
-            with laspy.open(str(path), laz_backend=laspy_laz_backend()) as src:
-                if crs_metadata_present(src.header):
-                    return path
-        except Exception:
-            continue
-    return fallback

@@ -109,22 +109,19 @@ def write_copc_stage_manifest_entry(source_file: Path, copc_file: Path) -> None:
 def staged_copc_matches_source(copc_file: Path, source_file: Optional[Path]) -> bool:
     """Return True when a staged COPC is compatible with source_file.
 
-    A SmartTile manifest is preferred when available. Older validation runs may
-    have reusable COPCs without a manifest, so fall back to comparing structural
-    header metadata.
+    Only a COPC recorded in a SmartTile staging manifest for this exact source
+    is reused. A header match alone cannot tell old predictions from new ones,
+    so an unrecorded COPC is converted again.
     """
     if source_file is None:
         return True
 
     manifest = read_copc_stage_manifest(copc_file.parent)
     entry = manifest.get("sources", {}).get(point_cloud_source_key(source_file))
+    if not entry or entry.get("copc_file") != copc_file.name:
+        return False
     try:
-        source_header = point_cloud_header_signature(source_file)
         copc_header = point_cloud_header_signature(copc_file)
-        if not entry:
-            return source_header == copc_header
-        if entry.get("copc_file") != copc_file.name:
-            return False
         return (
             entry.get("source") == source_file_fingerprint(source_file)
             and entry.get("copc_header") == copc_header

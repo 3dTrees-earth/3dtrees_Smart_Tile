@@ -38,7 +38,7 @@ def load_extent_from_tindex(tindex_path: Path):
         print(f"  Detected CRS: {srs_info} (Treating as Planar/Metric)", file=sys.stderr)
 
         if srs_info == "missing":
-             print(f"  ⚠ Warning: CRS missing; tiling in dataset-local planar coordinates.", file=sys.stderr)
+             print("  ⚠ Warning: CRS missing; tiling in dataset-local planar coordinates.", file=sys.stderr)
 
         # Get bounds of all features
         minx = miny = math.inf
@@ -71,16 +71,13 @@ def load_extent_from_tindex(tindex_path: Path):
         return (minx, miny, maxx, maxy), srs_info
 
 
-def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, grid_origin=None):
-    """Build tile grid.
+def build_tiles(minx, miny, maxx, maxy, length, buffer, grid_origin=None):
+    """Build the tile grid: cores of ``length`` from the south-west corner, buffered by ``buffer``.
 
-    Args:
-        minx, miny, maxx, maxy: Data extent bounds
-        length: Tile size in units
-        buffer: Buffer size in units
-        align_to_grid: If True, snap to grid.
+    The grid starts at ``grid_origin`` or the data minimum. Tile edges are
+    ``start + index * length``, so no float accumulation can stall the loop
+    (3DT-1565) and a zero-width extent still gets one tile column/row.
     """
-    # Validate inputs - check for infinity or NaN
     if not all(math.isfinite(v) for v in [minx, miny, maxx, maxy]):
         raise ValueError(
             f"Invalid bounds detected (infinity or NaN): "
@@ -95,32 +92,14 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, gri
         start_x, start_y = grid_origin
         if start_x > minx or start_y > miny:
             raise ValueError("Grid origin must not exclude source minimum bounds")
-        end_x = start_x + math.ceil((maxx - start_x) / length) * length
-        end_y = start_y + math.ceil((maxy - start_y) / length) * length
-    elif align_to_grid:
-        start_x = math.floor(minx / length) * length
-        start_y = math.floor(miny / length) * length
-        end_x = math.ceil(maxx / length) * length
-        end_y = math.ceil(maxy / length) * length
     else:
-        start_x = minx
-        start_y = miny
-        x_range = maxx - minx
-        y_range = maxy - miny
-        if not math.isfinite(x_range) or not math.isfinite(y_range):
-            raise ValueError(
-                f"Invalid range calculated: x_range={x_range}, y_range={y_range}. "
-                f"Bounds: minx={minx}, miny={miny}, maxx={maxx}, maxy={maxy}"
-            )
-        end_x = math.ceil(x_range / length) * length + start_x
-        end_y = math.ceil(y_range / length) * length + start_y
-
-    # Estimate number of tiles and warn if excessive
-    num_tiles_x = int(math.ceil((end_x - start_x) / length))
-    num_tiles_y = int(math.ceil((end_y - start_y) / length))
+        start_x, start_y = minx, miny
+    num_tiles_x = max(1, math.ceil((maxx - start_x) / length))
+    num_tiles_y = max(1, math.ceil((maxy - start_y) / length))
+    end_x = start_x + num_tiles_x * length
+    end_y = start_y + num_tiles_y * length
     total_tiles = num_tiles_x * num_tiles_y
 
-    # Warn if creating too many tiles (more than 1 million)
     MAX_TILES = 1000000
     if total_tiles > MAX_TILES:
         raise ValueError(
@@ -133,12 +112,10 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, gri
         )
 
     tiles = []
-    col = 0
-    x = start_x
-    while x < end_x:
-        row = 0
-        y = start_y
-        while y < end_y:
+    for col in range(num_tiles_x):
+        x = start_x + col * length
+        for row in range(num_tiles_y):
+            y = start_y + row * length
             core_x = [x, x + length]
             core_y = [y, y + length]
             buffered_x = [core_x[0] - buffer, core_x[1] + buffer]
@@ -152,10 +129,6 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, gri
                     "bounds": [buffered_x, buffered_y],
                 }
             )
-            row += 1
-            y += length
-        col += 1
-        x += length
 
     grid_bounds = (
         start_x - buffer,
@@ -163,7 +136,6 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, align_to_grid=False, gri
         start_y - buffer,
         end_y + buffer,
     )
-    tiles.sort(key=lambda t: (t["col"], t["row"]))
     return tiles, grid_bounds
 
 
@@ -173,8 +145,7 @@ def write_tile_bounds(tindex_path: Path, tile_length: float, tile_buffer: float,
     (minx, miny, maxx, maxy), srs = load_extent_from_tindex(tindex_path)
     proj_crs = srs if srs != "missing" else PROJECTED_CRS_FALLBACK
     # Data-aligned tiling; the geographic extent equals the planar one (metric input).
-    tiles, grid_bounds = build_tiles(minx, miny, maxx, maxy, tile_length, tile_buffer,
-                                     align_to_grid=False, grid_origin=grid_origin)
+    tiles, grid_bounds = build_tiles(minx, miny, maxx, maxy, tile_length, tile_buffer, grid_origin=grid_origin)
     extent = {"minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy}
     summary = {
         "tindex": str(tindex_path),

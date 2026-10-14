@@ -74,7 +74,7 @@ class CopcStagingTests(unittest.TestCase):
             _write_las(staged, n_points=4)
             self.assertFalse(staged_copc_matches_source(staged, source))
 
-    def test_no_manifest_allows_structural_header_match(self):
+    def test_no_manifest_never_reuses_a_header_match(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             source = root / "source.las"
@@ -82,7 +82,7 @@ class CopcStagingTests(unittest.TestCase):
             _write_las_with_extra_description(source, "source description")
             _write_las_with_extra_description(staged, "")
 
-            self.assertTrue(staged_copc_matches_source(staged, source))
+            self.assertFalse(staged_copc_matches_source(staged, source))
 
     def test_no_manifest_rejects_changed_structural_header(self):
         with tempfile.TemporaryDirectory() as tmpdir:

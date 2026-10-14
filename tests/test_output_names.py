@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from main_subsample import subsample_output_name  # noqa: E402
+from output_names import subsample_output_name  # noqa: E402
 from subsample_methods import (  # noqa: E402
     SUBSAMPLING_METHOD_CENTER_OF_MASS,
     SUBSAMPLING_METHOD_NEAREST_TO_CENTROID,

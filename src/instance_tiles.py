@@ -45,7 +45,8 @@ import laspy
 import numpy as np
 
 from tile_centroids import (CHUNK_POINTS, Tile, _block_key, _init_worker, _nearest_to_mean,
-                            _raw_xyz, _write_blocks, block_cells, choose_block_size, route, sample_xy)
+                            _raw_xyz, _write_blocks, block_cells, choose_block_size, route, sample_xy,
+                            tile_offsets)
 from voxel_grid import voxel_keys
 from point_cloud_metadata import extra_bytes_metadata_equal, extra_bytes_params_from_dimension_info
 from prediction_collections import assign_prediction_values, promote_collection_extra_dim
@@ -380,7 +381,7 @@ def _output_header(source_header, dimension, schema, attributes, scales, offsets
 
 
 def output_directory(output_dir, dimension, resolution):
-    from main_subsample import resolution_label
+    from output_names import resolution_label
     return Path(output_dir) / f"instance_tiles_{quote(dimension, safe='')}_{resolution_label(resolution)}"
 
 
@@ -577,7 +578,7 @@ def instance_tiles_from_plan(plan, output_dir, dimensions, *, resolutions, attri
         cores = {f"c{t['col']:02d}_r{t['row']:02d}": t["core"] for t in layout}
         jobs = read_tile_jobs(plan.jobs_file)
         tiles = [Tile(label, bounds, scales,
-                      ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0, z_offset),
+                      tile_offsets(bounds, z_offset),
                       core=(cores[label][0][0], cores[label][1][0], cores[label][0][1], cores[label][1][1]))
                  for label, bounds in sorted(jobs.items())]
     results = write_instance_tiles(sources, tiles, dimensions, Path(output_dir), resolutions=resolutions,

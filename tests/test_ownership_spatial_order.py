@@ -1,4 +1,3 @@
-from collections import Counter
 from unittest.mock import patch
 
 import laspy

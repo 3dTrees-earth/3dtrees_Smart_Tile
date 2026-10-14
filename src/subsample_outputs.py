@@ -4,18 +4,11 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
 
 from subsample_encoding import encoding_summary, safe_las_writer_encoding_options
-
-
-def get_pdal_path() -> str:
-    """Return the PDAL executable path."""
-    pdal_path = shutil.which("pdal")
-    return pdal_path if pdal_path else "pdal"
 
 
 def convert_laz_output_to_copc(
@@ -72,7 +65,7 @@ def convert_laz_output_to_copc(
         json.dump(pipeline, f, indent=2)
     try:
         result = subprocess.run(
-            [get_pdal_path(), "pipeline", str(pipeline_file)],
+            ["pdal", "pipeline", str(pipeline_file)],
             capture_output=True,
             text=True,
             check=False,

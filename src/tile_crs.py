@@ -49,23 +49,39 @@ def unit_problem(crs) -> Optional[str]:
         return "is geocentric (Earth-centred X/Y/Z), not a projected map CRS"
     if horizontal.is_geographic:
         return "is geographic: X/Y are degrees of longitude/latitude, not metres"
-    for axis in horizontal.axis_info[:2]:
+    # Z voxels are metres too, so a vertical part in feet is as wrong as X/Y in feet.
+    crs = _unbound(crs)
+    vertical = ([axis for sub in crs.sub_crs_list[1:] for axis in _unbound(sub).axis_info]
+                if crs.is_compound else horizontal.axis_info[2:])
+    for axis in [*horizontal.axis_info[:2], *vertical]:
         if axis.unit_conversion_factor and abs(axis.unit_conversion_factor - 1.0) > 1e-12:
             return f"uses linear unit '{axis.unit_name}', not metres"
     return None
+
+
+def _has_projection_records(header) -> bool:
+    return any(getattr(vlr, "user_id", "") == "LASF_Projection"
+               for vlr in [*getattr(header, "vlrs", []), *(getattr(header, "evlrs", None) or [])])
 
 
 def require_metric_tiling_crs(files: Iterable[Path]):
     """Return the common CRS of ``files`` (None if none declares one); raise ValueError otherwise."""
     declared: List[Tuple[Path, object]] = []
     undeclared: List[Path] = []
+    unreadable: List[Path] = []
     for path in files:
-        with laspy.open(path, read_evlrs=False) as reader:
+        # LAS 1.4 may keep the WKT in an EVLR.
+        with laspy.open(path) as reader:
             crs = parse_crs(reader.header)
+            if crs is None and _has_projection_records(reader.header):
+                unreadable.append(Path(path))
         if crs is not None:
             declared.append((Path(path), crs))
         else:
             undeclared.append(Path(path))
+    if unreadable:
+        shown = ", ".join(path.name for path in unreadable[:SHOWN_FILES])
+        raise ValueError(f"Unreadable CRS records in {shown}: their units cannot be checked. {REPROJECT_HINT}")
     if declared and undeclared:
         shown = ", ".join(path.name for path in undeclared[:SHOWN_FILES])
         more = f" (and {len(undeclared) - SHOWN_FILES} more files)" if len(undeclared) > SHOWN_FILES else ""

@@ -1,20 +1,18 @@
-# Filter task: complete decision flow
+# Merge ownership filter: decision flow
 
-Scope: `python src/run.py --task filter` on the implementation committed in
-`9bfe1be`. Follow sections 1–3, then **either** section 4 (RCT) **or** section 5
-(other models), and finish at section 6.
-
-Filter accepts **already-dense predictions** from one model collection. It does
-not transfer coarse predictions onto another geometry, enrich originals, or
-create a combined final product. The same processing is used after dense
-transfer in the merge task. Res1 defaults to 1 cm; the input's density is a caller
-precondition, not a measured spacing test.
+Scope: the per-model ownership filter of `python src/run.py --task merge`. It
+runs after the coarse-to-dense transfer, or directly on already-dense tiles with
+`--segmented-remapped-folder` (the former `filter` task). Follow sections 1–3,
+then **either** section 4 (RCT) **or** section 5 (other models), and finish at
+section 6. Original enrichment and products are outside this flow. Res1
+defaults to 1 cm; the input's density is a caller precondition, not a measured
+spacing test.
 
 ## 1. Input gates, layout and baseline
 
 ```mermaid
 flowchart TD
-    A["Start filter: one dense prediction folder"] --> B{"Input/output supplied, different paths, tile-bounds JSON exists?"}
+    A["Start: one dense prediction collection per model"] --> B{"Exactly one input mode; tile-bounds JSON exists?"}
     B -->|No| FAIL["Fail: no new final products"]
     B -->|Yes| C{"Output, baseline and RCT table destinations distinct and absent or empty?"}
     C -->|No| FAIL
@@ -45,7 +43,7 @@ flowchart TD
   grid requires the existing full-extent verification; partial subsets do not
   qualify merely because only one file is present.
 
-Source: [`run_filter_task`](../src/run.py),
+Source: [`run_merge_task`](../src/run.py),
 [`merge_collections`](../src/remap_first_pipeline.py),
 [`describe_model`, `prepare_dense`](../src/merge_stages.py),
 [`ownership_regions`](../src/dense_instance_ownership.py).
@@ -209,7 +207,7 @@ flowchart TD
 ```
 
 The default overlap threshold is **0.3** (`--overlap-threshold`). The 5 cm
-correspondence radius is the shared pipeline default used by the filter route.
+correspondence radius is the shared pipeline default.
 Correspondences are counted from the later tile's points to nearest points in
 the earlier tile, not as a symmetric intersection of exact XYZ sets. Equal-best
 pair counts are ambiguous and rejected. Recovery edges are considered by
@@ -286,6 +284,17 @@ Enabled only with `--reassign-small-instances`; never for RCT.
 Source: [`small_instance_reassignment`](../src/small_instance_reassignment.py),
 [`instance_statistics`](../src/instance_statistics.py), [`compact_originals`](../src/instance_finalization.py).
 
+### 5d. One output tile per instance
+
+After deduplication and optional reassignment, every instance found in several
+tiles moves whole into one owner tile: the tile whose core holds its XY centroid,
+else the tile with most of its points (ties: lowest tile). Points move, never
+drop; an ID still present in two tiles fails. `instance_consolidation` in the
+report counts moved instances and points. RCT tiles are only checked for this
+contract, since RCT trees are never merged across tiles.
+
+Source: [`consolidate_instances`, `verify_distinct_instances`](../src/instance_consolidation.py).
+
 ## 6. Publication and downstream boundary
 
 ```mermaid
@@ -301,17 +310,17 @@ flowchart TD
     OK --> REPORT["Write report and timings"]
     ROLLBACK --> REPORT
     FAIL --> REPORT
-    REPORT -. "Successful filter output feeds a later task" .-> REMAP["remap: enrich uploaded originals and validate baseline/final coverage"]
+    REPORT -. "Processed tiles feed a later task" .-> REMAP["remap: enrich uploaded originals and validate baseline/final coverage"]
 ```
 
 Outputs:
 
 | Artifact | Contents |
 | --- | --- |
-| Requested output directory | Processed LAZ tiles, `instance_metadata.csv`, effective `tile_bounds.json`, `smarttile_merge.json`. |
-| Sibling `<output-name>_unfiltered_1cm/` | Unfiltered input geometry/labels for the later baseline coverage check. |
+| `output_tiles/` (or `--output-tiles-folder`) | Processed LAZ tiles, `instance_metadata.csv`, effective `tile_bounds.json`, `smarttile_merge.json`. |
+| Sibling `<output-tiles>_unfiltered_1cm/` | Unfiltered input geometry/labels for the later baseline coverage check (not with `--skip-unfiltered-tiles`). |
 | Sibling `segmented_filtered/` for RCT | Both tree tables, pruned and encoded consistently with surviving points. |
-| Parent `remap_first_report.json` | Ownership, recovery, mappings, branch-specific conflict/removal metrics, checksums and timings. |
+| Work-root `remap_first_report.json` | Ownership, recovery, mappings, branch-specific conflict/removal metrics, checksums and timings. |
 
 Report sections include `instance_ownership`, `orphan_recovery` (including RCT
 `blocked` examples), `reconciliation`, `rct_instance_ids` / `tree_sidecars`, or
@@ -321,18 +330,14 @@ the staged pipeline write a failed report; early argument/preflight failures can
 exit before report creation. Publication uses rollback on caught move errors;
 it is not a filesystem-wide atomic transaction against process or machine loss.
 
-**The filter task does not validate original-cloud coverage.** The subsequent
-remap task requires full baseline coverage, requires full final coverage for
-non-RCT, and permits unmatched RCT predictions to become background 0. The final
-remap radius defaults to `sqrt(3) × res1` (about **1.732 cm** at 1 cm res1), and
-is separate from filter's **1 cm** ownership/support radius and **5 cm**
-non-RCT correspondence radius. Distance tests include the shared small float64
-roundoff allowance; they do not use a wider physical tolerance implicitly.
+**Without originals, merge does not validate original-cloud coverage.** The
+subsequent remap (or merge with `--original-laz-input-dir`) requires full
+baseline coverage when checked, full final coverage for non-RCT, and permits
+unmatched RCT predictions to become background 0. The final remap radius
+defaults to `sqrt(3) × res1` (about **1.732 cm** at 1 cm res1), separate from
+the **1 cm** ownership/support radius and the **5 cm** non-RCT correspondence
+radius. Distance tests include the shared small float64 roundoff allowance;
+they do not use a wider physical tolerance implicitly.
 
-The current `run_filter_task` forwards worker count, instance field, anchor,
-matching toggle and overlap threshold. It calls the shared pipeline with
-`ready=True` and the default first-stage resolution; original-remap options are
-handled by `remap` or by `merge` with originals supplied.
-
-Source: [`run_filter_task`](../src/run.py),
+Source: [`run_merge_task`](../src/run.py),
 [`publish`, `merge_collections`](../src/remap_first_pipeline.py).

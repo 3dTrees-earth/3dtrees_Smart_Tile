@@ -19,19 +19,17 @@ from main_create_merged_file import (  # noqa: E402
     _validate_preserved_product_dims,
     create_chunked_prod_merged_files_for_resolution,
     create_prod_merged_files,
-    create_prod_merged_file,
     expensive_prod_merged_warning,
     parse_merged_output_formats,
     parse_merged_resolutions,
     point_cloud_files,
     prepare_copc_inputs,
     prod_merged_output_path,
-    prod_merged_pipeline,
     source_key,
 )
 
 
-def _copy_raw_chunk(raw_file, chunk_file, resolution):
+def _copy_raw_chunk(raw_file, chunk_file, resolution, *_columns):
     """Test stand-in for point selection: the fake PDAL chunk passes through."""
     Path(chunk_file).write_bytes(Path(raw_file).read_bytes())
     return True
@@ -194,58 +192,6 @@ class CreateMergedFileTests(unittest.TestCase):
             prepare.assert_called_once()
             self.assertGreaterEqual(dims.call_count, 2)
 
-    def test_prod_merged_pipeline_uses_nearest_to_centroid_and_forwards_dimensions(self):
-        pipeline = prod_merged_pipeline(
-            [Path("/tmp/a.copc.laz"), Path("/tmp/b.copc.laz")],
-            Path("/tmp/out/prod_merged_1cm.laz"),
-            0.01,
-            "laz",
-        )["pipeline"]
-
-        self.assertEqual(pipeline[0]["type"], "readers.copc")
-        self.assertEqual(pipeline[1]["type"], "readers.copc")
-        self.assertEqual(pipeline[2], {"type": "filters.merge"})
-        self.assertEqual(
-            pipeline[3],
-            {"type": "filters.voxelcentroidnearestneighbor", "cell": 0.01},
-        )
-        self.assertEqual(pipeline[4]["type"], "writers.las")
-        self.assertEqual(pipeline[4]["forward"], "all")
-        self.assertEqual(pipeline[4]["extra_dims"], "all")
-
-    def test_prod_merged_pipeline_defaults_to_copc_laz(self):
-        pipeline = prod_merged_pipeline(
-            [Path("/tmp/a.copc.laz")],
-            Path("/tmp/out/prod_merged_1cm.copc.laz"),
-            0.01,
-        )["pipeline"]
-
-        self.assertEqual(pipeline[-1]["type"], "writers.copc")
-
-    def test_prod_merged_pipeline_can_write_copc_laz(self):
-        pipeline = prod_merged_pipeline(
-            [Path("/tmp/a.copc.laz")],
-            Path("/tmp/out/prod_merged_1cm.copc.laz"),
-            0.01,
-            "copc.laz",
-        )["pipeline"]
-
-        self.assertEqual(pipeline[-1]["type"], "writers.copc")
-        self.assertEqual(pipeline[-1]["forward"], "all")
-        self.assertEqual(pipeline[-1]["extra_dims"], "all")
-
-    def test_prod_merged_pipeline_can_write_ply(self):
-        pipeline = prod_merged_pipeline(
-            [Path("/tmp/a.copc.laz")],
-            Path("/tmp/out/prod_merged_1cm.ply"),
-            0.01,
-            "ply",
-        )["pipeline"]
-
-        self.assertEqual(pipeline[-1]["type"], "writers.ply")
-        self.assertEqual(pipeline[-1]["storage_mode"], "little endian")
-        self.assertNotIn("forward", pipeline[-1])
-
     def test_chunked_ply_merge_does_not_receive_las_scale_options(self):
         pipeline = _merge_chunk_files_pipeline(
             [Path("/tmp/chunk.laz")],
@@ -331,7 +277,7 @@ class CreateMergedFileTests(unittest.TestCase):
 
             with mock.patch(
                 "main_create_merged_file._prod_merged_chunk_bounds",
-                return_value=["bounds-a", "bounds-b"],
+                return_value=[("bounds-a", None, 1), ("bounds-b", 1, None)],
             ):
                 with mock.patch("main_create_merged_file._scale_offset_options", return_value={}):
                     with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline) as pdal, \
@@ -385,7 +331,7 @@ class CreateMergedFileTests(unittest.TestCase):
                     [source],
                     work_dir,
                     "prod_merged",
-                    ["bounds-a", "bounds-b", "bounds-c", "bounds-d"],
+                    [(name, None, None) for name in ("bounds-a", "bounds-b", "bounds-c", "bounds-d")],
                     0.1,
                     {},
                     chunk_workers=2,
@@ -393,90 +339,6 @@ class CreateMergedFileTests(unittest.TestCase):
 
         self.assertEqual(len(chunks), 4)
         self.assertEqual(max_active, 2)
-
-    def test_single_copc_pipeline_validates_metadata(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            source = tmp_path / "source.copc.laz"
-            output = tmp_path / "prod_merged_10cm.copc.laz"
-            source.write_text("copc")
-
-            def run_pipeline(pipeline, *_, **__):
-                Path(pipeline["pipeline"][-1]["filename"]).write_text("copc")
-                return mock.Mock(returncode=0, stdout="", stderr="")
-
-            with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline), \
-                    mock.patch("main_create_merged_file._select_chunk_points", side_effect=_copy_raw_chunk):
-                with mock.patch(
-                    "main_create_merged_file._validate_preserved_product_dims",
-                    return_value=(True, "ok"),
-                ) as validate_dims:
-                    with mock.patch(
-                        "main_create_merged_file._preserve_and_validate_las_metadata",
-                        return_value=(True, "ok"),
-                    ) as validate:
-                        created = create_prod_merged_file(
-                            [source],
-                            output,
-                            0.1,
-                            "copc.laz",
-                        )
-
-        self.assertEqual(created, output)
-        validate_dims.assert_called_once()
-        staged_output = validate_dims.call_args.args[1]
-        self.assertEqual(staged_output.name, output.name)
-        self.assertNotEqual(staged_output, output)
-        validate.assert_called_once_with(source, staged_output)
-
-    def test_single_laz_pipeline_validates_metadata(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            source = tmp_path / "source.copc.laz"
-            output = tmp_path / "prod_merged_10cm.laz"
-            source.write_text("copc")
-
-            def run_pipeline(pipeline, *_, **__):
-                Path(pipeline["pipeline"][-1]["filename"]).write_text("laz")
-                return mock.Mock(returncode=0, stdout="", stderr="")
-
-            with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline), \
-                    mock.patch("main_create_merged_file._select_chunk_points", side_effect=_copy_raw_chunk):
-                with mock.patch(
-                    "main_create_merged_file._validate_preserved_product_dims",
-                    return_value=(True, "ok"),
-                ) as validate_dims:
-                    with mock.patch(
-                        "main_create_merged_file._preserve_and_validate_las_metadata",
-                        return_value=(True, "ok"),
-                    ) as validate:
-                        created = create_prod_merged_file(
-                            [source],
-                            output,
-                            0.1,
-                            "laz",
-                        )
-
-        self.assertEqual(created, output)
-        validate_dims.assert_called_once()
-        staged_output = validate_dims.call_args.args[1]
-        self.assertEqual(staged_output.name, output.name)
-        self.assertNotEqual(staged_output, output)
-        validate.assert_called_once_with(source, staged_output)
-
-    def test_single_product_rejects_existing_output_without_rewriting(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            source = tmp_path / "source.copc.laz"
-            output = tmp_path / "prod_merged_10cm.laz"
-            source.write_text("copc")
-            output.write_text("previous result")
-            with mock.patch("main_create_merged_file._run_pdal_pipeline") as pipeline:
-                with self.assertRaisesRegex(FileExistsError, "existing output"):
-                    create_prod_merged_file([source], output, 0.1, "laz")
-            pipeline.assert_not_called()
-            self.assertEqual(output.read_text(), "previous result")
-            self.assertEqual(source.read_text(), "copc")
 
     def test_chunked_product_failure_cleans_scratch_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -489,7 +351,7 @@ class CreateMergedFileTests(unittest.TestCase):
                 Path(pipeline["pipeline"][-1]["filename"]).write_text("partial")
                 return mock.Mock(returncode=1, stdout="", stderr="chunk failed")
 
-            with mock.patch("main_create_merged_file._prod_merged_chunk_bounds", return_value=["bounds-a"]):
+            with mock.patch("main_create_merged_file._prod_merged_chunk_bounds", return_value=[("bounds-a", None, None)]):
                 with mock.patch("main_create_merged_file._scale_offset_options", return_value={}):
                     with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=fail_chunk):
                         with self.assertRaisesRegex(RuntimeError, "chunk 1 failed"):
@@ -509,7 +371,7 @@ class CreateMergedFileTests(unittest.TestCase):
                 return mock.Mock(returncode=1, stdout="", stderr="chunk failed")
 
             with mock.patch.dict(os.environ, {"SMARTTILE_KEEP_FAILED_CHUNKS": "1"}):
-                with mock.patch("main_create_merged_file._prod_merged_chunk_bounds", return_value=["bounds-a"]):
+                with mock.patch("main_create_merged_file._prod_merged_chunk_bounds", return_value=[("bounds-a", None, None)]):
                     with mock.patch("main_create_merged_file._scale_offset_options", return_value={}):
                         with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=fail_chunk):
                             with self.assertRaisesRegex(RuntimeError, "chunk 1 failed"):
@@ -644,15 +506,6 @@ class CreateMergedFileTests(unittest.TestCase):
         self.assertFalse(success)
         self.assertIn("dropped dimensions", message)
         self.assertFalse(output.exists())
-
-    def test_prod_merged_pipeline_can_still_read_plain_laz(self):
-        pipeline = prod_merged_pipeline(
-            [Path("/tmp/a.laz")],
-            Path("/tmp/out/prod_merged_1cm.laz"),
-            0.01,
-        )["pipeline"]
-
-        self.assertEqual(pipeline[0]["type"], "readers.las")
 
     def test_prepare_copc_inputs_uses_tiling_converter(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -913,13 +766,8 @@ def test_product_point_selection_is_reproducible_and_in_acquisition_order(tmp_pa
 
 
 def test_chunk_pipeline_only_reads_and_merges(tmp_path):
-    import laspy
     from main_create_merged_file import _chunked_prod_merged_pipeline
-    las = laspy.LasData(laspy.LasHeader(point_format=3, version="1.4"))
-    las.x, las.y, las.z = [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]
-    sources = [tmp_path / "a.las", tmp_path / "b.las"]
-    for source in sources:
-        las.write(source)
+    sources = [tmp_path / "a.copc.laz", tmp_path / "b.copc.laz"]
     kinds = [stage.get("type") for stage in _chunked_prod_merged_pipeline(
-        sources, tmp_path / "raw.las", "([0,1],[0,1])", 0.1, {})["pipeline"]]
-    assert kinds == ["readers.las", "readers.las", "filters.merge", "writers.las"]
+        sources, tmp_path / "raw.las", "([0,1],[0,1])", {})["pipeline"]]
+    assert kinds == ["readers.copc", "readers.copc", "filters.merge", "writers.las"]
