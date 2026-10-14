@@ -126,6 +126,16 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("instance-tiles", "instance_tiles"),
     )
 
+    instance_outputs: Optional[str] = Field(
+        None,
+        description="Whole-instance output selections, e.g. 'original:laz,0.1:copc.laz'. "
+                    "Original keeps every point. Requires --instance-tiles dimensions and writes one collection "
+                    "per dimension and resolution. The first dimension uses subsampled_res1, subsampled_res2, ...; "
+                    "later dimensions use instance_dim2/subsampled_res1, etc. Cannot be combined "
+                    "with --tile-outputs or --instance-resolutions.",
+        validation_alias=AliasChoices("instance-outputs", "instance_outputs"),
+    )
+
     instance_resolutions: str = Field(
         "0.01",
         description="Instance tiles: comma-separated voxel sizes in metres (e.g. 0.01,0.1), all from the same "
@@ -159,8 +169,8 @@ class Parameters(BaseSettings):
 
     tile_outputs: Optional[str] = Field(
         None,
-        description="All subsampled tile outputs in order, as 'resolution:format' pairs (formats: "
-                    "laz, copc.laz, ply), e.g. '0.1:laz,0.01:copc.laz'. Output i is written to "
+        description="All tile outputs in order, as 'resolution:format' pairs (formats: "
+                    "laz, copc.laz, ply), e.g. 'original:laz,0.1:copc.laz'. Original keeps every point. Output i is written to "
                     "subsampled_res{i}; every resolution comes from one read of the inputs. Replaces "
                     "--resolution-1/--resolution-2/--output-copc-res1/--output-copc-res2 when given.",
         validation_alias=AliasChoices("tile-outputs", "tile_outputs"),
@@ -384,6 +394,14 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("remap-dims", "remap_dims"),
     )
 
+    prediction_resolution_original: bool = Field(
+        False,
+        description="Remap predictions made at original resolution: match coordinates within LAS "
+                    "encoding precision instead of a voxel-based radius. Requires full coverage; "
+                    "cannot be combined with --resolution-1 or --remap-tolerance.",
+        validation_alias=AliasChoices("prediction-resolution-original", "prediction_resolution_original"),
+    )
+
     remap_tolerance: Optional[float] = Field(
         None, gt=0,
         description=(
@@ -590,6 +608,7 @@ def print_params(params: Parameters):
     print(f"  output_copc_res1: {params.output_copc_res1}")
     print(f"  output_copc_res2: {params.output_copc_res2}")
     print(f"  tile_outputs: {params.tile_outputs}")
+    print(f"  instance_outputs: {params.instance_outputs}")
     print(f"  subsampling_method: {params.subsampling_method}")
 
     print("\nMerge Task:")
@@ -615,6 +634,7 @@ def print_params(params: Parameters):
     print(f"  segmented_folders: {params.segmented_folders}")
     print(f"  remap_dims: {params.remap_dims}")
     print(f"  remap_tolerance: {params.remap_tolerance}")
+    print(f"  prediction_resolution_original: {params.prediction_resolution_original}")
     print(f"  original_raw_input_dir: {params.original_raw_input_dir}")
     print(f"  original_raw_output_dir: {params.original_raw_output_dir}")
     print(f"  transfer_original_dims_to_merged: {params.transfer_original_dims_to_merged}")

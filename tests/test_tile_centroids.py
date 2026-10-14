@@ -1,9 +1,11 @@
 """Single-scan tile centroids against an independent per-tile reference."""
+from fractions import Fraction
 import sys
 from pathlib import Path
 
 import laspy
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -23,6 +25,15 @@ def write_source(path, xyz, offsets):
     return laspy.read(path)
 
 
+def voxel_reference(raw, scales, offsets, resolution):
+    """Exact decimal LAS coordinates, independent of the production grid helper."""
+    step = Fraction(str(resolution))
+    scales = [Fraction(str(value)) for value in scales]
+    offsets = [Fraction(str(value)) for value in offsets]
+    return np.asarray([[(int(row[axis]) * scales[axis] + offsets[axis]) // step
+                        for axis in range(3)] for row in raw], dtype=np.int64)
+
+
 def reference(sources, tile, resolution):
     """Mean of the encoded tile coordinates per voxel, as integer LAS output values."""
     xs = []
@@ -33,10 +44,8 @@ def reference(sources, tile, resolution):
         ints = [np.round((v[keep] - tile.offsets[i]) / tile.scales[i]) for i, v in enumerate((x, y, z))]
         xs.append(np.stack(ints, axis=1))
     ints = np.concatenate(xs).astype(np.int64)
-    coords = ints * np.array(tile.scales) + np.array(tile.offsets)
-    keys = np.floor(coords / resolution).astype(np.int64)
+    keys = voxel_reference(ints, tile.scales, tile.offsets, resolution)
     # Exact mean of the integer LAS coordinates per voxel, rounded half-to-even.
-    from fractions import Fraction
     groups = {}
     for key, raw in zip(map(tuple, keys), ints.tolist()):
         groups.setdefault(key, []).append(raw)
@@ -136,7 +145,7 @@ def nearest_reference(sources, tile, resolution):
         xs.append(np.stack([np.round((v[keep] - tile.offsets[i]) / tile.scales[i])
                             for i, v in enumerate((x, y, z))], axis=1))
     ints = np.concatenate(xs).astype(np.int64)
-    keys = np.floor((ints * np.array(tile.scales) + np.array(tile.offsets)) / resolution).astype(np.int64)
+    keys = voxel_reference(ints, tile.scales, tile.offsets, resolution)
     groups = {}
     for key, raw in zip(map(tuple, keys), ints.tolist()):
         groups.setdefault(key, []).append(raw)
@@ -184,18 +193,23 @@ def test_nearest_to_centroid_ties_and_order_independence():
     assert nearest_x([0, 10, 990]) == 10  # mean 333.3: a real point, not the mean
 
 
-def test_route_puts_each_point_once_per_resolution_in_its_voxels_block():
+@pytest.mark.parametrize("resolutions,cells", [((0.01, 0.1), (10, 1)), ((0.03, 0.1), (10, 1))])
+def test_route_puts_each_point_once_per_resolution_in_its_voxels_block(resolutions, cells):
     rng = np.random.default_rng(5)
-    # Multiples of the coarse resolution hit IEEE floor disagreements between grids.
-    coords = np.c_[np.arange(1, 20001) * 0.1, rng.uniform(-50, 50, 20000), np.zeros(20000)]
-    masks = np.full(len(coords), 3, dtype=np.uint8)
-    resolutions, cells = (0.01, 0.1), (10, 1)
-    rows, blocks, bits = route(coords, masks, resolutions, cells)
-    assert (~np.isin(np.arange(len(coords)), rows[bits == 3])).any()  # some points split across blocks
-    for index, (r, k) in enumerate(zip(resolutions, cells)):
+    # Exact centimetre faces must agree across nested grids; different block
+    # widths can still require one routed copy per resolution.
+    raw = np.c_[np.arange(1, 2001) * 100, rng.integers(-50000, 50000, 2000), np.zeros(2000, dtype=int)]
+    scales, offsets = (0.001,) * 3, (500000.0, 5400000.0, 0.0)
+    masks = np.full(len(raw), 3, dtype=np.uint8)
+    rows, blocks, bits = route(raw, masks, resolutions, cells, scales=scales, offsets=offsets)
+    if resolutions == (0.01, 0.1):
+        assert np.all(bits == 3)
+    else:
+        assert np.any(bits != 3)
+    for index, (resolution, width) in enumerate(zip(resolutions, cells)):
         mine = (bits & (1 << index)) != 0
-        assert np.array_equal(np.sort(rows[mine]), np.arange(len(coords)))
-        expected = np.floor_divide(np.floor(coords[rows[mine], :2] / r).astype(np.int64), k)
+        assert np.array_equal(np.sort(rows[mine]), np.arange(len(raw)))
+        expected = voxel_reference(raw[rows[mine]], scales, offsets, resolution)[:, :2] // width
         assert np.array_equal(blocks[mine], expected)
 
 
@@ -371,3 +385,119 @@ def test_tile_existing_output_is_preserved_before_work(tmp_path, monkeypatch):
                              work_dir=tmp_path / "work", metadata_source=sources[0])
     assert output.read_bytes() == b"previous result"
     assert not (tmp_path / "work").exists()
+
+
+@pytest.mark.parametrize("output_format", ("laz", "copc.laz", "ply"))
+def test_original_and_subsampled_tiles_preserve_duplicates_and_buffer_points(tmp_path, output_format):
+    from collections import Counter
+
+    xyz = np.array([[0.01, 0.01, 1.0], [0.01, 0.01, 1.0], [0.02, 0.01, 1.0],
+                    [0.99, 0.01, 1.0], [1.01, 0.01, 1.0], [1.5, 0.01, 1.0]])
+    sources = [tmp_path / "a.las", tmp_path / "b.las"]
+    inputs = [write_source(sources[0], xyz[:4], (0, 0, 0)),
+              write_source(sources[1], xyz[4:], (0, 0, 0))]
+    tiles = [Tile("left", (-0.1, -0.1, 1.1, 1.1), (0.001,) * 3, (0.5, 0.5, 0)),
+             Tile("right", (0.9, -0.1, 2.1, 1.1), (0.001,) * 3, (1.5, 0.5, 0))]
+    outputs = [(0.0, {t.label: tmp_path / "out" / f"{t.label}.{output_format}" for t in tiles}, output_format),
+               (0.1, {t.label: tmp_path / "out" / f"{t.label}_10cm.laz" for t in tiles}, "laz")]
+    counts, occupied = write_tile_centroids(sources, tiles, inputs[0].header, outputs, workers=2,
+                                            work_dir=tmp_path / "out", metadata_source=sources[0])
+    assert occupied == [True, True]
+    for tile in tiles:
+        path = outputs[0][1][tile.label]
+        if output_format == "ply":
+            _, actual = read_ply_xyz(path)
+        else:
+            cloud = laspy.read(path)
+            actual = np.c_[cloud.x, cloud.y, cloud.z]
+        xmin, ymin, xmax, ymax = tile.bounds
+        expected = xyz[(xyz[:, 0] >= xmin) & (xyz[:, 0] <= xmax) &
+                       (xyz[:, 1] >= ymin) & (xyz[:, 1] <= ymax)]
+        assert Counter(map(tuple, np.round(actual, 6))) == Counter(map(tuple, expected))
+        assert len(actual) == counts[tile.label][0] == len(expected)
+        expected_reduced, _ = reference(inputs, tile, 0.1)
+        assert encoded(outputs[1][1][tile.label])[0] == expected_reduced
+
+
+def test_original_only_dense_block_streams_without_voxel_reduction(tmp_path, monkeypatch):
+    import tile_centroids
+
+    block, destination = tmp_path / "0_0", tmp_path / "original"
+    block.mkdir()
+    destination.mkdir()
+    records = np.zeros(25, dtype=RECORD)
+    records["X"], records["m"] = 123, 1
+    records.tofile(block / "000000.bin")
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("original points must bypass voxel reduction")
+
+    monkeypatch.setattr(tile_centroids, "_reduce_block", unexpected)
+    counts = tile_centroids._reduce_and_write((block, (0.0,), (50,), (0.001,) * 3,
+                                               (0.0,) * 3, 7, [destination], "fragment", False))
+    dtype = laspy.PointFormat(tile_centroids.FRAGMENT_POINT_FORMAT).dtype()
+    batches = [np.fromfile(path, dtype=dtype) for path in sorted(destination.glob("*.bin"))]
+    assert counts == [(25, 25)]
+    assert [len(batch) for batch in batches] == [7, 7, 7, 4]
+    assert np.array_equal(np.concatenate(batches)["X"], records["X"])
+    assert not block.exists()
+
+
+def test_original_routing_and_split_keep_every_point_once_per_output(tmp_path):
+    rng = np.random.default_rng(7)
+    records = np.zeros(101, dtype=RECORD)
+    records["X"] = rng.integers(-100, 150, len(records))
+    records["Y"] = rng.integers(-100, 150, len(records))
+    records["m"] = 3
+    scales, offsets, resolutions = (0.001,) * 3, (0.0,) * 3, (0.0, 0.1)
+    coords = np.c_[records["X"], records["Y"], records["Z"]] * scales
+    cells = block_cells(resolutions, choose_block_size(len(records), 1, resolutions))
+    rows, blocks, bits = route(np.c_[records["X"], records["Y"], records["Z"]], records["m"],
+                               resolutions, cells, scales=scales, offsets=offsets)
+    for slot in range(2):
+        assert np.array_equal(np.sort(rows[(bits & (1 << slot)) != 0]), np.arange(len(records)))
+    block = tmp_path / "0_0"
+    block.mkdir()
+    records.tofile(block / "000000.bin")
+    originals, reduced = _reduce_block((block, resolutions, cells, scales, offsets, 7))
+    from collections import Counter
+    assert Counter(map(tuple, originals[0])) == Counter(map(tuple, coords))
+    assert originals[1] == reduced[1] == len(records)
+    expected = reduce_records(records, resolutions, scales, offsets)[1][0]
+    assert set(map(tuple, reduced[0])) == set(map(tuple, expected))
+
+
+def test_original_output_selector_and_filename():
+    from product_formats import parse_tile_outputs
+    from main_subsample import resolution_label, subsample_output_name
+
+    assert parse_tile_outputs("original:laz,0.1:copc.laz") == [(0.0, "laz"), (0.1, "copc.laz")]
+    assert parse_tile_outputs("ORIGINAL:ply") == [(0.0, "ply")]
+    assert resolution_label(0) == "original"
+    assert subsample_output_name(Path("c00_r00.laz"), 0, None, False) == "c00_r00_subsampled_original.laz"
+    assert subsample_output_name(Path("tree_subsampled_original.laz"), 0.1, None, False) == "tree_subsampled_10cm.laz"
+    for selector in ("0:laz", "original:laz,original:ply", "original:las", "nan:laz", "inf:laz"):
+        with pytest.raises(ValueError):
+            parse_tile_outputs(selector)
+
+
+def test_original_spatial_tiles_align_encoding_to_the_source_grid(tmp_path):
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales, header.offsets = np.full(3, 0.001), np.full(3, 0.0005)
+    source = laspy.LasData(header)
+    source.X, source.Y, source.Z = [0, 1, 999, 1000], [1, 2, 3, 4], [3, 4, 5, 6]
+    source_path = tmp_path / "source.las"
+    source.write(source_path)
+    # The tile centre lies halfway between points on the source's LAS grid.
+    tile = Tile("c00_r00", (-1, -1, 2, 2), (0.001,) * 3, (0.5,) * 3)
+    target = tmp_path / "out/original.laz"
+    counts, _ = write_tile_centroids([source_path], [tile], header,
+                                     [(0.0, {tile.label: target}, "laz")], workers=1,
+                                     work_dir=tmp_path / "out", metadata_source=source_path)
+    actual = laspy.read(target)
+    expected_xyz = np.c_[source.x, source.y, source.z]
+    actual_xyz = np.c_[actual.x, actual.y, actual.z]
+    expected_xyz = expected_xyz[np.argsort(expected_xyz[:, 0])]
+    actual_xyz = actual_xyz[np.argsort(actual_xyz[:, 0])]
+    np.testing.assert_allclose(actual_xyz, expected_xyz, rtol=0, atol=1e-12)
+    assert counts[tile.label] == [4]

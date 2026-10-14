@@ -59,7 +59,8 @@ TILE_OUTPUT_FORMATS = ("laz", "copc.laz", "ply")
 def parse_tile_outputs(value) -> List[tuple]:
     """Parse 'resolution:format' pairs into [(resolution_m, format)].
 
-    Formats are laz, copc.laz (alias: copc) and ply. Each resolution may appear once.
+    Formats are laz, copc.laz (alias: copc) and ply. ``original`` selects all
+    source points, represented internally by 0.0. Each resolution may appear once.
     """
     outputs = []
     for token in selector_tokens(value):
@@ -67,13 +68,14 @@ def parse_tile_outputs(value) -> List[tuple]:
             continue
         resolution, separator, output_format = token.partition(":")
         output_format = {"copc": "copc.laz"}.get(output_format.strip().lower(), output_format.strip().lower())
+        original = resolution.strip().lower() == "original"
         try:
-            resolution = float(resolution)
+            resolution = 0.0 if original else float(resolution)
         except ValueError:
             resolution = float("nan")
-        if not separator or output_format not in TILE_OUTPUT_FORMATS or not (resolution > 0 and resolution < 1e6):
-            raise ValueError(f"Tile output '{token}' must be 'resolution:format' with a positive resolution "
-                             f"in metres and one of {', '.join(TILE_OUTPUT_FORMATS)}")
+        if not separator or output_format not in TILE_OUTPUT_FORMATS or not (original or 0 < resolution < 1e6):
+            raise ValueError(f"Tile output '{token}' must be 'resolution:format' with 'original' or a positive "
+                             f"resolution in metres and one of {', '.join(TILE_OUTPUT_FORMATS)}")
         if any(resolution == seen for seen, _ in outputs):
             raise ValueError(f"Tile output '{token}': resolution {resolution} m is listed twice; "
                              "each resolution may appear once")

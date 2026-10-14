@@ -286,7 +286,20 @@ def _write_tile_task(params: Parameters):
             raise ValueError("Both grid-origin-x and grid-origin-y are required")
         grid_origin = None if params.grid_origin_x is None else (params.grid_origin_x, params.grid_origin_y)
         from product_formats import parse_tile_outputs
+        if params.instance_tiles and any(not item.strip() for item in params.instance_tiles.split(",")):
+            raise ValueError("--instance-tiles must contain nonempty comma-separated field names")
         instance_dimensions = _parse_csv(params.instance_tiles) if params.instance_tiles else []
+        if len(set(instance_dimensions)) != len(instance_dimensions):
+            raise ValueError("--instance-tiles dimensions must be distinct; duplicate fields were selected")
+        instance_outputs = None
+        if params.instance_outputs:
+            if not instance_dimensions:
+                raise ValueError("--instance-outputs requires at least one --instance-tiles dimension")
+            if params.tile_outputs or "instance_resolutions" in params.model_fields_set:
+                raise ValueError("--instance-outputs cannot be combined with --tile-outputs or --instance-resolutions")
+            instance_outputs = parse_tile_outputs(params.instance_outputs)
+            if not instance_outputs:
+                raise ValueError("--instance-outputs lists no outputs")
         if params.tile_outputs:
             tile_outputs = parse_tile_outputs(params.tile_outputs)
         elif instance_dimensions:
@@ -310,13 +323,24 @@ def _write_tile_task(params: Parameters):
         instance_results = {}
         if instance_dimensions:
             from instance_tiles import instance_tiles_from_plan
+            instance_options = {}
+            if instance_outputs:
+                instance_options = {
+                    "formats": [f for _, f in instance_outputs],
+                    "output_directories": {
+                        dimension: [(output_dir if index == 0 else output_dir / f"instance_dim{index + 1}")
+                                    / f"subsampled_res{slot + 1}" for slot in range(len(instance_outputs))]
+                        for index, dimension in enumerate(instance_dimensions)
+                    },
+                }
             instance_results = instance_tiles_from_plan(
                 plan, output_dir, instance_dimensions,
-                resolutions=[float(r) for r in _parse_csv(params.instance_resolutions)],
+                resolutions=([r for r, _ in instance_outputs] if instance_outputs else
+                             [float(r) for r in _parse_csv(params.instance_resolutions)]),
                 wide=params.max_instance_extent,
                 attributes=_parse_csv(params.instance_tile_dims) if params.instance_tile_dims else [],
                 check_ids=not params.allow_reused_instance_ids, workers=spatial_query_worker_count(workers),
-                publish_occupancy=not tile_outputs)
+                publish_occupancy=not tile_outputs, **instance_options)
 
         # Step 7: Update tile_bounds_tindex.json with actual bounds from created tiles
         # (so remap/merge matching uses file extent instead of nominal grid)
@@ -433,6 +457,8 @@ def run_remap_task(params: Parameters):
     original_dir = Path(originals)
     output = _raw_original_output_dir(params, original_dir)
     try:
+        if params.prediction_resolution_original and ("resolution_1" in params.model_fields_set or params.remap_tolerance is not None):
+            raise ValueError("--prediction-resolution-original cannot be combined with --resolution-1 or --remap-tolerance")
         _validate_raw_original_lane(original_dir, output)
         if params.original_copc_input_dir:
             _validate_copc_original_lane(Path(params.original_copc_input_dir))
@@ -447,6 +473,7 @@ def run_remap_task(params: Parameters):
             instance_dimension=params.instance_dimension,
             target_dims=set(_parse_csv(params.remap_dims)) if params.remap_dims else None,
             match_instances=params.match_instances,
+            prediction_resolution_original=params.prediction_resolution_original,
         )
         if params.transfer_original_dims_to_merged:
             _create_prod_merged_outputs(output, output.parent, params)
@@ -536,6 +563,7 @@ def preprocess_boolean_flags(args_list):
         '--skip-merged-file', '--skip_merged_file',
         '--skip-unfiltered-tiles', '--skip_unfiltered_tiles',
         '--match-instances', '--match_instances',
+        '--prediction-resolution-original', '--prediction_resolution_original',
         '--allow-reused-instance-ids', '--allow_reused_instance_ids',
         '--original-point-index', '--original_point_index',
         '--transfer-original-dims-to-merged', '--transfer_original_dims_to_merged',
@@ -650,6 +678,7 @@ def _print_cli_help() -> None:
                 "tile_outputs",
                 "instance_tiles",
                 "instance_resolutions",
+                "instance_outputs",
                 "max_instance_extent",
                 "instance_tile_dims",
                 "allow_reused_instance_ids",
@@ -686,6 +715,7 @@ def _print_cli_help() -> None:
                 "merged_laz",
                 "baseline_1cm_folders",
                 "match_instances",
+                "prediction_resolution_original",
                 "remap_tolerance",
                 "remap_dims",
                 "original_with_predictions_dir",

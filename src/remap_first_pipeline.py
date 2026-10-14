@@ -29,7 +29,8 @@ from dense_instance_ownership import (
     ANCHORS, filter_owned_instances, ownership_regions,
     assign_shared_points,
 )
-from prediction_collections import assign_prediction_values, prediction_collection_files
+from prediction_collections import (assign_prediction_values, original_prediction_radius,
+                                    prediction_collection_files)
 from instance_labels import instance_extra_bytes_params
 from orphan_instance_recovery import recover_orphaned_instances, validate_recovered_geometry
 from raycloud_tree_files import filter_tree_sidecars, tree_sidecars
@@ -179,16 +180,21 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
         selected.append(dims)
     output_dir.mkdir(parents=True)
     metrics = report["original_coverage"] = []
+    original_geometry = report.get("prediction_resolution") == "original"
+    baseline_stage = "unfiltered_original" if original_geometry else "unfiltered_1cm"
     report["original_coverage_policy"] = {
-        "unfiltered_1cm": "100% required for every model with baseline geometry",
-        "final_survivors": "100% required except RCT; unmatched RCT predictions become background 0",
+        baseline_stage: "100% required for every model with baseline geometry",
+        "final_survivors": ("100% required for every model" if original_geometry else
+                            "100% required except RCT; unmatched RCT predictions become background 0"),
     }
     radius = report["original_radius_m"]
+    radii = report.get("original_radii_m", [radius] * len(models))
     enrichment_start = time.monotonic()
     phases = {"spill": 0.0, "query": 0.0, "write": 0.0}
     labels = sorted({m for m in matches if m is not None})
     with RemapBatchQueries(indices, baseline_indices, workers=process_workers,
-                          radius=radius, matches=matches if labels else None) as queries:
+                          radius=radii, matches=matches if labels else None,
+                          prefer_rct_trees=not original_geometry) as queries:
         for file in files:
             file_ids = {model.instance: set() for model, dims in zip(models, selected)
                         if model.instance and model.instance in dims}
@@ -198,13 +204,14 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                 if existing.intersection(used):
                     raise ValueError(f"{file.name}: original already contains prediction dimensions {sorted(existing.intersection(used))}")
                 update_extra_dimensions(header, [param for dims in selected for param in dims.values()])
-                final_metrics = [_coverage_metric(file, model, "final_survivors", radius) for model in models]
-                baseline_metrics = [None if baseline is None else _coverage_metric(file, model, "unfiltered_1cm", radius)
-                                    for model, baseline in zip(models, baseline_indices)]
+                final_metrics = [_coverage_metric(file, model, "final_survivors", model_radius)
+                                 for model, model_radius in zip(models, radii)]
+                baseline_metrics = [None if baseline is None else _coverage_metric(file, model, baseline_stage, model_radius)
+                                    for model, baseline, model_radius in zip(models, baseline_indices, radii)]
                 for model, metric, match in zip(models, final_metrics, matches):
                     if match is not None:
                         metric["match_instance_dimension"] = match
-                    elif model.instance == "PredInstance_RCT":
+                    elif model.instance == "PredInstance_RCT" and not original_geometry:
                         metric["unmatched_policy"] = "background_zero"
                         metric["background_assigned"] = 0
                 metrics.extend([m for m in baseline_metrics if m is not None] + final_metrics)
@@ -231,7 +238,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                         if base_distances is not None:
                             _record_coverage(baseline_metrics[i], xyz, base_distances, origin)
                         _record_coverage(final_metrics[i], xyz, distances, origin)
-                        if models[i].instance == "PredInstance_RCT" and matches[i] is None:
+                        if models[i].instance == "PredInstance_RCT" and matches[i] is None and not original_geometry:
                             missing = ~np.isfinite(distances)
                             final_metrics[i]["background_assigned"] += int(np.count_nonzero(missing))
                             if np.any(missing):
@@ -673,13 +680,17 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
 
 def strict_remap(*, collections, originals, output, baseline_collections=None, target_dims=None,
                  instance_dimension="PredInstance", workers=1, resolution_1=None,
-                 remap_tolerance=None, match_instances=False):
+                 remap_tolerance=None, match_instances=False, prediction_resolution_original=False):
     """Final task gate: 100% final coverage, plus baseline coverage where geometry is known.
 
     With ``match_instances`` (instance tiles of originals that already carry
     each collection's instance dimension), every original point takes the
     values of the nearest prediction point of its own instance; the instance
     IDs stay as they are.
+
+    ``prediction_resolution_original`` selects retained source-point geometry.
+    Its matching radii come from LAS coordinate precision, independently for
+    each prediction collection; no voxel resolution or user radius applies.
 
     Merged predictions lie on the 1 cm geometry, so full final coverage implies
     full baseline coverage. Baseline geometry, from `baseline_collections` or a
@@ -695,6 +706,9 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
     report_path = output.parent / f"{output.name}_coverage.json"
     start = time.monotonic()
     try:
+        if prediction_resolution_original and (resolution_1 is not None or remap_tolerance is not None):
+            raise ValueError("Original-resolution predictions cannot be combined with "
+                             "resolution_1 or remap_tolerance")
         recorded_resolutions = set()
         inferred_baselines = []
         for collection in collections:
@@ -709,11 +723,19 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
                 # An inferred baseline is only a diagnosis: skip it when it was not kept.
                 baseline = (Path(collection) / metadata["baseline"]).resolve() if "baseline" in metadata else None
                 inferred_baselines.append(baseline if baseline is not None and baseline.is_dir() else None)
-        if len(recorded_resolutions) > 1:
-            raise ValueError("Prediction collections declare conflicting first-stage resolutions")
-        if resolution_1 is None:
-            resolution_1 = next(iter(recorded_resolutions), 0.01)
-        report.update(new_report(resolution_1, remap_tolerance))
+        if prediction_resolution_original:
+            if not collections:
+                raise ValueError("At least one prediction collection is required")
+            radii = [original_prediction_radius(collection) for collection in collections]
+            report.update(resolution_1_m=None, original_radius_m=max(radii), original_radii_m=radii,
+                          prediction_resolution="original",
+                          original_radius_policy="half diagonal of each prediction collection's coarsest LAS XYZ scales; 8 global-coordinate float64 ULP encoding guard")
+        else:
+            if len(recorded_resolutions) > 1:
+                raise ValueError("Prediction collections declare conflicting first-stage resolutions")
+            if resolution_1 is None:
+                resolution_1 = next(iter(recorded_resolutions), 0.01)
+            report.update(new_report(resolution_1, remap_tolerance))
         if baseline_collections is None:
             baseline_collections = inferred_baselines
         if len(baseline_collections) not in (1, len(collections)):

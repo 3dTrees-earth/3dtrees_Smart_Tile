@@ -140,7 +140,7 @@ show their model-specific branches.
 | 1 | **Spatial Index** | Creates a GeoPackage tindex using `pdal tindex` for efficient spatial queries across all input files. |
 | 2 | **Tile Bounds** | Calculates optimal tile grid based on data extent, tile size (default: 100m), and buffer (default: 20m) parameters. |
 | 3 | **Single read** | Reads every source point once, in parallel point ranges. Each point is encoded into every buffered tile it falls in and spilled to XY blocks; tile-core occupancy is counted in the same read. |
-| 4 | **Block reduction** | Workers reduce blocks in parallel to every resolution (voxel mean, or with nearest-to-centroid the original point nearest it) and write LAS fragments. No full-resolution tiles are written. |
+| 4 | **Block reduction** | Workers reduce blocks in parallel to every resolution (voxel mean, or with nearest-to-centroid the original point nearest it) and write LAS fragments. An `original` entry bypasses voxel reduction and keeps every point. |
 | 5 | **Outputs** | Per `--tile-outputs` entry: `copc.laz` (default 1 cm) is built by Untwine from one LAS per tile; `laz` (default 10 cm) fragments are concatenated; `ply` is binary XYZ. |
 
 #### MERGE TASK: Result Integration
@@ -516,13 +516,58 @@ python src/run.py --show-params
 
 ### Instance tiles: inputs that already carry predictions
 
+For one or more instance dimensions with the shared output selections:
+
+```bash
+python src/run.py --task tile --input-dir /path/to/labeled --output-dir /path/to/tiles \
+    --instance-tiles PredInstance_SAT,PredInstance_FM --instance-outputs original:copc.laz,0.1:laz \
+    --instance-tile-dims intensity
+```
+
+Each instance dimension gets its own collection at each requested resolution.
+The example produces four collections: SAT uses `subsampled_res1/` (original
+COPC) and `subsampled_res2/` (10 cm LAZ); FM uses
+`instance_dim2/subsampled_res1/` and `instance_dim2/subsampled_res2/`.
+Later dimensions use `instance_dim3/`, etc., in the supplied order. These index
+paths do not depend on attribute names. Each collection carries only its selected
+instance field and the requested additional attributes; IDs from different
+segmentation models stay separate. Duplicate instance fields are rejected.
+Use `--tile-outputs original:laz,0.1:laz` for ordinary spatial geometry outputs.
+Do not combine `--instance-outputs` with `--tile-outputs` or the legacy
+`--instance-resolutions`. Each resolution appears once. Original resolution keeps
+the source coordinate grid; incompatible source grids fail rather than shifting
+points. PLY retains scalar instance attributes, checks integer values fit 32 bits,
+and cannot preserve LAS missing-value declarations; LAZ/COPC preserve these.
+
+After species prediction on original-resolution tiles:
+
+```bash
+python src/run.py --task remap --segmented-folders /path/to/species_tiles \
+    --original-laz-input-dir /path/to/labeled --original-laz-output-dir /path/to/enriched \
+    --prediction-resolution-original --instance-dimension PredInstance_SAT \
+    --match-instances --remap-dims species_id_SAT,species_prob_SAT
+```
+
+This mode matches retained coordinates within each prediction collection's LAS
+encoding precision, including after COPC reordering. Every original point must
+match, including RCT. It rejects `--resolution-1` and `--remap-tolerance` overrides.
+Existing instance IDs and original record order remain unchanged.
+
+
 For originals that already hold instance predictions (for example originals with
 predictions from a merge or remap), a per-instance tool such as DetailView needs
 tiles in which every instance appears once and whole. No buffer filtering,
 reconciliation or deduplication is needed, so the tile task does it directly.
-The unpublished Galaxy wrapper candidate `2.4.0+galaxy1` exposes one instance
-dimension and one resolution per run, plus same-instance remapping. The CLI
-also supports several dimensions and resolutions in one invocation.
+See [multiple-dimension local validation](docs/validation/2026-10-14-multiple-dimensions.md) for the current wrapper/image checks.
+
+The Galaxy wrapper candidate `2.4.0+galaxy4` uses the same repeatable Output
+controls for spatial and whole-instance tiles: choose a voxel size or Original
+resolution, then LAZ, COPC LAZ or binary PLY. Original resolution retains every
+point, including duplicate coordinates. Whole-instance outputs always retain
+their instance field and selected additional attributes. Comma-separated instance
+dimensions, for example `PredInstance_SAT,PredInstance_FM`, produce a separate
+collection for every dimension and output entry. The legacy CLI keeps its named
+directories when using `--instance-resolutions`:
 
 ```bash
 python src/run.py --task tile --input-dir /path/to/originals_with_predictions --output-dir /path/to/products \
@@ -651,6 +696,29 @@ Subsampled products are reproducible. PDAL only reads and merges each chunk; Sma
 
 ### Local Validation
 
+The voxel-boundary correction passes **515 targeted tests**, including the
+20-point regression (4 SAT / 2 ForestMamba representatives at 10 cm), both tiling
+modes and merged-product sampling. The corrected image and independent live
+Galaxy replay also pass; see the validation record for the exact image identity.
+See [voxel-boundary fix validation](docs/validation/2026-10-14-voxel-boundaries.md).
+
+The current coarse-only acceptance passes on cached GFZ SAT and ForestMamba
+10 cm tiles: **8,280,988 input records per model**, zero unsupported positive
+core records, and each final positive ID in one output tile. Four controlled
+boundary cases and seven focused live Galaxy tests also pass, using the existing
+image. See [coarse GFZ acceptance and its input contract](docs/validation/2026-10-14-coarse-gfz.md).
+A subsequent exhaustive original-point comparison found different instance
+assignments at **0.0415% of SAT points** and **0.0034% of ForestMamba points**
+after aligning IDs between coarse-only and 1 cm processing. Both routes preserve
+all original geometry and source fields; they are not exactly equivalent.
+See [the route comparison](docs/validation/2026-10-14-coarse-vs-dense.md) for
+instance counts, other prediction differences and scope.
+
+The earlier original-resolution update passed **553 scientific tests** and all
+**21 Galaxy functional cases**. A linked Galaxy original-COPC → same-instance
+remap and GFZ SAT/FM round trips (867,599 points per model) preserve the checked
+values and metadata. See the [original-resolution validation](docs/validation/2026-10-14-original-resolution.md).
+
 Run the complete suite in the scientific environment with `pytest` and
 `pytest-subtests` installed; `unittest discover` omits pytest-style regressions:
 
@@ -658,7 +726,7 @@ Run the complete suite in the scientific environment with `pytest` and
 python -m pytest -q -p no:cacheprovider tests
 ```
 
-The final runtime source `f9c01a1` passed **520 tests and 90 subtests**, with no
+The frozen prior runtime source `f9c01a1` passed **520 tests and 90 subtests**, with no
 failures, errors or skips. The `2.4.0+galaxy1` wrapper passes **18 real Galaxy
 cases**, 44 staging tests and 13 offline render variants; nine independent numeric
 checks pass against the same immutable candidate image. The
@@ -681,8 +749,11 @@ instance runs precede the later remap/export fixes and remain separate evidence.
 ForestStructure acceptance covers artifacts, provenance and point/voxel accounting,
 not independent Julia metric parity or ecological accuracy. The remaining release
 checks are the complete workflow/visualization canary on the selected deployed
-image/wrapper and the exact 3110/3111 replays. The final 18-case wrapper acceptance
-is local and unpublished; it supersedes the earlier 13-case wrapper matrix.
+image/wrapper and unresolved failure classifications/dispositions under
+[3DT-1902](https://linear.app/geosense-ufr/issue/3DT-1902). The accepted policy is
+one passing representative per confirmed error group; completed groups do not
+require redundant full-dataset replays. The historical 18-case wrapper acceptance
+is local and unpublished; it superseded the earlier 13-case wrapper matrix.
 
 Dense-cell point-count targets are soft: an 8-million-point leaf completed under
 an 8 GiB cap, but exceeded the 4-million-point target. This is a reliability limit
@@ -706,7 +777,12 @@ inference harness, see the [GFZ suite README](tests/integration/gfz/README.md).
 `--tile-bounds-json` from the same tile run. For already-dense predictions, use
 `--segmented-remapped-folder`; for several collections use `--segmented-folders`
 and explicitly supply dense targets when a coarse-to-dense transfer is needed.
-The dense target defaults to `subsampled_res1/` beside the segmented folder. With
+For coarse-only filtering, use `--segmented-remapped-folder`, set
+`--resolution-1` to the supplied spacing (for example `0.1`), and omit targets.
+This route requires coordinate-preserving predictions from the same tiling run.
+
+With the coarse-to-dense route, the dense target defaults to `subsampled_res1/`
+beside the segmented folder. With
 `--tile-outputs`, list the high-resolution output first (so it is `subsampled_res1/`)
 or pass its folder with `--subsampled-target-folder`.
 
@@ -793,7 +869,7 @@ In the tile task, at most two tile outputs are assembled or converted at once.
 3. Each block is reduced independently. An output point is the exact mean of the voxel's integer LAS coordinates, rounded half-to-even once onto the same grid; with nearest-to-centroid it is the original point nearest that mean. Every resolution is computed from the original points, not from finer outputs (3DT-2203). Results do not depend on worker count, block size or point order.
 4. Workers write raw point-record fragments (no per-block LAS header). Each tile's output is assembled in block order with large batched writes: LAZ, COPC (one LAS per tile, then Untwine), or PLY.
 
-**Resolutions and formats**: `--tile-outputs "0.1:laz,0.01:copc.laz,0.25:ply"` lists every subsampled output in order; output *i* is written to `subsampled_res{i}/`, and all of them come from the same read (formats `laz`, `copc.laz`, `ply`; PLY is binary float64 XYZ with the CRS as `comment crs:`). Without it, `--resolution-1/--resolution-2` and `--output-copc-res1/2` define two outputs as before. No SmartTile stage needs COPC for these tiles: merge reads the 1 cm tiles sequentially, and every resolution is computed from the original points.
+**Resolutions and formats**: `--tile-outputs "0.1:laz,0.01:copc.laz,0.25:ply"` lists every output in order; use `original:laz` to retain the original resolution; output *i* is written to `subsampled_res{i}/`, and all of them come from the same read (formats `laz`, `copc.laz`, `ply`; PLY is binary float64 XYZ with the CRS as `comment crs:`). Without it, `--resolution-1/--resolution-2` and `--output-copc-res1/2` define two outputs as before. No SmartTile stage needs COPC for these tiles: merge reads the 1 cm tiles sequentially, and every resolution is computed from the original points.
 
 Earlier versions built a full-resolution COPC per tile and read it back through ~5 m window queries. COPC's coarse octree nodes overlap every window, so each point was decoded about 25 times (dataset 3109).
 
@@ -823,6 +899,31 @@ Each model collection is processed independently. Do not combine SAT and
 ForestMamba into one instance space. When merging several collections, output
 subdirectories `model_000`, `model_001`, etc. preserve their separate geometry.
 Use model-specific prediction dimension names before the final original remap.
+
+**Optional target geometry:** Galaxy's **Filter / merge segmented tiles** can
+also process coordinate-preserving predictions from the same tiling run at their
+existing resolution. Without finer targets, use `--segmented-remapped-folder`
+and set `--resolution-1` to the supplied geometry's voxel size, for example `0.1`
+for 10 cm. This skips transfer; it does not create fine points. Filtering,
+recovery and anchors operate on the supplied samples. Each final positive ID
+occurs in one output tile; this is not a guarantee of one ID per biological tree.
+Input IDs are independent per tile, even when their numeric values agree.
+
+The Galaxy transfer radius is sqrt(3) × segmented-input voxel size when targets
+are provided. This is separate from instance correspondence (5 cm) and shared
+point/support checks (1 cm); these radii are not enlarged for coarse inputs.
+Coarse-only reconciliation relies on shared samples in overlaps. Independently
+resampled or shifted geometry is outside this supported input contract; provide
+common target geometry for those inputs. This is an input requirement: SmartTile
+does not currently verify tiling-run provenance or unchanged coordinates against
+the pre-segmentation tiles. Historical report and baseline names
+containing `1cm` do not resample data; `resolution_1_m` records actual geometry
+spacing. Point-count-based small-cluster limits depend on that spacing.
+
+Galaxy returns processed tiles and RCT companions here. Use **Remap predictions
+to originals** and **Create merged file** for original enrichment and final
+products. The CLI retains its optional combined-operation flags. The steps below
+illustrate the usual 1 cm target route; without targets they use supplied geometry.
 
 1. **Transfer before filtering.** Match source/target tiles through the tile
    layout and require a source for every target. For each 1 cm point, copy the
@@ -996,6 +1097,7 @@ neighbors; unrelated or already-updated layouts are not recovered this way.
 | `--subsampling-method` | center-of-mass | Subsampling method: `center-of-mass` or `nearest-to-centroid` |
 | `--tiling-threshold` | None | File size threshold in MB for skipping tiling on single small files |
 | `--instance-tiles` | — | Comma-separated instance dimensions: `instance_tiles_<dimension>_<resolution>/` per dimension/resolution, one owner per instance |
+| `--instance-outputs` | — | Shared `resolution:format` selections for each instance dimension; `original` retains every point; first dimension uses `subsampled_res1`, …, later dimensions use `instance_dim2/subsampled_res1`, … |
 | `--instance-resolutions` | 0.01 | Comma-separated instance tile voxel sizes in metres, one collection each (per instance; nearest point to the voxel mean) |
 | `--max-instance-extent` | 50 | Warn about instances wider than this many metres (warning only) |
 | `--instance-tile-dims` | — | Optional carried fields; XYZ and the selected instance dimension are always included |
@@ -1023,6 +1125,7 @@ neighbors; unrelated or already-updated layouts are not recovered this way.
 | `--max-cluster-size` | 3000 | Small-instance reassignment: instances with fewer points are checked |
 | `--max-volume-for-merge` | 4.0 | Small-instance reassignment: maximum bounding-box volume in m³ |
 | `--baseline-1cm-folders` | Merge manifest, else none | Optional shared baseline or folders in model order; adds a baseline coverage check to final remap. A manifest baseline that no longer exists is skipped |
+| `--prediction-resolution-original` | false | Match original-resolution prediction coordinates within LAS encoding precision; strict coverage for every model |
 | `--remap-tolerance` | Auto: sqrt(3) × `--resolution-1` | Optional final original coverage radius override in XYZ metres |
 | `--remap-dims` | All prediction dims | Optional comma-separated allowlist of prediction dimensions to transfer |
 | `--match-instances` | False | Remap instance tiles: each original point takes the values of the nearest prediction point of its own instance (each collection's `PredInstance*`); instance IDs stay unchanged |

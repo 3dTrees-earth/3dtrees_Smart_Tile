@@ -1,0 +1,314 @@
+{
+  "status": "image_and_galaxy_validated",
+  "issue": "3DT-2391",
+  "tests": {
+    "tests": "515",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0",
+    "time": "57.932"
+  },
+  "test_environment": {
+    "python": "3.11",
+    "numpy": "2.3.5",
+    "laspy": "2.6.1",
+    "pytest": "8.3.5"
+  },
+  "scope": [
+    "exact_decimal_voxel_keys",
+    "spatial_routing_and_reduction",
+    "whole_instance_sampling",
+    "merged_product_sampling",
+    "exact_aligned_chunk_edges"
+  ],
+  "regression": {
+    "source_points": 20,
+    "sat_10cm": 4,
+    "fm_10cm": 2,
+    "spatial_10cm": 2,
+    "original_per_dimension": 20
+  },
+  "evidence_directory": "/tmp/smarttile-voxel-boundary-20261014",
+  "previous_image": "sha256:cc3e4b7245a480a78c4f06daf1494db5fba7b2d636e7e4e5cee9c47a48534a2e",
+  "source_manifest": {
+    "attribute_join.py": "e4714ce84cd4de33fd3ce522235d8726a288d6c50559d124da52abe9080bfcee",
+    "bounded_point_index.py": "822a5f43e83ddd973d48c959c251f6db920daa48fb4d4c63858d5e6dcf02b574",
+    "copc_metadata.py": "9d7d8a480dec24db71b864261a06cef5b3d1398101888b836d94b81791a01e05",
+    "copc_staging.py": "d27b0c6ff6c5174d72b90ab9266512fe33e6e64d59e333a21be3c5b066c7d246",
+    "crs_records.py": "28772c86183e8f93069e0cf8b259c6d6991706c6f8ea5e4bc85c0ea2f507fd26",
+    "dense_instance_ownership.py": "f3fa439edb4b00ed80b1ee412c4eeb2bea1d6b7e25e82ea16768318a4b7bf46e",
+    "full_resolution_merge.py": "11a1a1283fdf0287d96f994597b1fc6d2898bb6ff1a0df228791361ea3c8b2eb",
+    "get_bounds_from_tindex.py": "ece1fd8616d8a5a3876b239902bf3298dc4eec04ee69b238e9ee265e63141b5c",
+    "instance_consolidation.py": "933b1d78d3df2196dd5ad3793d7f4c2feaf6b57dccd122025b1161f00f1b1bef",
+    "instance_finalization.py": "666cc3a25cbce92c4c53055ba05a4ee7690ca002d7989e8c5bffbe1a79dbdae2",
+    "instance_labels.py": "578e33736f030a3b364716ee48d81457aa4becd08d9bb570f8cd423361bad778",
+    "instance_statistics.py": "0237a12700ed72eab63d0e787f5b4c3f5da89ca047480ca826fe95b29dfa2b64",
+    "instance_tile_outputs.py": "385043a93daf4d44e2c99de0390c855901718af9c508a475dfc200aab728dc42",
+    "instance_tiles.py": "6c59b56fadb0fd174f6bb25ae62bd32f349a7974a0a835c802d5c2ef7c37e749",
+    "main_create_merged_file.py": "5d59341daff6df937071de8c6c6eebcd864830737ede65b6b7e70103d3c465c0",
+    "main_subsample.py": "d1a0fb73a16ce88ea86db186dbc348218ebf6f1a5838816d580405b4b5970263",
+    "main_tile.py": "bcd73708a085e320c53eb913b5861583c1c54e3638fc23739f8239325e59bd94",
+    "merge_stages.py": "2517169e28c76720350dc4afeff097cd140a019b58b540ed21575857eb0dfe35",
+    "original_blocks.py": "fccb5ee851c36f29cf2cd3be4bf009b7a29097e03b711228b88ae2f69e3a607e",
+    "orphan_claims.py": "4c37251b328554c9646d102a8d035e3bfb250ece0dd83735bb334b4f8d830a4d",
+    "orphan_instance_recovery.py": "df5833d99038824c38d91351dd82382c87c2548d20e85524161bbb5b63d29ec4",
+    "output_publication.py": "edb80159fcc7b56505c216d9bcd22cd61c0d7f005f03202e8bc7fe3eafdfbb24",
+    "ownership_spatial_blocks.py": "0374fb6e631603208d316b0d0c732957d818c66a4ee88e8ab8745f2692b72a78",
+    "parallel_index_queries.py": "67e3208d700e77c27f574ff27486c1fe58a6940baed6dc5ec592bc9244f5f45f",
+    "parallel_remap.py": "b0b2c783d620d21c164c93ece5cb360550342bc097018963e6631eeb4b4f3a77",
+    "parallel_tiles.py": "c145c57a272ca089ae89ec480f6d8b8d8aef7e88ff489cb55ebf29cdb8a6c3da",
+    "parameters.py": "82bfc3742979dc55022eff15e7588af0624041873fa4e698870b9b5713b17ab8",
+    "plot_tiles_and_copc.py": "af36d429218f2ed47a4b66a1afdb25c818f84519168f71ee426242f984fe7b56",
+    "ply_crs.py": "bf77351bfff659e09e221d1190bfb984b735289204f731ee9b768289b6df7fb3",
+    "point_cloud_metadata.py": "287636c4fc27102a004e160f066532a7707cc45e3e0e1feb9de1d3bbe5067dcc",
+    "prediction_collections.py": "9b6da1104d831bfb7e57bd12126ff2b02abb9abd629ed8a602b45ab6349c7d4c",
+    "prepare_tile_jobs.py": "6b0a05603566948bc6de880688f4e19d052aed88134af0eee33fbe6e0ff41116",
+    "product_formats.py": "49f169bb3f4b4ec6d84452213eaf93420523f99591d805f4c994d83793fc81cb",
+    "raycloud_finalization.py": "485de7e33f71fd02c02954f8c12f5d44665b8a79a0f528d84db7c018816e68f1",
+    "raycloud_instance_ids.py": "c8d96d7252987d41893a60b14371db654767f2987f83aa39e51ceeba0cb7b8e3",
+    "raycloud_meshes.py": "bf130013ca1e319c8dd2b380a625257da14d8e36058694d29f598f1449f1faec",
+    "raycloud_recovery.py": "b969fa73b6fac87c5940cd64c6002460fb70febafc019c3a89e2aad9262ddb44",
+    "raycloud_tree_files.py": "347c43ca9c6eaf63abc4adf61928515b28a830c858ed7b9d44572f9e0d5a6fe0",
+    "remap_first_pipeline.py": "5e96eb1d6849def3ddd115fe34301633b132198aa2da3919b22dba992888905b",
+    "run.py": "db4db3035e3d35f48375ded1c95a4a064d915891f2825cd181df401ec2871d16",
+    "small_instance_reassignment.py": "e4f10117c39035f3895cd599c5922fcfb774bd59c07ec56efb9f567768574b71",
+    "spatial_query_cache.py": "d0f392cfe6919c6f3f4e2e51f4ce536e4938560316cc1e7dde265e54fbb0de03",
+    "subsample_com.py": "88bed5a3b5d105ebf30ad8fd7d2aec4db9d9a1d4927b5f8f2985973c7ba417ae",
+    "subsample_encoding.py": "1f76f91518b413456444d457329483325963f6f5e4e8c915f160e0b9ba2b0625",
+    "subsample_methods.py": "51a5e1d374d63f29e2ccf3797920fa30197e2632d0562bc489613d32ce4b10fb",
+    "subsample_outputs.py": "da1f874cd556c223d7ea9f92969511f255aa4818926b46b9f73daf59da564052",
+    "tile_bounds_graph.py": "22032533bfeacbe7b46e6a94a1be5ec73b0597716012d6f2d2ddbc0973d3a2d6",
+    "tile_centroids.py": "0a8e6feea8e1a6fae664e4c2b527586c396a4c1ca4eaaa6338d6b7e4a4d31eb7",
+    "tile_copc.py": "ec05ef8a2fa53d99e89863ed4f13017e1dff65b97090224cb43d39ae870228eb",
+    "tile_core_occupancy.py": "5a955993b501f41dfffc778817f43b8b40c1a22c04366f73d354a8802acd048c",
+    "tile_crs.py": "ba95e4c2515c1d7db0af18666ea644bd6f3057344167be3079eaa9bbd65b7993",
+    "tile_file_matching.py": "002e8010014efffab483a80cddc335a14fa1f9508d97f26cf3a1bf32b6a296c1",
+    "tile_original_geometry.py": "a142e84858ad64dedc05e937d92ea0663dc1c61134191a49672c1af937e5c9c0",
+    "tile_tindex.py": "323cd59e14fdb7028f437b7c23949e2739d9aca3f0bf59fa0508d10da9ca7d04",
+    "vector_extra_bytes.py": "514b01776a6dcd01ac1ab4a70125f107a2c43dd7f7afc8688ac8e04f0ec8d3bf",
+    "voxel_grid.py": "53a6eeb5cf30adc1a42c60c3b889005920727aeb8f96ba86d3dc597786d229c5",
+    "worker_budget.py": "59ca4ab1e7ded4f6d86fafb08468777f5604285d91b68dd40b0988715523bae2"
+  },
+  "galaxy_replay": {
+    "status": "passed",
+    "galaxy_url": "http://127.0.0.1:8092",
+    "tool_version": "2.4.0+galaxy4",
+    "image": "sha256:41cd03e0f991669efdac8b0128ed53fc31fdae0f9f56528c48526b207ccbf018",
+    "fixture": "/mnt/ssds/kg281/galaxytools-smarttile-v24-final-20261013/tools/3dtrees_smart_tile/test-data/two_instance_dimensions.laz",
+    "fixture_sha256": "81c8c68594e40c5df68132bccce9716c3280206b2696d80cb73c17bae927678e",
+    "collections": {
+      "output_subsampled_res1": {
+        "dimension": "PredInstance_SAT",
+        "resolution": "original",
+        "format": "copc.laz",
+        "points": 20,
+        "instance_ids": [
+          7,
+          70000
+        ],
+        "extra_dimensions": [
+          "PredInstance_SAT",
+          "Amplitude"
+        ],
+        "crs": "EPSG:32632",
+        "amplitude_no_data": [
+          -1
+        ],
+        "coordinates_and_attributes_valid": true,
+        "label": "3DTrees: SmartTile: Output 1 (Original resolution) \u2014 PredInstance_SAT",
+        "element_identifier": "two_instance_dimensions.copc.laz",
+        "collection_id": "4f0d514ed66cc01f",
+        "output": "/tmp/smarttile-premerge-20261015/galaxy-final-oracle/output_subsampled_res1.copc.laz",
+        "sha256": "ad18f545a7d606eb36210ff984b9b05ab47e878ab2be348d1c5b7321eba1e319"
+      },
+      "output_subsampled_res2": {
+        "dimension": "PredInstance_SAT",
+        "resolution": "10 cm",
+        "format": "laz",
+        "points": 4,
+        "instance_ids": [
+          7,
+          70000
+        ],
+        "extra_dimensions": [
+          "PredInstance_SAT",
+          "Amplitude"
+        ],
+        "crs": "EPSG:32632",
+        "amplitude_no_data": [
+          -1
+        ],
+        "coordinates_and_attributes_valid": true,
+        "sampled_grid_check": {
+          "ideal_grid_points": 4,
+          "matches_ideal_grid_count": true
+        },
+        "label": "3DTrees: SmartTile: Output 2 (10 cm) \u2014 PredInstance_SAT",
+        "element_identifier": "two_instance_dimensions.laz",
+        "collection_id": "20a632cc2b6cee79",
+        "output": "/tmp/smarttile-premerge-20261015/galaxy-final-oracle/output_subsampled_res2.laz",
+        "sha256": "495ce8856914f6d62781829c7d57aa0598f0b3a117bec22d2adf94f9f35a7004"
+      },
+      "output_instance_dim2_res1": {
+        "dimension": "PredInstance_FM",
+        "resolution": "original",
+        "format": "copc.laz",
+        "points": 20,
+        "instance_ids": [
+          11,
+          22
+        ],
+        "extra_dimensions": [
+          "PredInstance_FM",
+          "Amplitude"
+        ],
+        "crs": "EPSG:32632",
+        "amplitude_no_data": [
+          -1
+        ],
+        "coordinates_and_attributes_valid": true,
+        "label": "3DTrees: SmartTile: Output 1 (Original resolution) \u2014 PredInstance_FM",
+        "element_identifier": "two_instance_dimensions.copc.laz",
+        "collection_id": "1c209f2c5ffb25f7",
+        "output": "/tmp/smarttile-premerge-20261015/galaxy-final-oracle/output_instance_dim2_res1.copc.laz",
+        "sha256": "53a2d3eab1cbddee254e5e7ad3f80077d0e76cc363305dfd29c10c80ebea08d5"
+      },
+      "output_instance_dim2_res2": {
+        "dimension": "PredInstance_FM",
+        "resolution": "10 cm",
+        "format": "laz",
+        "points": 2,
+        "instance_ids": [
+          11,
+          22
+        ],
+        "extra_dimensions": [
+          "PredInstance_FM",
+          "Amplitude"
+        ],
+        "crs": "EPSG:32632",
+        "amplitude_no_data": [
+          -1
+        ],
+        "coordinates_and_attributes_valid": true,
+        "sampled_grid_check": {
+          "ideal_grid_points": 2,
+          "matches_ideal_grid_count": true
+        },
+        "label": "3DTrees: SmartTile: Output 2 (10 cm) \u2014 PredInstance_FM",
+        "element_identifier": "two_instance_dimensions.laz",
+        "collection_id": "fc6e52edf02be22c",
+        "output": "/tmp/smarttile-premerge-20261015/galaxy-final-oracle/output_instance_dim2_res2.laz",
+        "sha256": "354cbf121636616ad165a5121100240b59b7c2d16d2a8d40581c68b1d0974c31"
+      }
+    },
+    "history_id": "924bf55bd1f85561",
+    "jobs": [
+      {
+        "stage": "upload",
+        "id": "e478925ce105d6a2",
+        "state": "ok"
+      },
+      {
+        "stage": "tile",
+        "id": "f87a121a672694df",
+        "state": "ok"
+      }
+    ],
+    "job_id": "f87a121a672694df",
+    "submitted_collections": [
+      {
+        "output_name": "output_subsampled_res1",
+        "id": "4f0d514ed66cc01f"
+      },
+      {
+        "output_name": "output_subsampled_res2",
+        "id": "20a632cc2b6cee79"
+      },
+      {
+        "output_name": "output_instance_dim2_res1",
+        "id": "1c209f2c5ffb25f7"
+      },
+      {
+        "output_name": "output_instance_dim2_res2",
+        "id": "fc6e52edf02be22c"
+      }
+    ],
+    "dimension_collection_contract": "passed",
+    "original_resolution_inventory": "passed",
+    "subsampled_ideal_grid_check": "passed"
+  },
+  "environment_issue": "3DT-2233",
+  "packaged_source": {
+    "result": "passed",
+    "image": "sha256:41cd03e0f991669efdac8b0128ed53fc31fdae0f9f56528c48526b207ccbf018",
+    "file_count": 57,
+    "source_files": {
+      "attribute_join.py": "e4714ce84cd4de33fd3ce522235d8726a288d6c50559d124da52abe9080bfcee",
+      "prediction_collections.py": "9b6da1104d831bfb7e57bd12126ff2b02abb9abd629ed8a602b45ab6349c7d4c",
+      "tile_file_matching.py": "002e8010014efffab483a80cddc335a14fa1f9508d97f26cf3a1bf32b6a296c1",
+      "tile_core_occupancy.py": "5a955993b501f41dfffc778817f43b8b40c1a22c04366f73d354a8802acd048c",
+      "remap_first_pipeline.py": "5e96eb1d6849def3ddd115fe34301633b132198aa2da3919b22dba992888905b",
+      "instance_finalization.py": "666cc3a25cbce92c4c53055ba05a4ee7690ca002d7989e8c5bffbe1a79dbdae2",
+      "ownership_spatial_blocks.py": "0374fb6e631603208d316b0d0c732957d818c66a4ee88e8ab8745f2692b72a78",
+      "instance_tiles.py": "6c59b56fadb0fd174f6bb25ae62bd32f349a7974a0a835c802d5c2ef7c37e749",
+      "prepare_tile_jobs.py": "6b0a05603566948bc6de880688f4e19d052aed88134af0eee33fbe6e0ff41116",
+      "run.py": "db4db3035e3d35f48375ded1c95a4a064d915891f2825cd181df401ec2871d16",
+      "subsample_outputs.py": "da1f874cd556c223d7ea9f92969511f255aa4818926b46b9f73daf59da564052",
+      "raycloud_meshes.py": "bf130013ca1e319c8dd2b380a625257da14d8e36058694d29f598f1449f1faec",
+      "raycloud_tree_files.py": "347c43ca9c6eaf63abc4adf61928515b28a830c858ed7b9d44572f9e0d5a6fe0",
+      "main_subsample.py": "d1a0fb73a16ce88ea86db186dbc348218ebf6f1a5838816d580405b4b5970263",
+      "original_blocks.py": "fccb5ee851c36f29cf2cd3be4bf009b7a29097e03b711228b88ae2f69e3a607e",
+      "worker_budget.py": "59ca4ab1e7ded4f6d86fafb08468777f5604285d91b68dd40b0988715523bae2",
+      "spatial_query_cache.py": "d0f392cfe6919c6f3f4e2e51f4ce536e4938560316cc1e7dde265e54fbb0de03",
+      "small_instance_reassignment.py": "e4f10117c39035f3895cd599c5922fcfb774bd59c07ec56efb9f567768574b71",
+      "full_resolution_merge.py": "11a1a1283fdf0287d96f994597b1fc6d2898bb6ff1a0df228791361ea3c8b2eb",
+      "vector_extra_bytes.py": "514b01776a6dcd01ac1ab4a70125f107a2c43dd7f7afc8688ac8e04f0ec8d3bf",
+      "orphan_claims.py": "4c37251b328554c9646d102a8d035e3bfb250ece0dd83735bb334b4f8d830a4d",
+      "bounded_point_index.py": "822a5f43e83ddd973d48c959c251f6db920daa48fb4d4c63858d5e6dcf02b574",
+      "parallel_remap.py": "b0b2c783d620d21c164c93ece5cb360550342bc097018963e6631eeb4b4f3a77",
+      "tile_centroids.py": "0a8e6feea8e1a6fae664e4c2b527586c396a4c1ca4eaaa6338d6b7e4a4d31eb7",
+      "instance_consolidation.py": "933b1d78d3df2196dd5ad3793d7f4c2feaf6b57dccd122025b1161f00f1b1bef",
+      "crs_records.py": "28772c86183e8f93069e0cf8b259c6d6991706c6f8ea5e4bc85c0ea2f507fd26",
+      "plot_tiles_and_copc.py": "af36d429218f2ed47a4b66a1afdb25c818f84519168f71ee426242f984fe7b56",
+      "raycloud_instance_ids.py": "c8d96d7252987d41893a60b14371db654767f2987f83aa39e51ceeba0cb7b8e3",
+      "get_bounds_from_tindex.py": "ece1fd8616d8a5a3876b239902bf3298dc4eec04ee69b238e9ee265e63141b5c",
+      "tile_tindex.py": "323cd59e14fdb7028f437b7c23949e2739d9aca3f0bf59fa0508d10da9ca7d04",
+      "output_publication.py": "edb80159fcc7b56505c216d9bcd22cd61c0d7f005f03202e8bc7fe3eafdfbb24",
+      "tile_copc.py": "ec05ef8a2fa53d99e89863ed4f13017e1dff65b97090224cb43d39ae870228eb",
+      "parameters.py": "82bfc3742979dc55022eff15e7588af0624041873fa4e698870b9b5713b17ab8",
+      "copc_staging.py": "d27b0c6ff6c5174d72b90ab9266512fe33e6e64d59e333a21be3c5b066c7d246",
+      "instance_labels.py": "578e33736f030a3b364716ee48d81457aa4becd08d9bb570f8cd423361bad778",
+      "raycloud_recovery.py": "b969fa73b6fac87c5940cd64c6002460fb70febafc019c3a89e2aad9262ddb44",
+      "copc_metadata.py": "9d7d8a480dec24db71b864261a06cef5b3d1398101888b836d94b81791a01e05",
+      "point_cloud_metadata.py": "287636c4fc27102a004e160f066532a7707cc45e3e0e1feb9de1d3bbe5067dcc",
+      "parallel_index_queries.py": "67e3208d700e77c27f574ff27486c1fe58a6940baed6dc5ec592bc9244f5f45f",
+      "tile_original_geometry.py": "b9e781e786844c2a4a5d4d089d4dfe44698937a95feeea41874b454b3190b063",
+      "subsample_encoding.py": "1f76f91518b413456444d457329483325963f6f5e4e8c915f160e0b9ba2b0625",
+      "dense_instance_ownership.py": "f3fa439edb4b00ed80b1ee412c4eeb2bea1d6b7e25e82ea16768318a4b7bf46e",
+      "ply_crs.py": "bf77351bfff659e09e221d1190bfb984b735289204f731ee9b768289b6df7fb3",
+      "subsample_com.py": "88bed5a3b5d105ebf30ad8fd7d2aec4db9d9a1d4927b5f8f2985973c7ba417ae",
+      "merge_stages.py": "2517169e28c76720350dc4afeff097cd140a019b58b540ed21575857eb0dfe35",
+      "tile_bounds_graph.py": "22032533bfeacbe7b46e6a94a1be5ec73b0597716012d6f2d2ddbc0973d3a2d6",
+      "parallel_tiles.py": "c145c57a272ca089ae89ec480f6d8b8d8aef7e88ff489cb55ebf29cdb8a6c3da",
+      "instance_tile_outputs.py": "385043a93daf4d44e2c99de0390c855901718af9c508a475dfc200aab728dc42",
+      "main_create_merged_file.py": "5d59341daff6df937071de8c6c6eebcd864830737ede65b6b7e70103d3c465c0",
+      "product_formats.py": "49f169bb3f4b4ec6d84452213eaf93420523f99591d805f4c994d83793fc81cb",
+      "tile_crs.py": "ba95e4c2515c1d7db0af18666ea644bd6f3057344167be3079eaa9bbd65b7993",
+      "main_tile.py": "bcd73708a085e320c53eb913b5861583c1c54e3638fc23739f8239325e59bd94",
+      "instance_statistics.py": "0237a12700ed72eab63d0e787f5b4c3f5da89ca047480ca826fe95b29dfa2b64",
+      "voxel_grid.py": "53a6eeb5cf30adc1a42c60c3b889005920727aeb8f96ba86d3dc597786d229c5",
+      "subsample_methods.py": "51a5e1d374d63f29e2ccf3797920fa30197e2632d0562bc489613d32ce4b10fb",
+      "orphan_instance_recovery.py": "df5833d99038824c38d91351dd82382c87c2548d20e85524161bbb5b63d29ec4",
+      "raycloud_finalization.py": "485de7e33f71fd02c02954f8c12f5d44665b8a79a0f528d84db7c018816e68f1"
+    }
+  },
+  "validation_update_date": "2026-10-15",
+  "format_only_change": {
+    "file": "src/tile_original_geometry.py",
+    "change": "Remove extra blank line at EOF",
+    "runtime_ast_equal": true,
+    "tested_sha256": "a142e84858ad64dedc05e937d92ea0663dc1c61134191a49672c1af937e5c9c0",
+    "final_sha256": "b9e781e786844c2a4a5d4d089d4dfe44698937a95feeea41874b454b3190b063"
+  }
+}

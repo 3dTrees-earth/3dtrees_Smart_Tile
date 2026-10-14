@@ -21,9 +21,10 @@ For each requested instance dimension:
    to every voxel grid (several resolutions share the read, as in tiling).
    Voxels are keyed by (instance, voxel), so touching trees are never
    blended; each voxel keeps its original point nearest the voxel mean, so
-   instance ID and carried attributes stay real values.
-4. Each tile is written as ``instance_tiles_<dimension>_<resolution>/<label>.laz``:
-   XYZ, the instance dimension and any requested attributes. A tile extends
+   instance ID and carried attributes stay real values. Original resolution
+   bypasses this reduction and retains every owned point, including duplicates.
+4. Each tile is written as ``instance_tiles_<dimension>_<resolution>/<label>.<format>``
+   (LAZ by default): XYZ, the instance dimension and any requested attributes. A tile extends
    as far as its instances reach. Instances wider than WIDE_INSTANCE are
    reported with a warning (segmentation models produce scattered instances).
 
@@ -44,7 +45,8 @@ import laspy
 import numpy as np
 
 from tile_centroids import (CHUNK_POINTS, Tile, _block_key, _init_worker, _nearest_to_mean,
-                            _write_blocks, block_cells, choose_block_size, route, sample_xy)
+                            _raw_xyz, _write_blocks, block_cells, choose_block_size, route, sample_xy)
+from voxel_grid import voxel_keys
 from point_cloud_metadata import extra_bytes_metadata_equal, extra_bytes_params_from_dimension_info
 from prediction_collections import assign_prediction_values, promote_collection_extra_dim
 
@@ -136,6 +138,15 @@ def _chunks(source, start, count):
             yield chunk
 
 
+def _instance_ids(chunk, dimension):
+    # Instance fields are preflighted as unscaled integers; use raw storage so
+    # even identity scale/offset descriptors cannot coerce uint64 through float.
+    values = chunk.array[dimension]
+    if len(values) and np.any(values < 0):
+        raise ValueError(f"Instance dimension {dimension} contains negative IDs")
+    return np.asarray(values).astype(np.uint64)
+
+
 def _statistics(task):
     """Per dimension: rows (id, file, count, sum x, sum y, min x, max x, min y, max y) of one point range."""
     source, start, count, dimensions, file_index = task
@@ -143,7 +154,7 @@ def _statistics(task):
     for chunk in _chunks(source, start, count):
         x, y = np.asarray(chunk.x), np.asarray(chunk.y)
         for d in dimensions:
-            ids = np.asarray(chunk[d]).astype(np.uint64)
+            ids = _instance_ids(chunk, d)
             positive = ids > 0
             if not np.any(positive):
                 continue
@@ -153,42 +164,41 @@ def _statistics(task):
             mny = np.full(len(uid), np.inf); mxy = np.full(len(uid), -np.inf)
             np.minimum.at(mnx, inverse, xs); np.maximum.at(mxx, inverse, xs)
             np.minimum.at(mny, inverse, ys); np.maximum.at(mxy, inverse, ys)
-            parts[d].append(np.c_[uid.astype(np.float64), np.full(len(uid), file_index), n,
-                                  np.bincount(inverse, xs), np.bincount(inverse, ys), mnx, mxx, mny, mxy])
+            parts[d].append({"ids": uid, "files": np.full(len(uid), file_index), "count": n,
+                             "sx": np.bincount(inverse, xs), "sy": np.bincount(inverse, ys),
+                             "minx": mnx, "maxx": mxx, "miny": mny, "maxy": mxy})
     return parts
 
 
-def _group(ids, table, columns):
-    """Sum count/sx/sy and reduce the box per group of ``ids``."""
+def _group(ids, table):
+    """Sum counts/XY and reduce boxes without converting integer identities."""
     uid, inverse = np.unique(ids, return_inverse=True)
     out = {"ids": uid}
-    for column, name in zip(columns[:3], ("count", "sx", "sy")):
-        out[name] = np.bincount(inverse, table[:, column], minlength=len(uid))
-    for column, name, reduce in zip(columns[3:], ("minx", "maxx", "miny", "maxy"),
-                                    (np.minimum, np.maximum, np.minimum, np.maximum)):
+    for name in ("count", "sx", "sy"):
+        out[name] = np.bincount(inverse, table[name], minlength=len(uid))
+    for name, reduce in (("minx", np.minimum), ("maxx", np.maximum),
+                         ("miny", np.minimum), ("maxy", np.maximum)):
         values = np.full(len(uid), np.inf if reduce is np.minimum else -np.inf)
-        reduce.at(values, inverse, table[:, column])
+        reduce.at(values, inverse, table[name])
         out[name] = values
-    return out, inverse
+    return out
 
 
 def _combine(parts):
     """Per instance totals, plus per (instance, file) boxes for the reuse check."""
     if not parts:
         return {"ids": np.empty(0, np.uint64), "reused": np.empty(0, np.uint64), "shared": 0}
-    table = np.concatenate(parts)
-    ids = table[:, 0].astype(np.uint64)
-    files = table[:, 1].astype(np.int64)
-    out, _ = _group(ids, table, (2, 3, 4, 5, 6, 7, 8))
-    # One box per (instance, file); IDs in several files compare their boxes.
-    key = ids * np.uint64(1 << 20) + files.astype(np.uint64)
-    per_file, _ = _group(key, table, (2, 3, 4, 5, 6, 7, 8))
-    file_ids = per_file["ids"] // np.uint64(1 << 20)
+    table = {name: np.concatenate([part[name] for part in parts]) for name in parts[0]}
+    ids, files = table["ids"], table["files"]
+    out = _group(ids, table)
+    # Separate integer fields avoid both float64 rounding and packed-key overflow.
+    key = np.rec.fromarrays([ids, files], names=["instance", "file"])
+    per_file = _group(key, table)
+    file_ids = per_file["ids"]["instance"]
     uid, inverse, n_files = np.unique(file_ids, return_inverse=True, return_counts=True)
     shared = n_files > 1
     reused = []
     if np.any(shared):
-        # Separation of the boxes: a box entirely beside another in X or Y.
         lo_x = np.full(len(uid), -np.inf); hi_x = np.full(len(uid), np.inf)
         lo_y = np.full(len(uid), -np.inf); hi_y = np.full(len(uid), np.inf)
         np.maximum.at(lo_x, inverse, per_file["minx"]); np.minimum.at(hi_x, inverse, per_file["maxx"])
@@ -260,7 +270,7 @@ def _spill(task):
         x, y, z = np.asarray(chunk.x), np.asarray(chunk.y), np.asarray(chunk.z)
         background = None
         for d in dimensions:
-            ids = np.asarray(chunk[d]).astype(np.uint64)
+            ids = _instance_ids(chunk, d)
             owner = np.empty(len(ids), dtype=np.int64)
             positive = ids > 0
             if np.any(positive):
@@ -285,10 +295,9 @@ def _spill(task):
                     values = chunk.array[attribute] if attribute in chunk.array.dtype.names else chunk[attribute]
                     records[f"a{i}"] = np.asarray(values)[rows]
                 records["m"] = full_mask
-                coords = np.stack([records[a] * tile.scales[i] + tile.offsets[i]
-                                   for i, a in enumerate(("X", "Y", "Z"))], axis=1)
                 # A voxel never spans blocks at any resolution (tile_centroids.route).
-                source_rows, blocks, bits = route(coords, records["m"], resolutions, cells)
+                source_rows, blocks, bits = route(_raw_xyz(records), records["m"], resolutions, cells,
+                                                  scales=tile.scales, offsets=tile.offsets)
                 routed = records[source_rows]
                 routed["m"] = bits
                 _write_blocks(Path(spill_dir) / dimension_dirs[d] / tile.label, name, routed, blocks)
@@ -296,37 +305,55 @@ def _spill(task):
     return counts
 
 
+def _point_records(chosen, point_format, scales, offsets, instance_field, attributes):
+    """Pack selected source values, including LAS bit fields, into output records."""
+    out = laspy.ScaleAwarePointRecord.zeros(len(chosen), point_format=point_format,
+                                            scales=np.asarray(scales), offsets=np.asarray(offsets))
+    for axis in ("X", "Y", "Z"):
+        out.array[axis] = chosen[axis]
+    assign_prediction_values(out, instance_field, chosen["instance"], raw=True)
+    for i, attribute in enumerate(attributes):
+        assign_prediction_values(out, attribute, chosen[f"a{i}"], raw=attribute in out.array.dtype.names)
+    return out.array
+
+
 def _reduce(task):
-    """One block of one tile: per resolution and (instance, voxel), keep the point nearest the voxel mean."""
+    """Keep all original records at zero; otherwise select per-instance voxel representatives."""
     block, resolutions, scales, offsets, attribute_dtypes, point_format, instance_field, attributes, fragments = task
     dtype = _record_dtype(attribute_dtypes)
-    every = np.concatenate([np.fromfile(path, dtype=dtype) for path in sorted(Path(block).glob("*.bin"))])
-    results = []
-    for index, (resolution, fragment) in enumerate(zip(resolutions, fragments)):
-        records = every[(every["m"] & np.uint8(1 << index)) != 0]
-        if not len(records):
-            results.append((0, 0))
-            continue
-        xyz = np.stack([records[a].astype(np.int64) for a in ("X", "Y", "Z")], axis=1)
-        keys = np.floor((xyz * np.asarray(scales) + np.asarray(offsets)) / resolution).astype(np.int64)
-        order = np.lexsort((xyz[:, 2], xyz[:, 1], xyz[:, 0], keys[:, 2], keys[:, 1], keys[:, 0],
-                            records["instance"]))
-        records, xyz, keys = records[order], xyz[order], keys[order]
-        change = np.r_[True, (np.diff(keys, axis=0) != 0).any(axis=1) | (np.diff(records["instance"]) != 0)]
-        starts = np.flatnonzero(change)
-        counts = np.diff(np.r_[starts, len(records)]).astype(np.int64)
-        sums = np.add.reduceat(xyz, starts, axis=0)
-        chosen = records[_nearest_to_mean(xyz, starts, counts, sums, scales)]
-        # Named assignment lets laspy pack bit fields such as classification.
-        out = laspy.ScaleAwarePointRecord.zeros(len(chosen), point_format=point_format,
-                                                scales=np.asarray(scales), offsets=np.asarray(offsets))
-        for axis in ("X", "Y", "Z"):
-            out.array[axis] = chosen[axis]
-        assign_prediction_values(out, instance_field, chosen["instance"], raw=True)
-        for i, attribute in enumerate(attributes):
-            assign_prediction_values(out, attribute, chosen[f"a{i}"], raw=attribute in out.array.dtype.names)
-        out.array.tofile(fragment)
-        results.append((len(chosen), len(records)))
+    paths = sorted(Path(block).glob("*.bin"))
+    if resolutions == (0.0,):
+        # No spatial reduction is needed; avoid collecting a dense block in memory.
+        count = 0
+        with open(fragments[0], "wb") as output:
+            for path in paths:
+                with path.open("rb") as source:
+                    while len(records := np.fromfile(source, dtype=dtype, count=CHUNK_POINTS)):
+                        _point_records(records, point_format, scales, offsets, instance_field, attributes).tofile(output)
+                        count += len(records)
+        results = [(count, count)]
+    else:
+        every = np.concatenate([np.fromfile(path, dtype=dtype) for path in paths])
+        results = []
+        for index, (resolution, fragment) in enumerate(zip(resolutions, fragments)):
+            records = every[(every["m"] & np.uint8(1 << index)) != 0]
+            if not len(records):
+                results.append((0, 0))
+                continue
+            chosen = records
+            if resolution > 0:
+                xyz = np.stack([records[a].astype(np.int64) for a in ("X", "Y", "Z")], axis=1)
+                keys = voxel_keys(xyz, scales, offsets, resolution)
+                order = np.lexsort((xyz[:, 2], xyz[:, 1], xyz[:, 0], keys[:, 2], keys[:, 1], keys[:, 0],
+                                    records["instance"]))
+                records, xyz, keys = records[order], xyz[order], keys[order]
+                change = np.r_[True, (np.diff(keys, axis=0) != 0).any(axis=1) | (np.diff(records["instance"]) != 0)]
+                starts = np.flatnonzero(change)
+                counts = np.diff(np.r_[starts, len(records)]).astype(np.int64)
+                sums = np.add.reduceat(xyz, starts, axis=0)
+                chosen = records[_nearest_to_mean(xyz, starts, counts, sums, scales)]
+            _point_records(chosen, point_format, scales, offsets, instance_field, attributes).tofile(fragment)
+            results.append((len(chosen), len(records)))
     shutil.rmtree(block)
     return results
 
@@ -357,30 +384,76 @@ def output_directory(output_dir, dimension, resolution):
     return Path(output_dir) / f"instance_tiles_{quote(dimension, safe='')}_{resolution_label(resolution)}"
 
 
+def _output_directories(output_dir, dimensions, resolutions, selections):
+    """Resolve one output directory per (dimension, resolution), before any reads."""
+    from collections.abc import Mapping
+
+    if selections is None:
+        return {d: tuple(output_directory(output_dir, d, r) for r in resolutions) for d in dimensions}
+    if isinstance(selections, Mapping):
+        if set(selections) != set(dimensions):
+            raise ValueError("Output directory mapping must match the instance dimensions exactly")
+    else:
+        if len(dimensions) != 1:
+            raise ValueError("A directory sequence needs one instance dimension; use a per-dimension mapping")
+        selections = {dimensions[0]: selections}
+    directories = {}
+    for dimension in dimensions:
+        paths = selections[dimension]
+        if isinstance(paths, (str, bytes, Path)):
+            raise ValueError(f"Output directories for {dimension} need one directory per resolution")
+        try:
+            paths = tuple(Path(path) for path in paths)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid output directories for {dimension}") from exc
+        if len(paths) != len(resolutions):
+            raise ValueError(f"Output directories for {dimension} need one directory per resolution")
+        directories[dimension] = paths
+    return directories
+
+
 def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions, attributes=(),
-                         check_ids=True, wide=WIDE_INSTANCE, workers=1):
+                         check_ids=True, wide=WIDE_INSTANCE, workers=1, formats=None, output_directories=None):
     """Write ``instance_tiles_<dimension>_<resolution>/<label>.laz`` per dimension and resolution.
 
+    Zero resolution retains every owned source point, including coincident points.
+    Formats default to LAZ. Explicit directories are a per-dimension mapping of
+    resolution-ordered paths, or a path sequence for one instance dimension.
     All resolutions come from the same two reads. ``tiles``: [Tile] with
     ``core`` (xmin, ymin, xmax, ymax). Returns {dimension: {instance checks,
     "outputs": {resolution: {"directory", "tiles", "points"}}}}.
     """
     from point_cloud_metadata import write_retained_evlrs
     from output_publication import publish_files, validate_output_paths
+    from product_formats import TILE_OUTPUT_FORMATS
+    from instance_tile_outputs import convert_instance_tile
+    from vector_extra_bytes import vector_schema_sidecar_path
 
     resolutions = tuple(float(r) for r in resolutions)
-    if not resolutions or any(not math.isfinite(r) or r <= 0 for r in resolutions):
-        raise ValueError("Instance tiles need positive resolutions")
+    if not resolutions or any(not math.isfinite(r) or r < 0 for r in resolutions):
+        raise ValueError("Instance tiles need nonnegative resolutions (zero keeps original points)")
     if len(set(resolutions)) != len(resolutions) or len(resolutions) > 8:
         raise ValueError("Instance tile resolutions must be distinct, at most eight")
-    if not dimensions:
-        raise ValueError("Instance tiles need at least one instance dimension")
+    if isinstance(dimensions, (str, bytes)):
+        raise ValueError("Instance dimensions must be a sequence of field names")
+    dimensions = tuple(dimensions)
+    if not dimensions or any(not isinstance(d, str) or not d for d in dimensions):
+        raise ValueError("Instance tiles need at least one nonempty instance dimension")
+    if len(set(dimensions)) != len(dimensions):
+        raise ValueError("Instance dimensions must be distinct; duplicate fields were selected")
+    formats = tuple(formats) if formats is not None else ("laz",) * len(resolutions)
+    if len(formats) != len(resolutions) or any(fmt not in TILE_OUTPUT_FORMATS for fmt in formats):
+        raise ValueError("Instance tiles need one supported format per resolution: laz, copc.laz, ply")
+    directories = _output_directories(output_dir, dimensions, resolutions, output_directories)
     sources = [Path(s) for s in sources]
     if not sources:
         raise ValueError("Instance tiles need at least one input file")
+    validate_output_paths(sources, [path for paths in directories.values() for path in paths])
     header, schema, attribute_dtypes = _collection_schema(sources, dimensions, attributes)
+    if 0.0 in resolutions:
+        from tile_original_geometry import original_coordinate_tiles
+        tiles = original_coordinate_tiles(sources, tiles)
     dimension_dirs = {d: f"dimension_{i:03d}" for i, d in enumerate(dimensions)}
-    validate_output_paths(sources, [output_directory(output_dir, d, r) for d in dimensions for r in resolutions])
     workers = max(1, int(workers))
     tasks, counts = _ranges(sources, workers)
     started = time.monotonic()
@@ -453,16 +526,21 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
                                 writer.write_points(laspy.ScaleAwarePointRecord(
                                     array, out_header.point_format, out_header.scales, out_header.offsets))
                         write_retained_evlrs(writer, out_header)
+                    target = convert_instance_tile(target, formats[slot], (d, *attributes))
                     written[resolution].append((target, tile.label))
                     points[resolution] += kept[slot]
                 shutil.rmtree(staged / tile.label)
             results[d]["outputs"] = {}
-            for resolution in resolutions:
-                directory = output_directory(output_dir, d, resolution)
+            for slot, resolution in enumerate(resolutions):
+                directory, output_format = directories[d][slot], formats[slot]
                 for target, label in written[resolution]:
-                    products.append((target, directory / f"{label}.laz"))
+                    destination = directory / f"{label}.{output_format}"
+                    products.append((target, destination))
+                    sidecar = vector_schema_sidecar_path(target)
+                    if sidecar.exists():
+                        products.append((sidecar, vector_schema_sidecar_path(destination)))
                 results[d]["outputs"][resolution] = {"directory": directory, "tiles": len(written[resolution]),
-                                                     "points": points[resolution]}
+                                                     "points": points[resolution], "format": output_format}
         publish_files(products, inputs=sources)
     print(f"  Instance tiles {list(dimensions)} at {list(resolutions)} m: {total:,} points read twice in "
           f"{spilled - started:.1f} s; written in {time.monotonic() - spilled:.1f} s")
@@ -470,7 +548,8 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
 
 
 def instance_tiles_from_plan(plan, output_dir, dimensions, *, resolutions, attributes=(),
-                             check_ids=True, wide=WIDE_INSTANCE, workers=1, publish_occupancy=True):
+                             check_ids=True, wide=WIDE_INSTANCE, workers=1, publish_occupancy=True,
+                             formats=None, output_directories=None):
     """Tile-task entry: the planned grid's cores own instances and background.
 
     ``publish_occupancy`` writes the occupied tiles into the layout; leave it to
@@ -502,12 +581,14 @@ def instance_tiles_from_plan(plan, output_dir, dimensions, *, resolutions, attri
                       core=(cores[label][0][0], cores[label][1][0], cores[label][0][1], cores[label][1][1]))
                  for label, bounds in sorted(jobs.items())]
     results = write_instance_tiles(sources, tiles, dimensions, Path(output_dir), resolutions=resolutions,
-                                   attributes=attributes, check_ids=check_ids, wide=wide, workers=workers)
+                                   attributes=attributes, check_ids=check_ids, wide=wide, workers=workers,
+                                   formats=formats, output_directories=output_directories)
     if publish_occupancy and not plan.skip_tiling:
         occupied = set()
         for d in dimensions:
             for output in results[d]["outputs"].values():
-                occupied |= {p.stem for p in Path(output["directory"]).glob("*.laz")}
+                extension = "." + output["format"]
+                occupied |= {p.name[:-len(extension)] for p in Path(output["directory"]).glob("*" + extension)}
         layout = json.loads(Path(plan.bounds_json).read_text())["tiles"]
         publish_occupied_tiles(plan.bounds_json, plan.jobs_file,
                                [f"c{t['col']:02d}_r{t['row']:02d}" in occupied for t in layout])

@@ -1,0 +1,498 @@
+{
+  "date": "2026-10-14",
+  "image": "sha256:cc3e4b7245a480a78c4f06daf1494db5fba7b2d636e7e4e5cee9c47a48534a2e",
+  "image_rebuilt": false,
+  "routes": {
+    "coarse": "10 cm segmented tiles -> filter/reconcile -> original remap at sqrt(3)*0.1 m",
+    "dense": "same 10 cm segmented tiles -> transfer to 1 cm at sqrt(3)*0.1 m -> filter/reconcile -> original remap at sqrt(3)*0.01 m"
+  },
+  "original_files": 8,
+  "original_points": 16426961,
+  "models": {
+    "SAT": {
+      "original_integrity_passed": true,
+      "instances": {
+        "best_bijective_positive_agreement_points": 11038483,
+        "both_background_points": 5381657,
+        "both_tree_points": 11045003,
+        "both_tree_points_different_after_optimal_bijective_renumbering": 6520,
+        "coarse_background_dense_tree_points": 159,
+        "coarse_ids_intersecting_multiple_dense_ids": 44,
+        "coarse_ids_with_no_dense_tree_correspondence": [],
+        "coarse_positive_ids": 102,
+        "coarse_tree_dense_background_points": 142,
+        "dense_ids_intersecting_multiple_coarse_ids": 42,
+        "dense_ids_with_no_coarse_tree_correspondence": [],
+        "dense_positive_ids": 100,
+        "different_fraction_after_optimal_bijective_renumbering": 0.0004152320079167413,
+        "different_points_after_optimal_bijective_renumbering": 6821,
+        "interpretation": "Intersection degrees describe partition disagreement, not biological tree splits or merges.",
+        "points": 16426961,
+        "raw_id_different_points": 2714951,
+        "same_partition_up_to_renumbering_with_background_fixed": false,
+        "tree_background_flip_points": 301,
+        "unexpected_negative_id_points": 0
+      },
+      "prediction_fields": {
+        "PredSemantic_SAT": {
+          "confusion": [
+            {
+              "coarse_value": 0,
+              "dense_value": 0,
+              "points": 5371623
+            },
+            {
+              "coarse_value": 0,
+              "dense_value": 1,
+              "points": 157
+            },
+            {
+              "coarse_value": 1,
+              "dense_value": 0,
+              "points": 135
+            },
+            {
+              "coarse_value": 1,
+              "dense_value": 1,
+              "points": 11055046
+            }
+          ],
+          "confusion_omitted": false,
+          "different_fraction": 1.7775655521432114e-05,
+          "different_points": 292,
+          "finite_pairs": 16426961,
+          "maximum_absolute_difference": 1.0,
+          "mean_absolute_difference": 1.7775655521432114e-05,
+          "nonfinite_difference_points": 0,
+          "points": 16426961,
+          "root_mean_square_difference": 0.00421611853740287
+        }
+      },
+      "coverage": {
+        "coarse": {
+          "unfiltered_1cm": {
+            "total": 16426961,
+            "matched": 16426961,
+            "radius_m": 0.17320508075688773,
+            "max_matched_distance_m": 0.11393419169698993
+          },
+          "final_survivors": {
+            "total": 16426961,
+            "matched": 16426961,
+            "radius_m": 0.17320508075688773,
+            "max_matched_distance_m": 0.11393419169698993
+          }
+        },
+        "dense": {
+          "unfiltered_1cm": {
+            "total": 16426961,
+            "matched": 16426961,
+            "radius_m": 0.017320508075688773,
+            "max_matched_distance_m": 0.009273618745440812
+          },
+          "final_survivors": {
+            "total": 16426961,
+            "matched": 16426961,
+            "radius_m": 0.017320508075688773,
+            "max_matched_distance_m": 0.011313708172351531
+          }
+        }
+      },
+      "coordinate_order_hashes_sha256": {
+        "coarse_xyz": "963d73ed244d48a063eeca558376a44b04d0dae2903c0d393eb8e58c972b4cd4",
+        "dense_xyz": "963d73ed244d48a063eeca558376a44b04d0dae2903c0d393eb8e58c972b4cd4",
+        "original_xyz": "963d73ed244d48a063eeca558376a44b04d0dae2903c0d393eb8e58c972b4cd4"
+      }
+    },
+    "FM": {
+      "original_integrity_passed": true,
+      "instances": {
+        "best_bijective_positive_agreement_points": 11466356,
+        "both_background_points": 4960049,
+        "both_tree_points": 11466616,
+        "both_tree_points_different_after_optimal_bijective_renumbering": 260,
+        "coarse_background_dense_tree_points": 162,
+        "coarse_ids_intersecting_multiple_dense_ids": 27,
+        "coarse_ids_with_no_dense_tree_correspondence": [],
+        "coarse_positive_ids": 114,
+        "coarse_tree_dense_background_points": 134,
+        "dense_ids_intersecting_multiple_coarse_ids": 27,
+        "dense_ids_with_no_coarse_tree_correspondence": [],
+        "dense_positive_ids": 114,
+        "different_fraction_after_optimal_bijective_renumbering": 3.384679612985019e-05,
+        "different_points_after_optimal_bijective_renumbering": 556,
+        "interpretation": "Intersection degrees describe partition disagreement, not biological tree splits or merges.",
+        "points": 16426961,
+        "raw_id_different_points": 7368589,
+        "same_partition_up_to_renumbering_with_background_fixed": false,
+        "tree_background_flip_points": 296,
+        "unexpected_negative_id_points": 0
+      },
+      "prediction_fields": {
+        "PredScore_FM": {
+          "confusion_omitted": true,
+          "different_fraction": 0.003756142112956864,
+          "different_points": 61702,
+          "finite_pairs": 16426961,
+          "maximum_absolute_difference": 1.978028953075409,
+          "mean_absolute_difference": 0.0001303729051975687,
+          "nonfinite_difference_points": 0,
+          "points": 16426961,
+          "root_mean_square_difference": 0.00818515144252545
+        },
+        "PredSemantic_FM": {
+          "confusion": [
+            {
+              "coarse_value": 0,
+              "dense_value": 0,
+              "points": 5224248
+            },
+            {
+              "coarse_value": 0,
+              "dense_value": 1,
+              "points": 18
+            },
+            {
+              "coarse_value": 0,
+              "dense_value": 2,
+              "points": 169
+            },
+            {
+              "coarse_value": 1,
+              "dense_value": 0,
+              "points": 24
+            },
+            {
+              "coarse_value": 1,
+              "dense_value": 1,
+              "points": 557467
+            },
+            {
+              "coarse_value": 1,
+              "dense_value": 2,
+              "points": 324
+            },
+            {
+              "coarse_value": 2,
+              "dense_value": 0,
+              "points": 37
+            },
+            {
+              "coarse_value": 2,
+              "dense_value": 1,
+              "points": 52
+            },
+            {
+              "coarse_value": 2,
+              "dense_value": 2,
+              "points": 10644622
+            }
+          ],
+          "confusion_omitted": false,
+          "different_fraction": 3.798633234717e-05,
+          "different_points": 624,
+          "finite_pairs": 16426961,
+          "maximum_absolute_difference": 2.0,
+          "mean_absolute_difference": 5.0526692064344705e-05,
+          "nonfinite_difference_points": 0,
+          "points": 16426961,
+          "root_mean_square_difference": 0.008695252238934425
+        }
+      },
+      "coverage": {
+        "coarse": {
+          "unfiltered_1cm": {
+            "total": 16426961,
+            "matched": 16426961,
+            "radius_m": 0.17320508075688773,
+            "max_matched_distance_m": 0.11393419169698993
+          },
+          "final_survivors": {
+            "total": 16426961,
+            "matched": 16426961,
+            "radius_m": 0.17320508075688773,
+            "max_matched_distance_m": 0.11393419169698993
+          }
+        },
+        "dense": {
+          "unfiltered_1cm": {
+            "total": 16426961,
+            "matched": 16426961,
+            "radius_m": 0.017320508075688773,
+            "max_matched_distance_m": 0.009273618745440812
+          },
+          "final_survivors": {
+            "total": 16426961,
+            "matched": 16426961,
+            "radius_m": 0.017320508075688773,
+            "max_matched_distance_m": 0.014456832072252315
+          }
+        }
+      },
+      "coordinate_order_hashes_sha256": {
+        "coarse_xyz": "963d73ed244d48a063eeca558376a44b04d0dae2903c0d393eb8e58c972b4cd4",
+        "dense_xyz": "963d73ed244d48a063eeca558376a44b04d0dae2903c0d393eb8e58c972b4cd4",
+        "original_xyz": "963d73ed244d48a063eeca558376a44b04d0dae2903c0d393eb8e58c972b4cd4"
+      }
+    }
+  },
+  "method": "Exhaustive lockstep original record comparison. Maximum-weight one-to-one positive-label matching removes arbitrary renumbering; background 0 stays fixed.",
+  "limitations": [
+    "No biological ground truth; differences do not establish which route is more accurate.",
+    "Cached historical GFZ segmentation/tiling results reused; no fresh model inference.",
+    "Both filtering geometry and nearest-neighbor transfer chain differ between routes; this comparison does not isolate their individual effects."
+  ],
+  "oracle_sha256": {
+    "compare_routes.py": "4baded7298972664fcf92da6560bb3b71cab6ce60224224b9d7e1dc7b9efbe5c",
+    "interpret_comparison.py": "66d81cfe20985b168ecc2ec214faf9f1ef4b706c7921902951f7dba01cc8d95c"
+  },
+  "oracle_selfchecks": {
+    "passed": true,
+    "cases": {
+      "pure_id_permutation": {
+        "points": 22,
+        "coarse_positive_ids": 2,
+        "dense_positive_ids": 2,
+        "raw_id_different_points": 12,
+        "both_background_points": 10,
+        "both_tree_points": 12,
+        "coarse_tree_dense_background_points": 0,
+        "coarse_background_dense_tree_points": 0,
+        "tree_background_flip_points": 0,
+        "best_bijective_positive_agreement_points": 12,
+        "different_points_after_optimal_bijective_renumbering": 0,
+        "different_fraction_after_optimal_bijective_renumbering": 0.0,
+        "both_tree_points_different_after_optimal_bijective_renumbering": 0,
+        "same_partition_up_to_renumbering_with_background_fixed": true,
+        "coarse_ids_intersecting_multiple_dense_ids": 0,
+        "dense_ids_intersecting_multiple_coarse_ids": 0,
+        "coarse_ids_with_no_dense_tree_correspondence": [],
+        "dense_ids_with_no_coarse_tree_correspondence": [],
+        "unexpected_negative_id_points": 0
+      },
+      "positive_merge": {
+        "points": 22,
+        "coarse_positive_ids": 2,
+        "dense_positive_ids": 1,
+        "raw_id_different_points": 12,
+        "both_background_points": 10,
+        "both_tree_points": 12,
+        "coarse_tree_dense_background_points": 0,
+        "coarse_background_dense_tree_points": 0,
+        "tree_background_flip_points": 0,
+        "best_bijective_positive_agreement_points": 7,
+        "different_points_after_optimal_bijective_renumbering": 5,
+        "different_fraction_after_optimal_bijective_renumbering": 0.22727272727272727,
+        "both_tree_points_different_after_optimal_bijective_renumbering": 5,
+        "same_partition_up_to_renumbering_with_background_fixed": false,
+        "coarse_ids_intersecting_multiple_dense_ids": 0,
+        "dense_ids_intersecting_multiple_coarse_ids": 1,
+        "coarse_ids_with_no_dense_tree_correspondence": [],
+        "dense_ids_with_no_coarse_tree_correspondence": [],
+        "unexpected_negative_id_points": 0
+      },
+      "positive_split": {
+        "points": 22,
+        "coarse_positive_ids": 1,
+        "dense_positive_ids": 2,
+        "raw_id_different_points": 12,
+        "both_background_points": 10,
+        "both_tree_points": 12,
+        "coarse_tree_dense_background_points": 0,
+        "coarse_background_dense_tree_points": 0,
+        "tree_background_flip_points": 0,
+        "best_bijective_positive_agreement_points": 7,
+        "different_points_after_optimal_bijective_renumbering": 5,
+        "different_fraction_after_optimal_bijective_renumbering": 0.22727272727272727,
+        "both_tree_points_different_after_optimal_bijective_renumbering": 5,
+        "same_partition_up_to_renumbering_with_background_fixed": false,
+        "coarse_ids_intersecting_multiple_dense_ids": 1,
+        "dense_ids_intersecting_multiple_coarse_ids": 0,
+        "coarse_ids_with_no_dense_tree_correspondence": [],
+        "dense_ids_with_no_coarse_tree_correspondence": [],
+        "unexpected_negative_id_points": 0
+      },
+      "background_flip": {
+        "points": 17,
+        "coarse_positive_ids": 1,
+        "dense_positive_ids": 1,
+        "raw_id_different_points": 17,
+        "both_background_points": 0,
+        "both_tree_points": 0,
+        "coarse_tree_dense_background_points": 7,
+        "coarse_background_dense_tree_points": 10,
+        "tree_background_flip_points": 17,
+        "best_bijective_positive_agreement_points": 0,
+        "different_points_after_optimal_bijective_renumbering": 17,
+        "different_fraction_after_optimal_bijective_renumbering": 1.0,
+        "both_tree_points_different_after_optimal_bijective_renumbering": 0,
+        "same_partition_up_to_renumbering_with_background_fixed": false,
+        "coarse_ids_intersecting_multiple_dense_ids": 0,
+        "dense_ids_intersecting_multiple_coarse_ids": 0,
+        "coarse_ids_with_no_dense_tree_correspondence": [
+          1
+        ],
+        "dense_ids_with_no_coarse_tree_correspondence": [
+          1
+        ],
+        "unexpected_negative_id_points": 0
+      },
+      "all_background": {
+        "points": 17,
+        "coarse_positive_ids": 0,
+        "dense_positive_ids": 0,
+        "raw_id_different_points": 0,
+        "both_background_points": 17,
+        "both_tree_points": 0,
+        "coarse_tree_dense_background_points": 0,
+        "coarse_background_dense_tree_points": 0,
+        "tree_background_flip_points": 0,
+        "best_bijective_positive_agreement_points": 0,
+        "different_points_after_optimal_bijective_renumbering": 0,
+        "different_fraction_after_optimal_bijective_renumbering": 0.0,
+        "both_tree_points_different_after_optimal_bijective_renumbering": 0,
+        "same_partition_up_to_renumbering_with_background_fixed": true,
+        "coarse_ids_intersecting_multiple_dense_ids": 0,
+        "dense_ids_intersecting_multiple_coarse_ids": 0,
+        "coarse_ids_with_no_dense_tree_correspondence": [],
+        "dense_ids_with_no_coarse_tree_correspondence": [],
+        "unexpected_negative_id_points": 0
+      },
+      "streamed_renumbered_files": {
+        "passed": true,
+        "points": 8,
+        "chunk_points": 3,
+        "raw_id_differences": 6,
+        "partition_differences": 0,
+        "metadata_preserved": true
+      },
+      "deliberate_source_and_semantic_changes": {
+        "passed": true,
+        "source_intensity_differences_detected": 1,
+        "semantic_differences_detected": 1
+      }
+    }
+  },
+  "stages": {
+    "coarse_remap_FM": {
+      "stage": "coarse_remap",
+      "model": "FM",
+      "image": "sha256:cc3e4b7245a480a78c4f06daf1494db5fba7b2d636e7e4e5cee9c47a48534a2e",
+      "executable_source_matches": 56,
+      "resources": {
+        "cpus": 10,
+        "memory_bytes": 53687091200,
+        "swap_extra_bytes": 0,
+        "gpu": false,
+        "network": "none"
+      },
+      "state": "passed",
+      "exit_code": 0,
+      "wall_seconds": 48.689758581109345,
+      "input_unchanged": true,
+      "memory.peak": "3132755968",
+      "report_state": "validated",
+      "error": null
+    },
+    "coarse_remap_SAT": {
+      "stage": "coarse_remap",
+      "model": "SAT",
+      "image": "sha256:cc3e4b7245a480a78c4f06daf1494db5fba7b2d636e7e4e5cee9c47a48534a2e",
+      "executable_source_matches": 56,
+      "resources": {
+        "cpus": 10,
+        "memory_bytes": 53687091200,
+        "swap_extra_bytes": 0,
+        "gpu": false,
+        "network": "none"
+      },
+      "state": "passed",
+      "exit_code": 0,
+      "wall_seconds": 45.556456385180354,
+      "input_unchanged": true,
+      "memory.peak": "3213762560",
+      "report_state": "validated",
+      "error": null
+    },
+    "dense_merge_FM": {
+      "stage": "dense_merge",
+      "model": "FM",
+      "image": "sha256:cc3e4b7245a480a78c4f06daf1494db5fba7b2d636e7e4e5cee9c47a48534a2e",
+      "executable_source_matches": 56,
+      "resources": {
+        "cpus": 10,
+        "memory_bytes": 53687091200,
+        "swap_extra_bytes": 0,
+        "gpu": false,
+        "network": "none"
+      },
+      "state": "passed",
+      "exit_code": 0,
+      "wall_seconds": 903.9919321599882,
+      "input_unchanged": true,
+      "memory.peak": "9507430400",
+      "report_state": "intermediate; final original coverage pending",
+      "error": null
+    },
+    "dense_merge_SAT": {
+      "stage": "dense_merge",
+      "model": "SAT",
+      "image": "sha256:cc3e4b7245a480a78c4f06daf1494db5fba7b2d636e7e4e5cee9c47a48534a2e",
+      "executable_source_matches": 56,
+      "resources": {
+        "cpus": 10,
+        "memory_bytes": 53687091200,
+        "swap_extra_bytes": 0,
+        "gpu": false,
+        "network": "none"
+      },
+      "state": "passed",
+      "exit_code": 0,
+      "wall_seconds": 598.9831269159913,
+      "input_unchanged": true,
+      "memory.peak": "8750383104",
+      "report_state": "intermediate; final original coverage pending",
+      "error": null
+    },
+    "dense_remap_FM": {
+      "stage": "dense_remap",
+      "model": "FM",
+      "image": "sha256:cc3e4b7245a480a78c4f06daf1494db5fba7b2d636e7e4e5cee9c47a48534a2e",
+      "executable_source_matches": 56,
+      "resources": {
+        "cpus": 10,
+        "memory_bytes": 53687091200,
+        "swap_extra_bytes": 0,
+        "gpu": false,
+        "network": "none"
+      },
+      "state": "passed",
+      "exit_code": 0,
+      "wall_seconds": 106.43372394796461,
+      "input_unchanged": true,
+      "memory.peak": "8536006656",
+      "report_state": "validated",
+      "error": null
+    },
+    "dense_remap_SAT": {
+      "stage": "dense_remap",
+      "model": "SAT",
+      "image": "sha256:cc3e4b7245a480a78c4f06daf1494db5fba7b2d636e7e4e5cee9c47a48534a2e",
+      "executable_source_matches": 56,
+      "resources": {
+        "cpus": 10,
+        "memory_bytes": 53687091200,
+        "swap_extra_bytes": 0,
+        "gpu": false,
+        "network": "none"
+      },
+      "state": "passed",
+      "exit_code": 0,
+      "wall_seconds": 108.40855817007832,
+      "input_unchanged": true,
+      "memory.peak": "8318877696",
+      "report_state": "validated",
+      "error": null
+    }
+  }
+}

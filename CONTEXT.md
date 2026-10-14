@@ -33,9 +33,13 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
   predictions with 0. During original enrichment, prefer a positive RCT tree
   within the remap radius over background, preserving its attributes. See
   `docs/raycloud-filter-only.md` for the illustrated case.
-- Transfer each model's unfiltered predictions to its own 1 cm target tiles
-  first: 100% assignment within the separately configured 0.1732 m XYZ radius.
-- Remove whole instances whose selected dense anchor is outside their core;
+- With target geometry, transfer each model's predictions before filtering and
+  require 100% assignment. Galaxy derives transfer radius from the source voxel
+  diagonal. Without targets, skip transfer and use supplied geometry for filtering;
+  coarse-only inputs retain samples from the same tiling run. Record the actual
+  resolution. Do not enlarge correspondence or duplicate radii to voxel size;
+  see README's optional-target contract.
+- Remove whole instances whose anchor on the processed geometry is outside their core;
   background uses half-open spatial cores. Reconcile IDs independently per
   model without tree sidecars: each accepted transitive group gets one ID and retains every member's
   unique geometry. Resolve shared points by tile ownership, retaining all
@@ -182,11 +186,13 @@ and the repository root `CONTEXT.md` for shared 3Dtrees terminology.
 
 - `tile`: indexes uploaded LAZ/LAS/COPC inputs, plans buffered tiles and reads
   every source point once to write the subsampled tiles directly
-  (`subsampled_res1..N` from `--tile-outputs`); no full-resolution tiles are
-  written. Without `--tile-outputs` the first output is 1cm COPC LAZ and the
+  (`subsampled_res1..N` from `--tile-outputs`); selecting Original resolution
+  retains every point instead of subsampling. Without `--tile-outputs` the first output is 1cm COPC LAZ and the
   second 10cm regular LAZ.
-- `merge`: transfers predictions to dense 1 cm tiles before reconciling IDs and
-  deduplicating label-consistent cross-tile points; can strictly enrich originals.
+- `merge`: optionally transfers predictions to target geometry, then filters,
+  recovers, reconciles and deduplicates independent tile-local instances. Without
+  targets it keeps the supplied resolution. The CLI can strictly enrich originals;
+  Galaxy uses separate Remap/Create tasks for enriched originals and final products.
 - `filter`: runs the same reconciliation/deduplication on already-dense tiles.
 - `remap`: transfers prediction dimensions back to original source points. It
   supports multiple segmented prediction collections when their dimension names

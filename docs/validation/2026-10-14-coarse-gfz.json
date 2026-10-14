@@ -1,0 +1,451 @@
+{
+  "date": "2026-10-14",
+  "status": "passed",
+  "scope": "Coarse-only GFZ filter/merge plus focused local wrapper acceptance; not whole-release certification",
+  "image": "sha256:cc3e4b7245a480a78c4f06daf1494db5fba7b2d636e7e4e5cee9c47a48534a2e",
+  "image_rebuilt": false,
+  "source_base_commit": "b397214447c53ef9dd8f8710de60720976aed8a4",
+  "source_worktree_dirty": true,
+  "source_files_sha256": {
+    "attribute_join.py": "e4714ce84cd4de33fd3ce522235d8726a288d6c50559d124da52abe9080bfcee",
+    "prediction_collections.py": "9b6da1104d831bfb7e57bd12126ff2b02abb9abd629ed8a602b45ab6349c7d4c",
+    "tile_file_matching.py": "002e8010014efffab483a80cddc335a14fa1f9508d97f26cf3a1bf32b6a296c1",
+    "tile_core_occupancy.py": "5a955993b501f41dfffc778817f43b8b40c1a22c04366f73d354a8802acd048c",
+    "remap_first_pipeline.py": "5e96eb1d6849def3ddd115fe34301633b132198aa2da3919b22dba992888905b",
+    "instance_finalization.py": "666cc3a25cbce92c4c53055ba05a4ee7690ca002d7989e8c5bffbe1a79dbdae2",
+    "ownership_spatial_blocks.py": "0374fb6e631603208d316b0d0c732957d818c66a4ee88e8ab8745f2692b72a78",
+    "instance_tiles.py": "69f32215856293636eb9b78f303d7cdcaf180d7c2af95ca57c3e24ed08f7f912",
+    "prepare_tile_jobs.py": "6b0a05603566948bc6de880688f4e19d052aed88134af0eee33fbe6e0ff41116",
+    "run.py": "db4db3035e3d35f48375ded1c95a4a064d915891f2825cd181df401ec2871d16",
+    "subsample_outputs.py": "da1f874cd556c223d7ea9f92969511f255aa4818926b46b9f73daf59da564052",
+    "raycloud_meshes.py": "bf130013ca1e319c8dd2b380a625257da14d8e36058694d29f598f1449f1faec",
+    "raycloud_tree_files.py": "347c43ca9c6eaf63abc4adf61928515b28a830c858ed7b9d44572f9e0d5a6fe0",
+    "main_subsample.py": "d1a0fb73a16ce88ea86db186dbc348218ebf6f1a5838816d580405b4b5970263",
+    "original_blocks.py": "fccb5ee851c36f29cf2cd3be4bf009b7a29097e03b711228b88ae2f69e3a607e",
+    "worker_budget.py": "59ca4ab1e7ded4f6d86fafb08468777f5604285d91b68dd40b0988715523bae2",
+    "spatial_query_cache.py": "d0f392cfe6919c6f3f4e2e51f4ce536e4938560316cc1e7dde265e54fbb0de03",
+    "small_instance_reassignment.py": "e4f10117c39035f3895cd599c5922fcfb774bd59c07ec56efb9f567768574b71",
+    "full_resolution_merge.py": "11a1a1283fdf0287d96f994597b1fc6d2898bb6ff1a0df228791361ea3c8b2eb",
+    "vector_extra_bytes.py": "514b01776a6dcd01ac1ab4a70125f107a2c43dd7f7afc8688ac8e04f0ec8d3bf",
+    "orphan_claims.py": "4c37251b328554c9646d102a8d035e3bfb250ece0dd83735bb334b4f8d830a4d",
+    "bounded_point_index.py": "822a5f43e83ddd973d48c959c251f6db920daa48fb4d4c63858d5e6dcf02b574",
+    "parallel_remap.py": "b0b2c783d620d21c164c93ece5cb360550342bc097018963e6631eeb4b4f3a77",
+    "tile_centroids.py": "336178afb613ec914357078321860739494859556a15ee8649940a4a4668a234",
+    "instance_consolidation.py": "933b1d78d3df2196dd5ad3793d7f4c2feaf6b57dccd122025b1161f00f1b1bef",
+    "crs_records.py": "28772c86183e8f93069e0cf8b259c6d6991706c6f8ea5e4bc85c0ea2f507fd26",
+    "plot_tiles_and_copc.py": "af36d429218f2ed47a4b66a1afdb25c818f84519168f71ee426242f984fe7b56",
+    "raycloud_instance_ids.py": "c8d96d7252987d41893a60b14371db654767f2987f83aa39e51ceeba0cb7b8e3",
+    "get_bounds_from_tindex.py": "ece1fd8616d8a5a3876b239902bf3298dc4eec04ee69b238e9ee265e63141b5c",
+    "tile_tindex.py": "323cd59e14fdb7028f437b7c23949e2739d9aca3f0bf59fa0508d10da9ca7d04",
+    "output_publication.py": "edb80159fcc7b56505c216d9bcd22cd61c0d7f005f03202e8bc7fe3eafdfbb24",
+    "tile_copc.py": "ec05ef8a2fa53d99e89863ed4f13017e1dff65b97090224cb43d39ae870228eb",
+    "parameters.py": "82bfc3742979dc55022eff15e7588af0624041873fa4e698870b9b5713b17ab8",
+    "copc_staging.py": "d27b0c6ff6c5174d72b90ab9266512fe33e6e64d59e333a21be3c5b066c7d246",
+    "instance_labels.py": "578e33736f030a3b364716ee48d81457aa4becd08d9bb570f8cd423361bad778",
+    "raycloud_recovery.py": "b969fa73b6fac87c5940cd64c6002460fb70febafc019c3a89e2aad9262ddb44",
+    "copc_metadata.py": "9d7d8a480dec24db71b864261a06cef5b3d1398101888b836d94b81791a01e05",
+    "point_cloud_metadata.py": "287636c4fc27102a004e160f066532a7707cc45e3e0e1feb9de1d3bbe5067dcc",
+    "parallel_index_queries.py": "67e3208d700e77c27f574ff27486c1fe58a6940baed6dc5ec592bc9244f5f45f",
+    "tile_original_geometry.py": "a142e84858ad64dedc05e937d92ea0663dc1c61134191a49672c1af937e5c9c0",
+    "subsample_encoding.py": "1f76f91518b413456444d457329483325963f6f5e4e8c915f160e0b9ba2b0625",
+    "dense_instance_ownership.py": "f3fa439edb4b00ed80b1ee412c4eeb2bea1d6b7e25e82ea16768318a4b7bf46e",
+    "ply_crs.py": "bf77351bfff659e09e221d1190bfb984b735289204f731ee9b768289b6df7fb3",
+    "subsample_com.py": "af35350789ee99f8cf06c61dfb933e47119f3c90d5deccf2e98eaa812bcca109",
+    "merge_stages.py": "2517169e28c76720350dc4afeff097cd140a019b58b540ed21575857eb0dfe35",
+    "tile_bounds_graph.py": "22032533bfeacbe7b46e6a94a1be5ec73b0597716012d6f2d2ddbc0973d3a2d6",
+    "parallel_tiles.py": "c145c57a272ca089ae89ec480f6d8b8d8aef7e88ff489cb55ebf29cdb8a6c3da",
+    "instance_tile_outputs.py": "385043a93daf4d44e2c99de0390c855901718af9c508a475dfc200aab728dc42",
+    "main_create_merged_file.py": "a768ec0f0ce7dc2fb7eba5dc41f9b4c4f9c34020257974e89a37f22a88225150",
+    "product_formats.py": "49f169bb3f4b4ec6d84452213eaf93420523f99591d805f4c994d83793fc81cb",
+    "tile_crs.py": "ba95e4c2515c1d7db0af18666ea644bd6f3057344167be3079eaa9bbd65b7993",
+    "main_tile.py": "bcd73708a085e320c53eb913b5861583c1c54e3638fc23739f8239325e59bd94",
+    "instance_statistics.py": "0237a12700ed72eab63d0e787f5b4c3f5da89ca047480ca826fe95b29dfa2b64",
+    "subsample_methods.py": "51a5e1d374d63f29e2ccf3797920fa30197e2632d0562bc489613d32ce4b10fb",
+    "orphan_instance_recovery.py": "df5833d99038824c38d91351dd82382c87c2548d20e85524161bbb5b63d29ec4",
+    "raycloud_finalization.py": "485de7e33f71fd02c02954f8c12f5d44665b8a79a0f528d84db7c018816e68f1"
+  },
+  "executable_files_matched_to_image": 56,
+  "resources": {
+    "cpus": 10,
+    "memory_bytes": 53687091200,
+    "memory_swap_bytes": 53687091200,
+    "gpu": "none",
+    "network": "none"
+  },
+  "fixture": {
+    "name": "smarttile-v2.4a-gfz-20260924",
+    "tiling_date": "2026-09-24",
+    "core_edge_m": 60,
+    "buffer_m": 20,
+    "voxel_m": 0.1,
+    "method": "center-of-mass",
+    "inference": "Independent SAT and ForestMamba inference per tile; cached results reused"
+  },
+  "runs": {
+    "SAT": {
+      "status": "passed",
+      "input_tiles": 4,
+      "resolution_m": 0.1,
+      "input_points": 8280988,
+      "output_points": 2479599,
+      "positive_final_ids": 102,
+      "wall_seconds": 43.3051036670804,
+      "peak_memory_bytes": 2274836480,
+      "input_unchanged": true,
+      "transfer_skipped": true,
+      "command": [
+        "/opt/smarttile/bin/python",
+        "-u",
+        "/src/run.py",
+        "--task",
+        "merge",
+        "--segmented-remapped-folder",
+        "/fixture/collections/SAT",
+        "--output-dir",
+        "/work/SAT",
+        "--tile-bounds-json",
+        "/fixture/01_tiles/tile_bounds_tindex.json",
+        "--instance-dimension",
+        "PredInstance_SAT",
+        "--resolution-1",
+        "0.1",
+        "--filter-anchor",
+        "centroid",
+        "--overlap-threshold",
+        "0.3",
+        "--skip-merged-file",
+        "--no-transfer-original-dims-to-merged",
+        "--workers",
+        "10"
+      ],
+      "input_sha256": {
+        "collections/SAT/c00_r00.laz": "384c89c35c76b4d44e5118acfb0bcefca8d74a7b41c22034a1e1d38013b674e0",
+        "collections/SAT/c00_r01.laz": "f0c8a54ea8e369563f9187716a700e8a5aafc157f581db3e41ef25f23535a022",
+        "collections/SAT/c01_r00.laz": "aadedf0f689510efdfb93897d8dcce0aef0151606e1069d5343858f42173b1c5",
+        "collections/SAT/c01_r01.laz": "0eb4a752ba10dd981c80abbeeca71fe74f6a386c85b3725220b5db0181392378",
+        "01_tiles/tile_bounds_tindex.json": "a9ef87d634ac40aca7ed8d84fd4c88b7833fac9fa45fa98d207c9be00dcf9cc1"
+      },
+      "source_geometry_and_attribute_provenance": {
+        "invalid_rows": 0,
+        "examples": [],
+        "coordinate_quantum_m": 1e-06
+      },
+      "positive_input_core_support": {
+        "tested_records": 6447843,
+        "unsupported_records": 0,
+        "radius_m": 0.01,
+        "examples": []
+      },
+      "ids_in_multiple_output_files": [],
+      "input_coordinate_order_and_multiset_preserved": true,
+      "crs_preserved": true,
+      "overlap_fraction_within_5cm_min": 0.9993242349546083,
+      "overlap_fraction_within_5cm_max": 1.0,
+      "recovery_candidates": 159,
+      "recovery_admitted": 126,
+      "canonical_output_sha256": {
+        "c00_r00.laz": "51e702fc3ed134d85d72aa06b239ee153d460865989adfd62092db26eae2844e",
+        "c00_r01.laz": "498d91cc5ff5b5f9a07cfacb1553c9873349fe7bf896c4dc49b3e99dda857613",
+        "c01_r00.laz": "1f0fc5e4343de6b6c1d3c3258c7a1e3c7d496121ef3711e11258a34b9d9dd052",
+        "c01_r01.laz": "df84b9ecd19098997703646d55c550ee806d9c219ffed0d7bc269fa4597b924e"
+      }
+    },
+    "FM": {
+      "status": "passed",
+      "input_tiles": 4,
+      "resolution_m": 0.1,
+      "input_points": 8280988,
+      "output_points": 2479643,
+      "positive_final_ids": 114,
+      "wall_seconds": 49.43254545913078,
+      "peak_memory_bytes": 2590007296,
+      "input_unchanged": true,
+      "transfer_skipped": true,
+      "command": [
+        "/opt/smarttile/bin/python",
+        "-u",
+        "/src/run.py",
+        "--task",
+        "merge",
+        "--segmented-remapped-folder",
+        "/fixture/collections/FM",
+        "--output-dir",
+        "/work/FM",
+        "--tile-bounds-json",
+        "/fixture/01_tiles/tile_bounds_tindex.json",
+        "--instance-dimension",
+        "PredInstance_FM",
+        "--resolution-1",
+        "0.1",
+        "--filter-anchor",
+        "centroid",
+        "--overlap-threshold",
+        "0.3",
+        "--skip-merged-file",
+        "--no-transfer-original-dims-to-merged",
+        "--workers",
+        "10"
+      ],
+      "input_sha256": {
+        "collections/FM/c00_r00.laz": "c2a9697eef879cd7d0ce350e2cf4e3d19177b473f493d451d3aaf8211444e4b1",
+        "collections/FM/c00_r01.laz": "019c848b47133b6d9eb38efce00ac6354bb50c5b1bb5f00564ed880ce145f0da",
+        "collections/FM/c01_r00.laz": "98c1e685b70cbe53149a9edbeefa9b4f426a4c551890ac31d76d9a45acbe8779",
+        "collections/FM/c01_r01.laz": "c513823cd230dc9d075c71aa278f311ea7e62fc2f908d0d1ef9bfe92adce7c83",
+        "01_tiles/tile_bounds_tindex.json": "a9ef87d634ac40aca7ed8d84fd4c88b7833fac9fa45fa98d207c9be00dcf9cc1"
+      },
+      "source_geometry_and_attribute_provenance": {
+        "invalid_rows": 0,
+        "examples": [],
+        "coordinate_quantum_m": 1e-06
+      },
+      "positive_input_core_support": {
+        "tested_records": 6640632,
+        "unsupported_records": 0,
+        "radius_m": 0.01,
+        "examples": []
+      },
+      "ids_in_multiple_output_files": [],
+      "input_coordinate_order_and_multiset_preserved": true,
+      "crs_preserved": true,
+      "overlap_fraction_within_5cm_min": 0.9993242349546083,
+      "overlap_fraction_within_5cm_max": 1.0,
+      "recovery_candidates": 198,
+      "recovery_admitted": 152,
+      "canonical_output_sha256": {
+        "c00_r00.laz": "db61e112ca6ffafd9ac7f341a46fb8472be80c997a695cacad22fa6f7c1add7a",
+        "c00_r01.laz": "2beca632a1294fb8571c8f80b585f2b3ae5bc37dffe91c9f8b856aa76ff7a360",
+        "c01_r00.laz": "7f512bdf8a41ee433ce70d64e223866da510ef765e5a28f03756062abea3c44e",
+        "c01_r01.laz": "576df7ce5f28c03703f2b11451d9b645de90b6ac4eb294aad55793bdf853df0a"
+      }
+    }
+  },
+  "metadata_header_audit": {
+    "status": "passed",
+    "cases": [
+      {
+        "case": "SAT",
+        "status": "passed",
+        "files": 8,
+        "declared_fields": []
+      },
+      {
+        "case": "FM",
+        "status": "passed",
+        "files": 8,
+        "declared_fields": []
+      },
+      {
+        "case": "matching_0_workers_1",
+        "status": "passed",
+        "files": 4,
+        "expected_sentinel": [
+          "Confidence",
+          65535
+        ]
+      },
+      {
+        "case": "matching_0_workers_2",
+        "status": "passed",
+        "files": 4,
+        "expected_sentinel": [
+          "Confidence",
+          65535
+        ]
+      },
+      {
+        "case": "matching_1_workers_1",
+        "status": "passed",
+        "files": 4,
+        "expected_sentinel": [
+          "Confidence",
+          65535
+        ]
+      },
+      {
+        "case": "matching_1_workers_2",
+        "status": "passed",
+        "files": 4,
+        "expected_sentinel": [
+          "Confidence",
+          65535
+        ]
+      }
+    ]
+  },
+  "controlled_boundary_cases": [
+    {
+      "case": "matching_1_workers_1",
+      "status": "passed",
+      "output_points": 16,
+      "positive_final_instances": 4,
+      "known_truth": {
+        "points": 16,
+        "known_true_trees": 4,
+        "groups_per_true_tree": {
+          "1": 1,
+          "2": 1,
+          "3": 1,
+          "4": 1
+        },
+        "false_merges": 0,
+        "unique_recovered_tip_present": true,
+        "nearby_8cm_separated_trees_distinct": true
+      },
+      "deterministic_comparison": null
+    },
+    {
+      "case": "matching_1_workers_2",
+      "status": "passed",
+      "output_points": 16,
+      "positive_final_instances": 4,
+      "known_truth": {
+        "points": 16,
+        "known_true_trees": 4,
+        "groups_per_true_tree": {
+          "1": 1,
+          "2": 1,
+          "3": 1,
+          "4": 1
+        },
+        "false_merges": 0,
+        "unique_recovered_tip_present": true,
+        "nearby_8cm_separated_trees_distinct": true
+      },
+      "deterministic_comparison": true
+    },
+    {
+      "case": "matching_0_workers_1",
+      "status": "passed",
+      "output_points": 16,
+      "positive_final_instances": 6,
+      "known_truth": {
+        "points": 16,
+        "known_true_trees": 4,
+        "groups_per_true_tree": {
+          "1": 2,
+          "2": 1,
+          "3": 1,
+          "4": 2
+        },
+        "false_merges": 0,
+        "unique_recovered_tip_present": true,
+        "nearby_8cm_separated_trees_distinct": true
+      },
+      "deterministic_comparison": null
+    },
+    {
+      "case": "matching_0_workers_2",
+      "status": "passed",
+      "output_points": 16,
+      "positive_final_instances": 6,
+      "known_truth": {
+        "points": 16,
+        "known_true_trees": 4,
+        "groups_per_true_tree": {
+          "1": 2,
+          "2": 1,
+          "3": 1,
+          "4": 2
+        },
+        "false_merges": 0,
+        "unique_recovered_tip_present": true,
+        "nearby_8cm_separated_trees_distinct": true
+      },
+      "deterministic_comparison": true
+    }
+  ],
+  "wrapper": {
+    "result": "passed",
+    "wrapper_version": "2.4.0+galaxy4",
+    "image_rebuilt": false,
+    "checks": {
+      "planemo_lint": "passed",
+      "native_render_cases": 22,
+      "remap_create_cases_identical_to_before": 10,
+      "git_diff_check": "passed",
+      "live_api_form": "passed",
+      "live_galaxy_tests": 7,
+      "live_galaxy_test_indices": [
+        4,
+        5,
+        6,
+        8,
+        14,
+        22,
+        23
+      ]
+    },
+    "changed_embedded_test_indices": [
+      4,
+      5,
+      6,
+      14,
+      22,
+      23
+    ],
+    "wrapper_sha256": "60f8a6db24b2af0b424b618bba76e70a7472935056a03101d70a76edd8be0fba",
+    "live_functional_tests": "all seven passed against local Galaxy8092 and unchanged image",
+    "evidence": [
+      "lint.log",
+      "render-checks.json",
+      "live-form.json",
+      "galaxy-tests.json",
+      "galaxy-tests.xml",
+      "galaxy-tests.html",
+      "galaxy-tests.log"
+    ]
+  },
+  "real_galaxy_collection_smoke": {
+    "status": "passed",
+    "scope": "Two real Galaxy list collections reduced in Original collection repeat entries",
+    "job_count": 1,
+    "numeric_validation": {
+      "points": 11147,
+      "original_point_index_exact": true,
+      "coordinates_and_record_order_exact": true,
+      "all_source_attributes_exact": true,
+      "crs_preserved": true,
+      "unique_fields_per_version": [
+        [],
+        [
+          "PredInstance_FM"
+        ]
+      ],
+      "output_extra_dimensions": [
+        "OriginalPointIndex",
+        "PredInstance",
+        "PredInstance_FM"
+      ]
+    },
+    "image_id": "sha256:cc3e4b7245a480a78c4f06daf1494db5fba7b2d636e7e4e5cee9c47a48534a2e",
+    "wrapper_sha256": "60f8a6db24b2af0b424b618bba76e70a7472935056a03101d70a76edd8be0fba"
+  },
+  "limitations": [
+    "Same-run coordinate-preserving inputs are a caller requirement, not automatically enforced against original tiles.",
+    "The real inputs came from the September 24 tiler, not a new run of the current tiler.",
+    "No independent biological tree truth or dense-first equivalence was established.",
+    "The GFZ files have no ExtraBytes missing-value declarations; sentinel preservation is covered by controlled fixtures.",
+    "Original remap, downstream visualization and whole-release staging were not rerun in this coarse-only acceptance."
+  ],
+  "local_artifact_directory_name": "smarttile-coarse-gfz-20261014",
+  "focused_regression": {
+    "all_passed": true,
+    "runs": [
+      {
+        "name": "coarse_regressions",
+        "exit_code": 0,
+        "wall_seconds": 42.11125014303252,
+        "test_methods": 2,
+        "pipeline_cases": 4,
+        "image_id": "sha256:cc3e4b7245a480a78c4f06daf1494db5fba7b2d636e7e4e5cee9c47a48534a2e",
+        "test_sha256": "8372ee575c9a27b2686a699c80b6fa042a2b6fee13d0f416479f4096cf63ad04"
+      }
+    ],
+    "initial_attempt": {
+      "result": "focused-checks.initial.json",
+      "log": "logs/coarse_regressions.initial.log",
+      "reason": "Test read DimensionInfo.no_data, which laspy omits after reading; actual ExtraBytes VLR retained65535. Corrected test checks stored VLR and asserts input fixture sentinel."
+    },
+    "command": "python -m unittest discover -s tests -p test_coarse_filtering.py -v"
+  }
+}

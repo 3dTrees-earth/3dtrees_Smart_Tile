@@ -4,7 +4,7 @@ This describes the current `src/run.py` task routes. Resolutions below use the
 defaults: res1 = 1 cm, res2 = 10 cm. Keep the uploaded originals throughout the
 workflow: they supply the geometry and metadata for enriched original products.
 
-## How the five tasks connect
+## How the CLI tasks connect
 
 ```mermaid
 flowchart TD
@@ -38,8 +38,17 @@ flowchart TD
     PRODUCT --> DOWNLOAD["prod_merged products: COPC LAZ, LAZ, and/or PLY"]
 ```
 
-`merge` can accept already-dense predictions as well. It can also perform
-original enrichment in the same invocation when originals are supplied.
+The CLI has five task names; Galaxy exposes four tasks, combining filtering and
+merging into **Filter / merge segmented tiles**. Galaxy returns processed tiles
+and RCT companions from that task; original enrichment and final product creation
+use the separate Remap and Create merged file tasks.
+
+`merge` can accept coordinate-preserving segmented tiles without target geometry,
+including coarse tiles from the same tiling run. Use `--segmented-remapped-folder`
+and `--resolution-1` matching those inputs (for example `0.1` for 10 cm).
+This skips transfer and preserves their resolution. It does not make missing fine
+points or promise the same anchor/group decisions as processing fine targets.
+The CLI can still perform original enrichment when originals are supplied.
 `filter` writes intermediate tiles; use `remap` afterwards to enrich originals.
 The diagram shows the separate tasks so their required artifacts are explicit.
 For RCT, keep both tree tables beside each prediction tile when entering merge
@@ -54,7 +63,7 @@ For every filter decision, loop, boundary condition and failure path, see the
 flowchart TD
     ENTRY{"Input geometry?"}
     ENTRY -->|"Coarse predictions: merge"| TRANSFER["Transfer each tile's predictions to its dense target; require 100% coverage"]
-    ENTRY -->|"Already dense: filter or merge"| VALIDATE["Validate labels on the existing dense geometry"]
+    ENTRY -->|"No targets: filter or merge"| VALIDATE["Validate labels on the supplied segmented geometry"]
     TRANSFER --> BASE["Save unfiltered dense baseline"]
     VALIDATE --> BASE
     BASE --> OWN["Whole-instance core ownership: centroid, highest point, or lowest point"]
@@ -94,8 +103,8 @@ and the real 488/94 conflict example.
 
 | Task | Required input | Processing | Main output |
 | --- | --- | --- | --- |
-| `tile` | Source point clouds | Spatial indexing, core/buffer layout, then one read of every source point that counts core occupancy and writes every subsampled resolution directly (no full-resolution tiles). A single-cloud bypass records the actual single extent. | `subsampled_res1/` … `subsampled_resN/` (one per `--tile-outputs` entry; default 1 cm COPC and 10 cm LAZ), tile-bounds JSON, job list, tindex, overview. |
-| `merge` | Prediction collection(s), matching dense targets unless already dense, and tile-bounds JSON. RCT also requires both tree tables per tile. | Dense transfer, ownership, recovery and model-specific processing shown above. Optional original enrichment. | Processed tiles, `instance_metadata.csv`, `smarttile_merge.json`, effective `tile_bounds.json`, sibling `*_unfiltered_1cm/`, `remap_first_report.json`; RCT `segmented_filtered/` tables; optional enriched originals. |
+| `tile` | Source point clouds | Spatial indexing, core/buffer layout, then one read of every source point that counts core occupancy and writes every requested resolution directly (an `original` entry retains every point). A single-cloud bypass records the actual single extent. | `subsampled_res1/` … `subsampled_resN/` (one per `--tile-outputs` entry; default 1 cm COPC and 10 cm LAZ), tile-bounds JSON, job list, tindex, overview. |
+| `merge` | Prediction collection(s), optional matching target geometry, and tile-bounds JSON. RCT also requires both tree tables per tile. | Optional prediction transfer, ownership, recovery and model-specific processing shown above. Optional CLI original enrichment. | Processed tiles, `instance_metadata.csv`, `smarttile_merge.json`, effective `tile_bounds.json`, sibling `*_unfiltered_1cm/`, `remap_first_report.json`; RCT `segmented_filtered/` tables; optional enriched originals. |
 | `filter` | One already-dense prediction collection and tile-bounds JSON; RCT tree tables where applicable. | Same ownership, recovery and model-specific processing, without a coarse prediction transfer. | Processed tiles, baseline, manifest, report and RCT tables where applicable. |
 | `remap` | Processed prediction collection(s) and uploaded raw LAS/LAZ originals; unfiltered baseline geometry optional. | Coverage validation and bounded nearest-point attribute transfer to the original points. | One enriched file per original and an original-coverage report. |
 | `create_merged_file` | Enriched originals, or source files for a source-file union. Optional staged COPC cache and standardization JSON. | Preservation-mode COPC staging, combining files and selecting real source points at requested product resolutions. | `prod_merged_1cm` / `prod_merged_10cm` by default, in selected `copc.laz`, `laz` and/or `ply` formats. |
@@ -110,12 +119,23 @@ the 1 cm geometry). The baseline only tells a tiling gap apart from a filtering 
 
 | Check | Distance / rule |
 | --- | --- |
-| Coarse prediction to dense tile | `--prediction-transfer-tolerance`, default **0.1732 m = 17.32 cm**; every target point must match. |
+| Coarse prediction to target tile | Galaxy calculates sqrt(3) × segmented voxel size; CLI `--prediction-transfer-tolerance` defaults to **0.1732 m = 17.32 cm**. Every target point must match. |
+| Cross-tile instance correspondence | **0.05 m = 5 cm**, followed by mutual-best pairing and the overlap threshold. Independent of the transfer radius; coarse spacing alone does not justify widening it. |
 | Tree support, RCT recovery conflicts and dense duplicate checks | **0.01 m = 1 cm**, measured in XYZ. |
 | Original point to dense prediction | Default **sqrt(3) × res1**; for 1 cm voxels this is **0.0173205 m = 1.732 cm**. Override with `--remap-tolerance` in metres. |
 | Original to unfiltered baseline | **100% required for every model** whenever the baseline is checked (merge; remap with baseline geometry). A missing baseline match fails publication. |
 | Original to final non-RCT predictions | **100% required.** Missing matches fail publication. |
 | Original to final RCT predictions | Prefer the nearest positive tree within the remap radius over background. If no surviving prediction matches, write **0 to every RCT prediction field** and report the fallback. |
+
+Coarse-only inputs must retain sampled coordinates from the same tiling run.
+Matching uses shared samples in tile overlaps; independently shifted/resampled
+predictions need common targets. The current CLI does not verify tiling-run
+provenance or compare inputs against pre-segmentation coordinates; callers must
+satisfy this input requirement. Recovery and deduplication do not reinterpret
+all points in a coarse voxel as duplicates. The recorded `resolution_1_m` is the
+actual processed spacing, even where legacy report/baseline names contain `1cm`.
+See the [coarse-only GFZ acceptance](validation/2026-10-14-coarse-gfz.md) for
+real SAT/FM checks and controlled boundary regressions.
 
 Standalone RCT remap validates namespace headers before indexing and validates
 each chunk's labels during the indexing read. Spatial queries use bounded
@@ -148,3 +168,26 @@ metadata come from the uploaded raw originals.
 - Incremental orphan selection: [`src/orphan_claims.py`](../src/orphan_claims.py).
 - Final merged products:
   [`src/main_create_merged_file.py`](../src/main_create_merged_file.py).
+
+
+### Original-resolution tile handoff
+
+Spatial and whole-instance tiling share the Galaxy **Output** selections. Each
+entry chooses a voxel size or **Original resolution**, then LAZ, COPC LAZ or
+binary PLY. Whole-instance mode retains each tree in one tile and always carries
+its ID. Original resolution retains duplicate points and preserves compatible
+source coordinate grids.
+
+Use `--tile-outputs original:laz` for spatial geometry or
+`--instance-tiles PredInstance_SAT,PredInstance_FM --instance-outputs original:copc.laz,0.1:laz`
+for whole instances from two segmentations. Every (dimension, resolution) pair
+has a separate collection: the first dimension uses `subsampled_res1/`,
+`subsampled_res2/`, etc.; the second uses `instance_dim2/subsampled_res1/`,
+`instance_dim2/subsampled_res2/`, etc. Each collection retains its own instance
+field and requested additional attributes, with no mixing of segmentation IDs.
+Duplicate dimension selections are rejected. The legacy `--instance-resolutions`
+route retains its `instance_tiles_<dimension>_<resolution>/` directory names.
+After species annotation, choose **Prediction resolution → Original
+resolution** in Remap (`--prediction-resolution-original`), plus same-instance
+matching. This uses coordinate encoding precision and requires every original
+point to match for all models. Subsampled remapping keeps its voxel-based radius.

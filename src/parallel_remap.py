@@ -20,9 +20,10 @@ _worker_indices = None
 _worker_baselines = None
 _worker_radius = None
 _worker_matches = None
+_worker_prefer_rct_trees = True
 
 
-def _query(xyz, indices, baselines, radius, matches=None, labels=None):
+def _query(xyz, indices, baselines, radius, matches=None, labels=None, prefer_rct_trees=True):
     """Per model: (baseline distances, distances, values).
 
     ``matches[i]`` names an instance dimension: model i then only matches
@@ -30,11 +31,12 @@ def _query(xyz, indices, baselines, radius, matches=None, labels=None):
     """
     results = []
     matches = matches or [None] * len(indices)
-    for index, baseline, match in zip(indices, baselines, matches):
+    radii = [radius] * len(indices) if np.isscalar(radius) else radius
+    for index, baseline, match, radius in zip(indices, baselines, matches, radii):
         base_distances = None if baseline is None else baseline.nearest_distances(xyz, radius)
         if match is not None:
             distances, values, _ = index.nearest_matching(xyz, radius, match, labels[match])
-        elif 'PredInstance_RCT' in index.dimensions:
+        elif prefer_rct_trees and 'PredInstance_RCT' in index.dimensions:
             # A retained/recovered tree wins over neighboring background. This
             # affects original enrichment only; tile memberships stay intact.
             distances, values, _ = index.nearest(xyz, radius, positive_dimension='PredInstance_RCT')
@@ -50,8 +52,8 @@ def _query(xyz, indices, baselines, radius, matches=None, labels=None):
     return results
 
 
-def _initialize_worker(index_specs, baseline_specs, radius, matches=None):
-    global _worker_indices, _worker_baselines, _worker_radius, _worker_matches
+def _initialize_worker(index_specs, baseline_specs, radius, matches=None, prefer_rct_trees=True):
+    global _worker_indices, _worker_baselines, _worker_radius, _worker_matches, _worker_prefer_rct_trees
     # Spawned processes open their own connections; no SQLite handle is shared.
     _worker_indices = [PointIndex(path, dims, query_workers=1, read_only=True)
                        for path, dims in index_specs]
@@ -59,10 +61,12 @@ def _initialize_worker(index_specs, baseline_specs, radius, matches=None):
                          for spec in baseline_specs]
     _worker_radius = radius
     _worker_matches = matches
+    _worker_prefer_rct_trees = prefer_rct_trees
 
 
 def _worker_query(xyz, labels=None):
-    return _query(xyz, _worker_indices, _worker_baselines, _worker_radius, _worker_matches, labels)
+    return _query(xyz, _worker_indices, _worker_baselines, _worker_radius, _worker_matches, labels,
+                  _worker_prefer_rct_trees)
 
 
 def region_owners(xyz, workers):
@@ -98,11 +102,14 @@ class RemapBatchQueries:
     batches per worker are admitted, including completed out-of-order results.
     """
 
-    def __init__(self, indices, baselines, *, workers, radius, matches=None):
+    def __init__(self, indices, baselines, *, workers, radius, matches=None, prefer_rct_trees=True):
         if workers < 1 or len(indices) != len(baselines):
             raise ValueError("Positive workers and paired remap indexes are required")
+        if not np.isscalar(radius) and len(radius) != len(indices):
+            raise ValueError("Provide one original remap radius per model")
         self.indices, self.baselines = indices, baselines
         self.matches = matches
+        self.prefer_rct_trees = prefer_rct_trees
         self.workers, self.radius = workers, radius
         self.max_pending = 2 * workers
         self.pools = []
@@ -118,7 +125,7 @@ class RemapBatchQueries:
             # the same process, which keeps that region's trees cached.
             self.pools = [ProcessPoolExecutor(max_workers=1, mp_context=context, initializer=_initialize_worker,
                                               initargs=(specs(self.indices), specs(self.baselines), self.radius,
-                                                        self.matches))
+                                                        self.matches, self.prefer_rct_trees))
                           for _ in range(self.workers)]
         return self
 
@@ -135,7 +142,7 @@ class RemapBatchQueries:
         if not self.pools:
             for record, xyz, *labels in batches:
                 yield record, xyz, _query(xyz, self.indices, self.baselines, self.radius, self.matches,
-                                          labels[0] if labels else None)
+                                          labels[0] if labels else None, self.prefer_rct_trees)
             return
         pending = deque()
         iterator = iter(batches)

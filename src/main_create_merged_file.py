@@ -408,12 +408,13 @@ def select_voxel_points(points, resolution: float):
     """
     import numpy as np
     from tile_centroids import _nearest_to_mean
+    from voxel_grid import voxel_keys
 
     if len(points) == 0:
         return np.empty(0, dtype=np.int64)
     canonical = np.argsort(points.array, kind="stable")  # all fields, lexicographic
-    xyz = np.stack([np.asarray(points.x), np.asarray(points.y), np.asarray(points.z)], axis=1)[canonical]
-    keys = np.floor(xyz / resolution).astype(np.int64)
+    xyz = np.stack([points.array[axis] for axis in ("X", "Y", "Z")], axis=1)[canonical]
+    keys = voxel_keys(xyz, points.scales, points.offsets, resolution)
     group = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))  # stable: canonical order within a voxel
     keys, members = keys[group], canonical[group]
     starts = np.flatnonzero(np.r_[True, np.any(keys[1:] != keys[:-1], axis=1)])

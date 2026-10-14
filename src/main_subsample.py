@@ -91,7 +91,9 @@ def get_file_xy_scales(filepath: Path) -> Tuple[float, float]:
 
 
 def resolution_label(resolution: float) -> str:
-    """Rounded resolution label: whole centimetres ("29cm"), else millimetres ("5mm")."""
+    """Original resolution, whole centimetres ("29cm"), or millimetres ("5mm")."""
+    if resolution == 0:
+        return "original"
     centimetres = resolution * 100
     if abs(centimetres - round(centimetres)) < 1e-6 and round(centimetres) >= 1:
         return f"{round(centimetres)}cm"
@@ -114,7 +116,7 @@ def subsample_output_name(input_file: Path, resolution: float, output_prefix: Op
 
     # Remove resolution suffix patterns from previous subsampling stages.
     base_name = re.sub(r'_subsampled[\d.]+m$', '', base_name)
-    base_name = re.sub(r'_subsampled_\d+(?:\.\d+)?(?:cm|mm)$', '', base_name)
+    base_name = re.sub(r'_subsampled_(?:original|\d+(?:\.\d+)?(?:cm|mm))$', '', base_name)
     base_name = re.sub(r'_\d+cm$', '', base_name)
 
     # Remove output_prefix if present at the start (e.g., "output_dir_100m_")

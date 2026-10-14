@@ -13,7 +13,8 @@ grid. Blocks are reduced independently: every output point is the mean of the
 original points in its voxel at that resolution (3DT-2203), not a mean of finer
 means, or with nearest-to-centroid the original point closest to that mean.
 Sums follow a canonical point order, so results do not depend on the worker
-count or on how the sources were split.
+count or on how the sources were split. Original-resolution outputs bypass
+voxel reduction and retain repeated coordinates in bounded point batches.
 """
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ import laspy
 import numpy as np
 
 from output_publication import publish_files, validate_output_paths
+from voxel_grid import voxel_keys
 
 # One spilled point: XYZ in its tile's LAS encoding plus a bit per resolution.
 RECORD = np.dtype([("X", "<i4"), ("Y", "<i4"), ("Z", "<i4"), ("m", "u1")])
@@ -51,9 +53,15 @@ class Tile:
     core: tuple = None  # (xmin, ymin, xmax, ymax); tiles without core points are dropped
 
 
+def _routing_resolutions(resolutions):
+    """Use a spatial spill grid for original points without thinning them."""
+    grid = min((r for r in resolutions if r > 0), default=1.0)
+    return tuple(r if r > 0 else grid for r in resolutions)
+
+
 def block_cells(resolutions, block_size):
-    """Voxels per block edge, per resolution; blocks never split a voxel."""
-    return tuple(max(1, int(round(block_size / r))) for r in resolutions)
+    """Voxels per block edge; original points use an arbitrary spatial spill grid."""
+    return tuple(max(1, int(round(block_size / r))) for r in _routing_resolutions(resolutions))
 
 
 def choose_block_size(point_count, area, resolutions, sample=None):
@@ -65,7 +73,7 @@ def choose_block_size(point_count, area, resolutions, sample=None):
     include far outliers and terrestrial scans are very uneven, so the mean
     density over `area` is only the fallback.
     """
-    coarse = max(resolutions)
+    coarse = max(_routing_resolutions(resolutions))
 
     def aligned(edge):
         # A whole number of coarsest voxels: nested grids then share block
@@ -108,17 +116,17 @@ def sample_xy(sources, points=2_000_000, run=20_000):
     return np.concatenate(parts) if parts else np.empty((0, 2))
 
 
-def route(coords, masks, resolutions, cells):
+def route(raw_xyz, masks, resolutions, cells, *, scales, offsets):
     """Assign spilled points to blocks.
 
     A point's block comes from its voxel key at each resolution, so a voxel
-    is never split. Where IEEE rounding puts a point's voxels into different
-    blocks at different resolutions, it is written once per block, each copy
+    is never split. When nonnested resolutions put a point into different
+    blocks, it is written once per block, each copy
     contributing only to the resolutions whose block it is.
     """
-    blocks = [np.floor_divide(np.floor(coords[:, :2] / r).astype(np.int64), k)
-              for r, k in zip(resolutions, cells)]
-    same = np.ones(len(coords), dtype=bool)
+    blocks = [np.floor_divide(voxel_keys(raw_xyz[:, :2], scales[:2], offsets[:2], r), k)
+              for r, k in zip(_routing_resolutions(resolutions), cells)]
+    same = np.ones(len(raw_xyz), dtype=bool)
     for block in blocks[1:]:
         same &= (block == blocks[0]).all(axis=1)
     rows, block_ids, bits = [np.flatnonzero(same)], [blocks[0][same]], [masks[same]]
@@ -130,6 +138,10 @@ def route(coords, masks, resolutions, cells):
         block_ids.append(block[rows_i])
         bits.append(np.full(len(rows_i), bit, dtype=np.uint8))
     return np.concatenate(rows), np.concatenate(block_ids), np.concatenate(bits)
+
+
+def _raw_xyz(records):
+    return np.stack([records[axis] for axis in ("X", "Y", "Z")], axis=1)
 
 
 def _coords(records, scales, offsets):
@@ -200,8 +212,8 @@ def _spill_range(task):
                     index = "XYZ".index(axis)
                     records[axis] = _encode(values[rows], tile.scales[index], tile.offsets[index])
                 records["m"] = full_mask
-                source_rows, block_ids, bits = route(_coords(records, tile.scales, tile.offsets),
-                                                     records["m"], resolutions, cells)
+                source_rows, block_ids, bits = route(_raw_xyz(records), records["m"], resolutions, cells,
+                                                     scales=tile.scales, offsets=tile.offsets)
                 routed = records[source_rows]
                 routed["m"] = bits
                 _write_blocks(Path(spill_dir) / tile.label, name, routed, block_ids)
@@ -237,24 +249,31 @@ def _nearest_to_mean(xyz, starts, counts, sums, scales):
     return chosen
 
 
-def reduce_records(records, resolutions, scales, offsets, nearest=False):
+def reduce_records(records, resolutions, scales, offsets, nearest=False, *, include_original=True):
     """One point per voxel, per resolution, in voxel-key order.
 
-    Voxels use the scaled float coordinates (floor(x / r)), as before. Each
+    Voxels use exact decimal LAS encodings on an absolute grid. Each
     center is the exact mean of the voxel's integer LAS coordinates, rounded
     half-to-even once onto the same LAS grid: no float summation, so results
     do not depend on point order or worker count. With `nearest`, the voxel
     keeps instead its point closest to that mean in metres (ties: lowest X,
     then Y, then Z). Returns [(centers, represented_points)]; centers are on
-    the output LAS grid.
+    the output LAS grid. Resolution 0 returns every selected point, including
+    duplicates, unless the caller has already streamed those points.
     """
     results = []
     for index, resolution in enumerate(resolutions):
+        if resolution == 0 and not include_original:
+            results.append((np.empty((0, 3)), 0))
+            continue
         selected = records[(records["m"] & np.uint8(1 << index)) != 0]
         if not len(selected):
             results.append((np.empty((0, 3)), 0))
             continue
-        keys = np.floor(_coords(selected, scales, offsets) / resolution).astype(np.int64)
+        if resolution == 0:
+            results.append((_coords(selected, scales, offsets), len(selected)))
+            continue
+        keys = voxel_keys(_raw_xyz(selected), scales, offsets, resolution)
         lo = keys.min(axis=0)
         span = [int(v) for v in keys.max(axis=0) - lo + 1]
         if span[0] * span[1] * span[2] < 2**62:
@@ -286,6 +305,7 @@ def _reduce_block(task):
     """Reduce one spilled block, splitting it first when it exceeds BLOCK_POINTS."""
     block, resolutions, cells, scales, offsets, limit, *rest = task
     nearest = bool(rest and rest[0])
+    include_original = rest[1] if len(rest) > 1 else True
     block = Path(block)
     files = _block_files(block)
     total = sum(path.stat().st_size for path in files) // RECORD.itemsize
@@ -295,20 +315,21 @@ def _reduce_block(task):
     if total <= limit or finer == cells:
         records = np.concatenate([np.fromfile(path, dtype=RECORD) for path in files]) if files else \
             np.empty(0, dtype=RECORD)
-        return reduce_records(records, resolutions, scales, offsets, nearest)
+        return reduce_records(records, resolutions, scales, offsets, nearest, include_original=include_original)
     # Skewed density: re-route into finer blocks without loading the whole block.
     children = block / "split"
     for path in files:
         with open(path, "rb") as handle:
             while len(records := np.fromfile(handle, dtype=RECORD, count=limit)):
-                rows, block_ids, bits = route(_coords(records, scales, offsets), records["m"], resolutions, finer)
+                rows, block_ids, bits = route(_raw_xyz(records), records["m"], resolutions, finer,
+                                              scales=scales, offsets=offsets)
                 routed = records[rows]
                 routed["m"] = bits
                 _write_blocks(children, path.name, routed, block_ids)
     parts = [[] for _ in resolutions]
     represented = [0] * len(resolutions)
     for child in sorted(children.iterdir(), key=_block_key):
-        for index, (centers, used) in enumerate(_reduce_block((child, resolutions, finer, scales, offsets, limit, nearest))):
+        for index, (centers, used) in enumerate(_reduce_block((child, resolutions, finer, scales, offsets, limit, nearest, include_original))):
             parts[index].append(centers)
             represented[index] += used
     shutil.rmtree(children)
@@ -374,6 +395,27 @@ FRAGMENT_POINT_FORMAT = 0
 ASSEMBLY_POINTS = 5_000_000
 
 
+def _write_original_fragments(block, slots, slot_dirs, name, limit):
+    """Copy original points in bounded batches, including repeated coordinates."""
+    counts = {slot: 0 for slot in slots}
+    dtype = laspy.PointFormat(FRAGMENT_POINT_FORMAT).dtype()
+    batch = 0
+    for source in _block_files(Path(block)):
+        with open(source, "rb") as handle:
+            while len(points := np.fromfile(handle, dtype=RECORD, count=limit)):
+                for slot in slots:
+                    selected = points[(points["m"] & np.uint8(1 << slot)) != 0]
+                    if not len(selected):
+                        continue
+                    records = np.zeros(len(selected), dtype=dtype)
+                    for field in ("X", "Y", "Z"):
+                        records[field] = selected[field]
+                    records.tofile(Path(slot_dirs[slot]) / f"{name}_{batch:09d}.bin")
+                    counts[slot] += len(selected)
+                batch += 1
+    return counts
+
+
 def _reduce_and_write(task):
     """Reduce one block and write each resolution as a raw point-record fragment.
 
@@ -381,11 +423,17 @@ def _reduce_and_write(task):
     parent process. Returns [(output points, represented points)] per resolution.
     """
     block, resolutions, cells, scales, offsets, limit, slot_dirs, name, nearest = task
-    results = _reduce_block((block, resolutions, cells, scales, offsets, limit, nearest))
+    originals = [slot for slot, resolution in enumerate(resolutions) if resolution == 0]
+    original_counts = _write_original_fragments(block, originals, slot_dirs, name, limit) if originals else {}
+    results = _reduce_block((block, resolutions, cells, scales, offsets, limit, nearest, False)) \
+        if any(resolutions) else [(np.empty((0, 3)), 0) for _ in resolutions]
     shutil.rmtree(block)
     dtype = laspy.PointFormat(FRAGMENT_POINT_FORMAT).dtype()
     counts = []
     for slot, (centers, used) in enumerate(results):
+        if slot in original_counts:
+            counts.append((original_counts[slot], original_counts[slot]))
+            continue
         if len(centers):
             records = np.zeros(len(centers), dtype=dtype)
             for axis, field in enumerate(("X", "Y", "Z")):
@@ -474,14 +522,14 @@ def _fragments_to_copc(directory, target, template, metadata_source, expected):
 
 def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, metadata_source,
                          converters=2, nearest=False):
-    """Write center-of-mass outputs for every tile from one read of the sources.
+    """Write original or subsampled outputs for every tile from one source scan.
 
     With `nearest`, each voxel keeps the original point nearest its mean
     (nearest-to-centroid) instead of the mean.
 
     `tiles`: [Tile]. `header`: LAS header the tiles derive from (VLRs, CRS).
     `outputs`: [(resolution, {label: final path}, format)] in output order;
-    format is laz, copc.laz or ply.
+    format is laz, copc.laz or ply. Resolution 0 keeps all source points.
     Tiles with a `core` and no source point inside it are dropped (the layout
     is planned before reading). Returns ({label: [output point counts]},
     [occupied flag per tile]). Fails before publishing on any point-count
@@ -492,11 +540,15 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
     from subsample_com import make_center_of_mass_header
 
     resolutions = tuple(float(resolution) for resolution, _, _ in outputs)
-    if not tiles or not resolutions or any(not math.isfinite(r) or r <= 0 for r in resolutions):
-        raise ValueError("Tile centroids need tiles and positive resolutions")
+    if not tiles or not resolutions or any(not math.isfinite(r) or r < 0 for r in resolutions):
+        raise ValueError("Tile outputs need tiles and non-negative resolutions (0 means original)")
     if len(resolutions) > 8:
         raise ValueError("At most eight resolutions per scan")
     validate_output_paths(sources, [path for _, paths, _ in outputs for path in paths.values()])
+    if 0.0 in resolutions:
+        from tile_original_geometry import original_coordinate_tiles
+
+        tiles = original_coordinate_tiles(sources, tiles)
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     workers = max(1, int(workers))
@@ -603,7 +655,7 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
 
 def subsample_tiles_single_scan(plan, output_dir, resolutions, formats, *, workers, converters,
                                 output_prefix, nearest=False):
-    """Tile-task subsampling without full-resolution tiles: one output dir per resolution.
+    """Write tile outputs from one source scan, with one directory per resolution.
 
     Output i goes to subsampled_res{i+1}; `formats` are laz, copc.laz or ply.
 
@@ -651,8 +703,8 @@ def subsample_tiles_single_scan(plan, output_dir, resolutions, formats, *, worke
     print("=" * 60)
     print("Single-scan tile subsampling")
     print("=" * 60)
-    print(f"  Tiles: {len(tiles)}; resolutions: {', '.join(f'{r} m' for r in resolutions)}; "
-          "full-resolution tiles are not written")
+    labels = ["original" if r == 0 else f"{r} m" for r in resolutions]
+    print(f"  Tiles: {len(tiles)}; resolutions: {', '.join(labels)}")
     _, occupied = write_tile_centroids(sources, tiles, header, outputs, workers=workers, work_dir=output_dir,
                                        metadata_source=sources[0], converters=converters, nearest=nearest)
     if not plan.skip_tiling:

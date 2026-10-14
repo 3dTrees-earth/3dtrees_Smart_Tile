@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
 import math
 from typing import List, Tuple
 
@@ -59,17 +60,23 @@ def make_center_of_mass_header(source_header: laspy.LasHeader, dimension_reducti
 
 
 def aligned_edges(start: float, stop: float, step: float, align: float) -> List[Tuple[float, float]]:
-    first = math.floor(start / align) * align
-    # The rounded grid boundary can fall one ULP below the actual LAS bound.
-    # Reach the true bound so the final window cannot repeat forever.
-    final = max(stop, math.ceil(stop / align) * align)
+    """Chunk edges on the absolute decimal voxel grid, clipped to LAS bounds."""
+    if (not all(math.isfinite(value) for value in (start, stop, step, align)) or
+            step <= 0 or align <= 0):
+        raise ValueError("Aligned edges need finite bounds and positive step/alignment")
+    grid = Fraction(str(align))
+    start_exact, stop_exact = Fraction(str(start)), Fraction(str(stop))
+    # The caller forms step as a whole number of voxels. Recover that count
+    # before floating multiplication can turn e.g. 3 * .07 into .21000000000000002.
+    cells = max(1, round(step / align))
+    position = (start_exact // grid) * grid
+    stride = cells * grid
     edges = []
-    cur = first
-    while cur < stop:
-        nxt = min(cur + step, final)
-        if nxt <= cur:
+    while position < stop_exact:
+        end = min(position + stride, stop_exact)
+        if float(end) <= float(position):
             raise ValueError("Aligned edge step cannot advance at this coordinate magnitude")
-        if nxt > start and cur < stop:
-            edges.append((max(cur, start), min(nxt, stop)))
-        cur = nxt
+        if end > start_exact:
+            edges.append((float(max(position, start_exact)), float(end)))
+        position = end
     return edges

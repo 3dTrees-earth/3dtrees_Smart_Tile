@@ -1,0 +1,471 @@
+{
+  "date": "2026-10-14",
+  "scope": "Local shared tile outputs and original-resolution remap; no publication or production deployment",
+  "wrapper_version": "2.4.0+galaxy3",
+  "wrapper_sha256": "ad51d677255d4fa950c7d8dfbd94e4797586da8ac2c887d3753e42e736742cdd",
+  "image": "sha256:96f1279650c537461777bb908ddd6876c0828be9cbf92373322b6ca721db4775",
+  "embedded_source": {
+    "embedded_source_matches_checkout": true,
+    "source_files": 56,
+    "source_hashes": {
+      "attribute_join.py": "e4714ce84cd4de33fd3ce522235d8726a288d6c50559d124da52abe9080bfcee",
+      "bounded_point_index.py": "822a5f43e83ddd973d48c959c251f6db920daa48fb4d4c63858d5e6dcf02b574",
+      "copc_metadata.py": "9d7d8a480dec24db71b864261a06cef5b3d1398101888b836d94b81791a01e05",
+      "copc_staging.py": "d27b0c6ff6c5174d72b90ab9266512fe33e6e64d59e333a21be3c5b066c7d246",
+      "crs_records.py": "28772c86183e8f93069e0cf8b259c6d6991706c6f8ea5e4bc85c0ea2f507fd26",
+      "dense_instance_ownership.py": "f3fa439edb4b00ed80b1ee412c4eeb2bea1d6b7e25e82ea16768318a4b7bf46e",
+      "full_resolution_merge.py": "11a1a1283fdf0287d96f994597b1fc6d2898bb6ff1a0df228791361ea3c8b2eb",
+      "get_bounds_from_tindex.py": "ece1fd8616d8a5a3876b239902bf3298dc4eec04ee69b238e9ee265e63141b5c",
+      "instance_consolidation.py": "933b1d78d3df2196dd5ad3793d7f4c2feaf6b57dccd122025b1161f00f1b1bef",
+      "instance_finalization.py": "666cc3a25cbce92c4c53055ba05a4ee7690ca002d7989e8c5bffbe1a79dbdae2",
+      "instance_labels.py": "578e33736f030a3b364716ee48d81457aa4becd08d9bb570f8cd423361bad778",
+      "instance_statistics.py": "0237a12700ed72eab63d0e787f5b4c3f5da89ca047480ca826fe95b29dfa2b64",
+      "instance_tile_outputs.py": "385043a93daf4d44e2c99de0390c855901718af9c508a475dfc200aab728dc42",
+      "instance_tiles.py": "897d29acc1d00ec7f5a4a701d00e3089b5eb29e8e2f1ca83ec1bde9b9eeccf3a",
+      "main_create_merged_file.py": "a768ec0f0ce7dc2fb7eba5dc41f9b4c4f9c34020257974e89a37f22a88225150",
+      "main_subsample.py": "d1a0fb73a16ce88ea86db186dbc348218ebf6f1a5838816d580405b4b5970263",
+      "main_tile.py": "bcd73708a085e320c53eb913b5861583c1c54e3638fc23739f8239325e59bd94",
+      "merge_stages.py": "2517169e28c76720350dc4afeff097cd140a019b58b540ed21575857eb0dfe35",
+      "original_blocks.py": "fccb5ee851c36f29cf2cd3be4bf009b7a29097e03b711228b88ae2f69e3a607e",
+      "orphan_claims.py": "4c37251b328554c9646d102a8d035e3bfb250ece0dd83735bb334b4f8d830a4d",
+      "orphan_instance_recovery.py": "df5833d99038824c38d91351dd82382c87c2548d20e85524161bbb5b63d29ec4",
+      "output_publication.py": "edb80159fcc7b56505c216d9bcd22cd61c0d7f005f03202e8bc7fe3eafdfbb24",
+      "ownership_spatial_blocks.py": "0374fb6e631603208d316b0d0c732957d818c66a4ee88e8ab8745f2692b72a78",
+      "parallel_index_queries.py": "67e3208d700e77c27f574ff27486c1fe58a6940baed6dc5ec592bc9244f5f45f",
+      "parallel_remap.py": "b0b2c783d620d21c164c93ece5cb360550342bc097018963e6631eeb4b4f3a77",
+      "parallel_tiles.py": "c145c57a272ca089ae89ec480f6d8b8d8aef7e88ff489cb55ebf29cdb8a6c3da",
+      "parameters.py": "a7bd94cee82d1e0337d52c6599436d704397c311de4c01f628ae8ddc289f0af4",
+      "plot_tiles_and_copc.py": "af36d429218f2ed47a4b66a1afdb25c818f84519168f71ee426242f984fe7b56",
+      "ply_crs.py": "bf77351bfff659e09e221d1190bfb984b735289204f731ee9b768289b6df7fb3",
+      "point_cloud_metadata.py": "287636c4fc27102a004e160f066532a7707cc45e3e0e1feb9de1d3bbe5067dcc",
+      "prediction_collections.py": "9b6da1104d831bfb7e57bd12126ff2b02abb9abd629ed8a602b45ab6349c7d4c",
+      "prepare_tile_jobs.py": "6b0a05603566948bc6de880688f4e19d052aed88134af0eee33fbe6e0ff41116",
+      "product_formats.py": "49f169bb3f4b4ec6d84452213eaf93420523f99591d805f4c994d83793fc81cb",
+      "raycloud_finalization.py": "485de7e33f71fd02c02954f8c12f5d44665b8a79a0f528d84db7c018816e68f1",
+      "raycloud_instance_ids.py": "c8d96d7252987d41893a60b14371db654767f2987f83aa39e51ceeba0cb7b8e3",
+      "raycloud_meshes.py": "bf130013ca1e319c8dd2b380a625257da14d8e36058694d29f598f1449f1faec",
+      "raycloud_recovery.py": "b969fa73b6fac87c5940cd64c6002460fb70febafc019c3a89e2aad9262ddb44",
+      "raycloud_tree_files.py": "347c43ca9c6eaf63abc4adf61928515b28a830c858ed7b9d44572f9e0d5a6fe0",
+      "remap_first_pipeline.py": "5e96eb1d6849def3ddd115fe34301633b132198aa2da3919b22dba992888905b",
+      "run.py": "1ae9c8b1638a80cdc1e53607f97079d29c5599df14a185d911bfac26ab60307f",
+      "small_instance_reassignment.py": "e4f10117c39035f3895cd599c5922fcfb774bd59c07ec56efb9f567768574b71",
+      "spatial_query_cache.py": "d0f392cfe6919c6f3f4e2e51f4ce536e4938560316cc1e7dde265e54fbb0de03",
+      "subsample_com.py": "af35350789ee99f8cf06c61dfb933e47119f3c90d5deccf2e98eaa812bcca109",
+      "subsample_encoding.py": "1f76f91518b413456444d457329483325963f6f5e4e8c915f160e0b9ba2b0625",
+      "subsample_methods.py": "51a5e1d374d63f29e2ccf3797920fa30197e2632d0562bc489613d32ce4b10fb",
+      "subsample_outputs.py": "da1f874cd556c223d7ea9f92969511f255aa4818926b46b9f73daf59da564052",
+      "tile_bounds_graph.py": "22032533bfeacbe7b46e6a94a1be5ec73b0597716012d6f2d2ddbc0973d3a2d6",
+      "tile_centroids.py": "336178afb613ec914357078321860739494859556a15ee8649940a4a4668a234",
+      "tile_copc.py": "ec05ef8a2fa53d99e89863ed4f13017e1dff65b97090224cb43d39ae870228eb",
+      "tile_core_occupancy.py": "5a955993b501f41dfffc778817f43b8b40c1a22c04366f73d354a8802acd048c",
+      "tile_crs.py": "ba95e4c2515c1d7db0af18666ea644bd6f3057344167be3079eaa9bbd65b7993",
+      "tile_file_matching.py": "002e8010014efffab483a80cddc335a14fa1f9508d97f26cf3a1bf32b6a296c1",
+      "tile_original_geometry.py": "a142e84858ad64dedc05e937d92ea0663dc1c61134191a49672c1af937e5c9c0",
+      "tile_tindex.py": "323cd59e14fdb7028f437b7c23949e2739d9aca3f0bf59fa0508d10da9ca7d04",
+      "vector_extra_bytes.py": "514b01776a6dcd01ac1ab4a70125f107a2c43dd7f7afc8688ac8e04f0ec8d3bf",
+      "worker_budget.py": "59ca4ab1e7ded4f6d86fafb08468777f5604285d91b68dd40b0988715523bae2"
+    }
+  },
+  "scientific_suite": {
+    "tests": "553",
+    "failures": "0",
+    "errors": "0",
+    "skipped": "0",
+    "time": "170.591"
+  },
+  "galaxy_functional_tests": {
+    "num_errors": 0,
+    "num_failures": 0,
+    "num_skips": 0,
+    "num_tests": 21
+  },
+  "galaxy_runs": {
+    "initial": {
+      "num_errors": 4,
+      "num_failures": 0,
+      "num_skips": 0,
+      "num_tests": 21
+    },
+    "post_label_fix_rerun": {
+      "num_errors": 0,
+      "num_failures": 0,
+      "num_skips": 0,
+      "num_tests": 4
+    }
+  },
+  "galaxy_test_results": [
+    {
+      "id": "3dtrees_smart_tile-0",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-1",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-2",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-3",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-4",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-5",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-6",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-7",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-8",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-9",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-10",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-11",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-12",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-13",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-14",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-15",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-16",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-17",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-18",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-19",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    },
+    {
+      "id": "3dtrees_smart_tile-20",
+      "status": "success",
+      "version": "2.4.0+galaxy3"
+    }
+  ],
+  "linked_galaxy_roundtrip": {
+    "status": "passed",
+    "jobs": [
+      {
+        "stage": "tile",
+        "id": "1ef4d127263c7efa",
+        "state": "ok",
+        "tool_version": "2.4.0+galaxy3"
+      },
+      {
+        "stage": "remap",
+        "id": "af5afeb4556087ec",
+        "state": "ok",
+        "tool_version": "2.4.0+galaxy3"
+      }
+    ],
+    "value_validation": {
+      "source_points": 20,
+      "copc_tile_points": 20,
+      "remapped_points": 20,
+      "copc_valid": true,
+      "tile_coordinate_instance_species_inventory_preserved": true,
+      "original_fields_and_record_order_preserved": true,
+      "species_values_exact": true,
+      "original_missingness_preserved": true,
+      "crs_preserved": true
+    },
+    "compiled_command_checks": {
+      "tile_selected_original_copc": true,
+      "remap_selected_original_mode_and_same_instance": true,
+      "remap_has_no_fabricated_voxel_resolution": true
+    }
+  },
+  "gfz_original_resolution": {
+    "state": "passed",
+    "models": [
+      {
+        "model": "SAT",
+        "instance_dimension": "PredInstance_SAT",
+        "commands": [
+          {
+            "task": "tile",
+            "command": [
+              "/opt/smarttile/bin/python",
+              "/tool/src/run.py",
+              "--task",
+              "tile",
+              "--input-dir",
+              "/reference",
+              "--output-dir",
+              "/work/validated/SAT/tile",
+              "--tile-length",
+              "20",
+              "--tile-buffer",
+              "2",
+              "--workers",
+              "10",
+              "--instance-tiles",
+              "PredInstance_SAT",
+              "--instance-outputs",
+              "original:copc.laz",
+              "--instance-tile-dims",
+              "species_id_SAT,species_prob_SAT"
+            ],
+            "exit_code": 0,
+            "wall_seconds": 33.89318586396985,
+            "log": "/work/validated/SAT/tile.log"
+          },
+          {
+            "task": "remap",
+            "command": [
+              "/opt/smarttile/bin/python",
+              "/tool/src/run.py",
+              "--task",
+              "remap",
+              "--segmented-folders",
+              "/work/validated/SAT/tile/subsampled_res1",
+              "--original-laz-input-dir",
+              "/work/validated/SAT/originals",
+              "--original-laz-output-dir",
+              "/work/validated/SAT/remapped",
+              "--prediction-resolution-original",
+              "--match-instances",
+              "--instance-dimension",
+              "PredInstance_SAT",
+              "--remap-dims",
+              "species_id_SAT,species_prob_SAT",
+              "--workers",
+              "10",
+              "--no-transfer-original-dims-to-merged"
+            ],
+            "exit_code": 0,
+            "wall_seconds": 13.495579838054255,
+            "log": "/work/validated/SAT/remap.log"
+          }
+        ],
+        "tile_count": 2,
+        "original_points_retained": 867599,
+        "positive_instances": 12,
+        "instances_in_multiple_tiles": 0,
+        "tile_point_attribute_inventory_mismatches": 0,
+        "state": "passed",
+        "files": [
+          {
+            "file": "398700_5646160.laz",
+            "points": 213148,
+            "fields_checked": 36,
+            "changed_original_fields": 0,
+            "species_mismatches": 0,
+            "probability_mismatches": 0,
+            "extra_bytes_metadata_preserved": true,
+            "crs_preserved": true,
+            "original_coordinates_and_record_order_preserved": true
+          },
+          {
+            "file": "398720_5646160.laz",
+            "points": 654451,
+            "fields_checked": 36,
+            "changed_original_fields": 0,
+            "species_mismatches": 0,
+            "probability_mismatches": 0,
+            "extra_bytes_metadata_preserved": true,
+            "crs_preserved": true,
+            "original_coordinates_and_record_order_preserved": true
+          }
+        ],
+        "remap_radius_m": 0.0008660328543650356,
+        "coverage_matched": 867599
+      },
+      {
+        "model": "FM",
+        "instance_dimension": "PredInstance_FM",
+        "commands": [
+          {
+            "task": "tile",
+            "command": [
+              "/opt/smarttile/bin/python",
+              "/tool/src/run.py",
+              "--task",
+              "tile",
+              "--input-dir",
+              "/reference",
+              "--output-dir",
+              "/work/validated/FM/tile",
+              "--tile-length",
+              "20",
+              "--tile-buffer",
+              "2",
+              "--workers",
+              "10",
+              "--instance-tiles",
+              "PredInstance_FM",
+              "--instance-outputs",
+              "original:copc.laz",
+              "--instance-tile-dims",
+              "species_id_FM,species_prob_FM"
+            ],
+            "exit_code": 0,
+            "wall_seconds": 22.068058928940445,
+            "log": "/work/validated/FM/tile.log"
+          },
+          {
+            "task": "remap",
+            "command": [
+              "/opt/smarttile/bin/python",
+              "/tool/src/run.py",
+              "--task",
+              "remap",
+              "--segmented-folders",
+              "/work/validated/FM/tile/subsampled_res1",
+              "--original-laz-input-dir",
+              "/work/validated/FM/originals",
+              "--original-laz-output-dir",
+              "/work/validated/FM/remapped",
+              "--prediction-resolution-original",
+              "--match-instances",
+              "--instance-dimension",
+              "PredInstance_FM",
+              "--remap-dims",
+              "species_id_FM,species_prob_FM",
+              "--workers",
+              "10",
+              "--no-transfer-original-dims-to-merged"
+            ],
+            "exit_code": 0,
+            "wall_seconds": 12.847298837034032,
+            "log": "/work/validated/FM/remap.log"
+          }
+        ],
+        "tile_count": 2,
+        "original_points_retained": 867599,
+        "positive_instances": 17,
+        "instances_in_multiple_tiles": 0,
+        "tile_point_attribute_inventory_mismatches": 0,
+        "state": "passed",
+        "files": [
+          {
+            "file": "398700_5646160.laz",
+            "points": 213148,
+            "fields_checked": 36,
+            "changed_original_fields": 0,
+            "species_mismatches": 0,
+            "probability_mismatches": 0,
+            "extra_bytes_metadata_preserved": true,
+            "crs_preserved": true,
+            "original_coordinates_and_record_order_preserved": true
+          },
+          {
+            "file": "398720_5646160.laz",
+            "points": 654451,
+            "fields_checked": 36,
+            "changed_original_fields": 0,
+            "species_mismatches": 0,
+            "probability_mismatches": 0,
+            "extra_bytes_metadata_preserved": true,
+            "crs_preserved": true,
+            "original_coordinates_and_record_order_preserved": true
+          }
+        ],
+        "remap_radius_m": 0.0008660328543650356,
+        "coverage_matched": 867599
+      }
+    ],
+    "cpu_limit": 10,
+    "memory_limit_gib": 50,
+    "network": "none",
+    "prediction_inference": "reused existing GFZ segmentation/species values",
+    "source_sha256": {
+      "398700_5646160.laz": "2f6478ec80da59990c783e142a155c908475b72bfad983eee16f7e0b727357a2",
+      "398720_5646160.laz": "3e8e23ec4e72e9f3ba464fb21ab3fc33614d00790930619ca13dba762e127067"
+    },
+    "input_points": 867599,
+    "wall_seconds": 91.86725673289038,
+    "source_files_unchanged": true
+  },
+  "native_output_labels": {
+    "result": "passed",
+    "case_count": 54,
+    "rendered_labels": 224,
+    "filtered_labels": 124,
+    "negative_control": {
+      "expected_exception": "NameError",
+      "message": "name 'operation' is not defined"
+    }
+  },
+  "packaging": {
+    "xml_lint": "passed",
+    "offline_shed_lint": "passed; version_bumped lookup excluded because ToolShed DNS unavailable"
+  },
+  "environment": {
+    "cpus": 10,
+    "container_memory_gib": 50,
+    "network": "none for scientific jobs",
+    "scientific_tmpfs_gib": 8
+  },
+  "artifacts_sha256": {
+    "full-tests.xml": "9fc0582cae216ea90b070768f5ca015997f504f726022c5714166816a8a84244",
+    "galaxy-tests.json": "852b1f396e1b7e7f18e6ffc3c8bc623ffef6ee62bba485d9b5196d7cb3a85e95",
+    "galaxy-tests.xml": "664b00385163b0b0cb3a79f9b4b0a77d700b50e5060403b6f74e47c53a834a39",
+    "galaxy-tests-rerun.json": "9c49b7e7e5f29df2e898cec883ae4abe94f28bc52506dc7c03d154290d43f631",
+    "galaxy-tests-rerun.xml": "b48e1fdf99404dd6fa5a48641cda34978a5752704054de57c755e76b666f8887",
+    "galaxy-tests-final.json": "e2e56c10fa4bd59efcdcd7661d282d348e9907ec24a35e09caefe3d21f7eecfc",
+    "wrapper-lint.log": "bf49a3fd32cf3dd7623441ed4df578ce5e1bf87d1aae6d2763acf8906a9de1b3",
+    "shed-lint-offline.log": "f1e86ab362e5d1b375d9faeec3d2a48877a6da1952f0e107a0998bfc6b729a04",
+    "output-label-checks.json": "5fb0b03ae31d15ded214471e91f0ec010b460e56672800bf4ae3bb38d88aa07f",
+    "galaxy-roundtrip/evidence.json": "f4d2a94fb665193dae2cc1d2adbd7aebb956bbc0af0c7651551728dc281dcc3b"
+  },
+  "fixture_sha256": "697cdaaad64f1e49c2711f348c3f18516347debf85daa2e63d28a7a327b08cf3"
+}

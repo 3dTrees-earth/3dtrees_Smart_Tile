@@ -20,6 +20,34 @@ def prediction_collection_files(path: Path) -> List[Path]:
     return point_cloud_files(path)
 
 
+def original_prediction_radius(collection: Path) -> float:
+    """Bound the coordinate rounding introduced by encoding retained points.
+
+    Original-resolution predictions contain source points, not voxel means.
+    Re-encoding those coordinates in LAS can move each axis by half its scale
+    step. Use the coarsest XYZ steps in this collection and their half diagonal;
+    the spatial index supplies its usual numerical roundoff guard separately.
+    This is a file-precision allowance, never an inferred subsampling radius.
+    """
+    files = prediction_collection_files(collection)
+    if not files:
+        raise ValueError(f"No prediction files in {collection}")
+    scales = np.zeros(3, dtype=np.float64)
+    coordinate_magnitude = 1.0
+    for path in files:
+        with laspy.open(path, read_evlrs=False) as reader:
+            incoming = np.asarray(reader.header.scales, dtype=np.float64)
+            if not np.all(np.isfinite(incoming)) or np.any(incoming <= 0):
+                raise ValueError(f"{path}: original-resolution predictions need positive finite XYZ scales")
+            scales = np.maximum(scales, incoming)
+            coordinate_magnitude = max(coordinate_magnitude,
+                                       float(np.max(np.abs(reader.header.mins))),
+                                       float(np.max(np.abs(reader.header.maxs))))
+    # LAS writers may round global float64 XYZ before integer encoding.
+    # Account for that conversion even though the query index uses local XYZ.
+    return float(np.linalg.norm(scales / 2) + 8 * np.spacing(coordinate_magnitude))
+
+
 def promote_collection_extra_dim(
     current: laspy.ExtraBytesParams,
     incoming,
