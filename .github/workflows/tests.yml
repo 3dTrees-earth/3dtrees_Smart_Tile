@@ -23,5 +23,6 @@ jobs:
       - name: Run tests
         shell: bash -el {0}
         run: |
-          python -m pip install pytest==9.1.1 pytest-subtests==0.15.0
-          python -m pytest tests -q -p no:cacheprovider
+          # The locked runtime has no pip; keep the test tools outside it.
+          /usr/bin/python3 -m pip install --target "$RUNNER_TEMP/pytest" pytest==9.1.1 pytest-subtests==0.15.0
+          PYTHONPATH="src:$RUNNER_TEMP/pytest" python -m pytest tests -q -p no:cacheprovider

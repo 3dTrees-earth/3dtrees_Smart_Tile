@@ -290,11 +290,12 @@ docker run --rm --user "$(id -u):$(id -g)" --cpus=8 --memory=32g \
 
 ## Tests
 
-In the locked environment, from the repository root (CI runs the same suite):
+In the locked environment, from the repository root (CI runs the same suite).
+The lock has no pip, so install the test tools beside it:
 
 ```bash
-python -m pip install pytest==9.1.1 pytest-subtests==0.15.0
-PYTHONPATH=src python -m pytest -q -p no:cacheprovider tests
+python3 -m pip install --target .pytest-deps pytest==9.1.1 pytest-subtests==0.15.0
+PYTHONPATH=src:.pytest-deps python -m pytest -q -p no:cacheprovider tests
 ```
 
 ## Troubleshooting
