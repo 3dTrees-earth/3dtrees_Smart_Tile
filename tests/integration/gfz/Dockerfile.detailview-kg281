@@ -1,0 +1,6 @@
+# Permission-only derivative; record the resolved base image ID alongside the build.
+ARG DETAILVIEW_BASE=ghcr.io/3dtrees-earth/3dtrees_detailview:1.1.1
+FROM ${DETAILVIEW_BASE}
+USER 0
+RUN chmod -R a+rX /app
+USER 1010:1012

@@ -1,0 +1,86 @@
+{
+  "date": "2026-10-13",
+  "status": "passed",
+  "scope": "Local SmartTile final review and Galaxy wrapper acceptance; not deployment approval.",
+  "source_commit": "f9c01a14ec8351e796253847a83bc232824dc5c6",
+  "wrapper_commit": "357064879abccc590ae117d0b48db2358901c5c3",
+  "wrapper_version": "2.4.0+galaxy1",
+  "wrapper_xml_sha256": "d1c785b29e7822f47a021d2effd7a48d5e4b5468d0fcca4efeeda79d632d416b",
+  "tested_wrapper_xml_sha256": "94fb13a07aa2c100fb870370e943a674280374531aeb5bc2936463bf23219ff3",
+  "post_freeze_change": "One help example corrected Intensity to intensity; commands, parameter semantics, outputs and tests unchanged.",
+  "candidate_image": "sha256:b8298326df51a401df6cab9893b7a7935f36bbf498675c99f463bb4fa0fae814",
+  "embedded_source_files_verified": 54,
+  "scientific_suite": {
+    "tests": 520,
+    "subtests": 90,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "seconds": 123.15,
+    "memory_peak_bytes": 524218368,
+    "cpus": 10,
+    "memory_limit_bytes": 53687091200,
+    "network": "none",
+    "oom_events": 0
+  },
+  "galaxy_functional_suite": {
+    "num_errors": 0,
+    "num_failures": 0,
+    "num_skips": 0,
+    "num_tests": 18,
+    "summed_test_seconds": 710.1617414951324,
+    "cpus_per_job": 10,
+    "memory_limit_bytes_per_job": 53687091200,
+    "additional_swap": 0,
+    "job_network": "none",
+    "source_override": false
+  },
+  "staging_tests": 44,
+  "offline_render_variants": 13,
+  "numeric_oracle": {
+    "checks": 9,
+    "commands": 5,
+    "seconds": 14.35894838697277,
+    "checks_passed": [
+      "fixtures_and_adversarial_nearest",
+      "whole_instance_tile_values",
+      "filter_geometry_attributes_and_report_mapping",
+      "same_instance_species_and_original_preservation",
+      "explicit_custom_instance_species_and_source_preservation",
+      "merged.laz_source_values_and_missing_declaration",
+      "merged.copc.laz_source_values_and_missing_declaration",
+      "full_ply_values_and_uint32_index",
+      "source_fixtures_unchanged"
+    ],
+    "fixture_count": 6,
+    "points_per_fixture": 20,
+    "source_override": false
+  },
+  "initial_failure": {
+    "image": "sha256:5e942522712eb90607f2e06eafe99234d14c034844ce577d63ced1dec1da256f",
+    "galaxy_tests_passed": 16,
+    "galaxy_tests_failed": 1,
+    "cause": "Full PLY export from LAS 1.2 silently omitted ExtraBytes; fixed by explicit PDAL use_eb_vlr reader option."
+  },
+  "evidence": {
+    "/tmp/smarttile-final-review-fixed-20261013/tool-tests.xml": "44bb1331df54d60e0008deb4d4d18bad4b3183f342cbcb8b430f97c7717532fd",
+    "/tmp/smarttile-final-review-fixed-20261013/image-source-hashes.json": "c385986e421b8ddf41335246194849a794025f17ef774fd936b2ec5f4637d092",
+    "/tmp/smarttile-final-wrapper-fixed-20261013/results/tool_test.json": "b2cbbd6ce2338bb0462922fb445f8b60ff4d64112947e4865d473ff6049c3872",
+    "/tmp/smarttile-final-wrapper-fixed-20261013/results/tool_test.xml": "dee46fd0ebd7ef8671a1468dfe743a640d64b77159cde2c964cf4251af559650",
+    "/tmp/smarttile-final-wrapper-fixed-20261013/value-oracle/report.json": "c360dd625b4e3390037f286a66afb390a81a94f30800bb806acb124f66d6b2e5",
+    "/tmp/smarttile-final-wrapper-fixed-20261013/value-oracle/galaxy_discovered_outputs.json": "14f66a7f0941e0912dd815d9b56454a6b3161e3c6cb4f4276c1e3732009ceac6"
+  },
+  "release_checks_remaining": [
+    "Exact published-image workflow and visualization staging canary",
+    "Production workflow parameter and format rebinding",
+    "Coordinated RayCloudTools rollout",
+    "Exact dataset 3110/3111 replays"
+  ],
+  "production_modified": false,
+  "galaxy_discovered_datasets": {
+    "status": "passed",
+    "checks": 6,
+    "scope": "Actual Galaxy-discovered HDAs, not job working products",
+    "uploaded_inputs_match_fixtures": true
+  }
+}

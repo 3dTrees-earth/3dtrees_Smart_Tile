@@ -17,7 +17,6 @@ from main_create_merged_file import (  # noqa: E402
     _untwine_chunk_files_to_copc,
     _validate_expected_dims,
     _validate_preserved_product_dims,
-    create_chunked_prod_merged_file,
     create_chunked_prod_merged_files_for_resolution,
     create_prod_merged_files,
     create_prod_merged_file,
@@ -30,6 +29,12 @@ from main_create_merged_file import (  # noqa: E402
     prod_merged_pipeline,
     source_key,
 )
+
+
+def _copy_raw_chunk(raw_file, chunk_file, resolution):
+    """Test stand-in for point selection: the fake PDAL chunk passes through."""
+    Path(chunk_file).write_bytes(Path(raw_file).read_bytes())
+    return True
 
 
 class CreateMergedFileTests(unittest.TestCase):
@@ -158,9 +163,10 @@ class CreateMergedFileTests(unittest.TestCase):
             )
             created = tmp_path / "prod_merged_10cm.laz"
 
-            def create_file(*args, **kwargs):
-                created.write_text("laz")
-                return created
+            def create_file(_inputs, selected_outputs, *args, **kwargs):
+                path = selected_outputs[0][0]
+                path.write_text("laz")
+                return [path]
 
             with mock.patch(
                 "main_create_merged_file.prepare_copc_inputs",
@@ -171,7 +177,7 @@ class CreateMergedFileTests(unittest.TestCase):
                     return_value={"X", "Y", "Z", "intensity", "Amplitude"},
                 ) as dims:
                     with mock.patch(
-                        "main_create_merged_file.create_prod_merged_file",
+                        "main_create_merged_file.create_chunked_prod_merged_files_for_resolution",
                         side_effect=create_file,
                     ):
                         outputs = create_prod_merged_files(
@@ -283,7 +289,8 @@ class CreateMergedFileTests(unittest.TestCase):
                 "main_create_merged_file._untwine_chunk_files_to_copc",
                 return_value=(False, "untwine unavailable"),
             ):
-                with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline):
+                with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline), \
+                    mock.patch("main_create_merged_file._select_chunk_points", side_effect=_copy_raw_chunk):
                     with mock.patch(
                         "main_create_merged_file._validate_preserved_product_dims",
                         return_value=(True, "ok"),
@@ -327,7 +334,8 @@ class CreateMergedFileTests(unittest.TestCase):
                 return_value=["bounds-a", "bounds-b"],
             ):
                 with mock.patch("main_create_merged_file._scale_offset_options", return_value={}):
-                    with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline) as pdal:
+                    with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline) as pdal, \
+                            mock.patch("main_create_merged_file._select_chunk_points", side_effect=_copy_raw_chunk):
                         with mock.patch(
                             "main_create_merged_file._merge_prod_chunks",
                             side_effect=merge_chunks,
@@ -371,7 +379,8 @@ class CreateMergedFileTests(unittest.TestCase):
                     with lock:
                         active -= 1
 
-            with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline):
+            with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline), \
+                    mock.patch("main_create_merged_file._select_chunk_points", side_effect=_copy_raw_chunk):
                 chunks = _create_prod_merged_chunks(
                     [source],
                     work_dir,
@@ -392,11 +401,12 @@ class CreateMergedFileTests(unittest.TestCase):
             output = tmp_path / "prod_merged_10cm.copc.laz"
             source.write_text("copc")
 
-            def run_pipeline(*_, **__):
-                output.write_text("copc")
+            def run_pipeline(pipeline, *_, **__):
+                Path(pipeline["pipeline"][-1]["filename"]).write_text("copc")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
-            with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline):
+            with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline), \
+                    mock.patch("main_create_merged_file._select_chunk_points", side_effect=_copy_raw_chunk):
                 with mock.patch(
                     "main_create_merged_file._validate_preserved_product_dims",
                     return_value=(True, "ok"),
@@ -410,12 +420,14 @@ class CreateMergedFileTests(unittest.TestCase):
                             output,
                             0.1,
                             "copc.laz",
-                            num_spatial_chunks=1,
                         )
 
         self.assertEqual(created, output)
-        validate_dims.assert_called_once_with([source], output)
-        validate.assert_called_once_with(source, output)
+        validate_dims.assert_called_once()
+        staged_output = validate_dims.call_args.args[1]
+        self.assertEqual(staged_output.name, output.name)
+        self.assertNotEqual(staged_output, output)
+        validate.assert_called_once_with(source, staged_output)
 
     def test_single_laz_pipeline_validates_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -424,11 +436,12 @@ class CreateMergedFileTests(unittest.TestCase):
             output = tmp_path / "prod_merged_10cm.laz"
             source.write_text("copc")
 
-            def run_pipeline(*_, **__):
-                output.write_text("laz")
+            def run_pipeline(pipeline, *_, **__):
+                Path(pipeline["pipeline"][-1]["filename"]).write_text("laz")
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
-            with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline):
+            with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline), \
+                    mock.patch("main_create_merged_file._select_chunk_points", side_effect=_copy_raw_chunk):
                 with mock.patch(
                     "main_create_merged_file._validate_preserved_product_dims",
                     return_value=(True, "ok"),
@@ -442,39 +455,28 @@ class CreateMergedFileTests(unittest.TestCase):
                             output,
                             0.1,
                             "laz",
-                            num_spatial_chunks=1,
                         )
 
         self.assertEqual(created, output)
-        validate_dims.assert_called_once_with([source], output)
-        validate.assert_called_once_with(source, output)
+        validate_dims.assert_called_once()
+        staged_output = validate_dims.call_args.args[1]
+        self.assertEqual(staged_output.name, output.name)
+        self.assertNotEqual(staged_output, output)
+        validate.assert_called_once_with(source, staged_output)
 
-    def test_single_product_removes_stale_output_before_rewrite(self):
+    def test_single_product_rejects_existing_output_without_rewriting(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             source = tmp_path / "source.copc.laz"
             output = tmp_path / "prod_merged_10cm.laz"
             source.write_text("copc")
-            output.write_text("stale")
-
-            def run_pipeline(*_, **__):
-                self.assertFalse(output.exists())
-                output.write_text("fresh")
-                return mock.Mock(returncode=0, stdout="", stderr="")
-
-            with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline):
-                with mock.patch(
-                    "main_create_merged_file._validate_preserved_product_dims",
-                    return_value=(True, "ok"),
-                ):
-                    with mock.patch(
-                        "main_create_merged_file._preserve_and_validate_las_metadata",
-                        return_value=(True, "ok"),
-                    ):
-                        created = create_prod_merged_file([source], output, 0.1, "laz")
-
-            self.assertEqual(created, output)
-            self.assertEqual(output.read_text(), "fresh")
+            output.write_text("previous result")
+            with mock.patch("main_create_merged_file._run_pdal_pipeline") as pipeline:
+                with self.assertRaisesRegex(FileExistsError, "existing output"):
+                    create_prod_merged_file([source], output, 0.1, "laz")
+            pipeline.assert_not_called()
+            self.assertEqual(output.read_text(), "previous result")
+            self.assertEqual(source.read_text(), "copc")
 
     def test_chunked_product_failure_cleans_scratch_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -491,9 +493,9 @@ class CreateMergedFileTests(unittest.TestCase):
                 with mock.patch("main_create_merged_file._scale_offset_options", return_value={}):
                     with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=fail_chunk):
                         with self.assertRaisesRegex(RuntimeError, "chunk 1 failed"):
-                            create_chunked_prod_merged_file([source], output, 0.1, "laz", 2)
+                            create_chunked_prod_merged_files_for_resolution([source], [(output, "laz")], 0.1, 2)
 
-            self.assertFalse((tmp_path / "_prod_merged_10cm_chunks").exists())
+            self.assertFalse(list(tmp_path.glob(".smarttile-output-*")))
 
     def test_chunked_product_failure_can_keep_scratch_for_debug(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -511,9 +513,9 @@ class CreateMergedFileTests(unittest.TestCase):
                     with mock.patch("main_create_merged_file._scale_offset_options", return_value={}):
                         with mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=fail_chunk):
                             with self.assertRaisesRegex(RuntimeError, "chunk 1 failed"):
-                                create_chunked_prod_merged_file([source], output, 0.1, "laz", 2)
+                                create_chunked_prod_merged_files_for_resolution([source], [(output, "laz")], 0.1, 2)
 
-            self.assertTrue((tmp_path / "_prod_merged_10cm_chunks").exists())
+            self.assertEqual(len(list(tmp_path.glob(".smarttile-output-*/_prod_merged_10cm_shared_chunks"))), 1)
 
     def test_create_prod_merged_chunks_skips_empty_spatial_chunks_and_preserves_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -545,12 +547,12 @@ class CreateMergedFileTests(unittest.TestCase):
             temp_dir = tmp_path / "untwine_tmp"
             output.write_text("copc")
             fake_copc_metadata = mock.Mock(
-                append_source_geotiff_projection_evlrs=mock.Mock(return_value=(True, "ok")),
-                copc_preserves_source_crs=mock.Mock(return_value=(True, "ok")),
+                validate_single_crs_record=mock.Mock(return_value=(True, "ok")),
                 srs_assignment_from_file=mock.Mock(return_value="EPSG:32632"),
             )
             with mock.patch("main_create_merged_file.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata}):
+                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}), \
+                        mock.patch("point_cloud_metadata.preserve_extra_bytes_missingness"):
                     with mock.patch("main_create_merged_file.subprocess.run") as run:
                         def run_untwine(*_, **__):
                             output.write_text("copc")
@@ -582,8 +584,7 @@ class CreateMergedFileTests(unittest.TestCase):
             tmp_path = Path(tmpdir)
             output = tmp_path / "out.copc.laz"
             fake_copc_metadata = mock.Mock(
-                append_source_geotiff_projection_evlrs=mock.Mock(return_value=(True, "ok")),
-                copc_preserves_source_crs=mock.Mock(return_value=(True, "ok")),
+                validate_single_crs_record=mock.Mock(return_value=(True, "ok")),
                 srs_assignment_from_file=mock.Mock(return_value="EPSG:32632"),
             )
 
@@ -592,7 +593,8 @@ class CreateMergedFileTests(unittest.TestCase):
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("main_create_merged_file.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata}):
+                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}), \
+                        mock.patch("point_cloud_metadata.preserve_extra_bytes_missingness"):
                     with mock.patch("main_create_merged_file.subprocess.run", side_effect=run_untwine):
                         with mock.patch(
                             "main_create_merged_file._point_cloud_point_count",
@@ -613,8 +615,7 @@ class CreateMergedFileTests(unittest.TestCase):
             tmp_path = Path(tmpdir)
             output = tmp_path / "out.copc.laz"
             fake_copc_metadata = mock.Mock(
-                append_source_geotiff_projection_evlrs=mock.Mock(return_value=(True, "ok")),
-                copc_preserves_source_crs=mock.Mock(return_value=(True, "ok")),
+                validate_single_crs_record=mock.Mock(return_value=(True, "ok")),
                 srs_assignment_from_file=mock.Mock(return_value="EPSG:32632"),
             )
 
@@ -623,7 +624,8 @@ class CreateMergedFileTests(unittest.TestCase):
                 return mock.Mock(returncode=0, stdout="", stderr="")
 
             with mock.patch("main_create_merged_file.shutil.which", return_value="/usr/bin/untwine"):
-                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata}):
+                with mock.patch.dict(sys.modules, {"copc_metadata": fake_copc_metadata, "crs_records": fake_copc_metadata}), \
+                        mock.patch("point_cloud_metadata.preserve_extra_bytes_missingness"):
                     with mock.patch("main_create_merged_file.subprocess.run", side_effect=run_untwine):
                         with mock.patch(
                             "main_create_merged_file._point_cloud_point_count",
@@ -660,8 +662,8 @@ class CreateMergedFileTests(unittest.TestCase):
             input_dir.mkdir()
 
             convert = mock.Mock(side_effect=lambda _, output, **__: output.write_text("copc") or True)
-            fake_main_tile = mock.Mock(_convert_laz_to_copc=convert)
-            with mock.patch.dict(sys.modules, {"main_tile": fake_main_tile}):
+            fake_tile_copc = mock.Mock(convert_laz_to_copc=convert)
+            with mock.patch.dict(sys.modules, {"tile_copc": fake_tile_copc}):
                 with mock.patch("main_create_merged_file.point_cloud_files") as files:
                     files.return_value = [input_dir / "original.laz"]
                     with mock.patch("main_create_merged_file.copc_files", return_value=[]):
@@ -689,10 +691,10 @@ class CreateMergedFileTests(unittest.TestCase):
             copc.write_text("copc")
 
             convert = mock.Mock()
-            fake_main_tile = mock.Mock(_convert_laz_to_copc=convert)
+            fake_tile_copc = mock.Mock(convert_laz_to_copc=convert)
             with mock.patch("main_create_merged_file._is_reusable_copc", return_value=True):
                 with mock.patch("main_create_merged_file.staged_copc_matches_source", return_value=True):
-                    with mock.patch.dict(sys.modules, {"main_tile": fake_main_tile}):
+                    with mock.patch.dict(sys.modules, {"tile_copc": fake_tile_copc}):
                         outputs = prepare_copc_inputs(input_dir, output_dir)
 
             self.assertEqual(outputs, [copc])
@@ -715,11 +717,11 @@ class CreateMergedFileTests(unittest.TestCase):
                 return True
 
             convert = mock.Mock(side_effect=convert_input)
-            fake_main_tile = mock.Mock(_convert_laz_to_copc=convert)
+            fake_tile_copc = mock.Mock(convert_laz_to_copc=convert)
             with mock.patch("main_create_merged_file._is_reusable_copc", return_value=True):
                 with mock.patch("main_create_merged_file.staged_copc_matches_source", return_value=False):
                     with mock.patch("main_create_merged_file.write_copc_stage_manifest_entry") as manifest:
-                        with mock.patch.dict(sys.modules, {"main_tile": fake_main_tile}):
+                        with mock.patch.dict(sys.modules, {"tile_copc": fake_tile_copc}):
                             outputs = prepare_copc_inputs(input_dir, output_dir)
 
             expected = output_dir / "original_with_predictions_copc/original.copc.laz"
@@ -759,10 +761,10 @@ class CreateMergedFileTests(unittest.TestCase):
                 return True
 
             convert = mock.Mock(side_effect=convert_input)
-            fake_main_tile = mock.Mock(_convert_laz_to_copc=convert)
+            fake_tile_copc = mock.Mock(convert_laz_to_copc=convert)
             with mock.patch("main_create_merged_file._is_reusable_copc", return_value=True):
                 with mock.patch("main_create_merged_file.write_copc_stage_manifest_entry"):
-                    with mock.patch.dict(sys.modules, {"main_tile": fake_main_tile}):
+                    with mock.patch.dict(sys.modules, {"tile_copc": fake_tile_copc}):
                         outputs = prepare_copc_inputs(input_dir, output_dir)
 
             converted = output_dir / "original_with_predictions_copc/alpha.copc.laz"
@@ -783,10 +785,10 @@ class CreateMergedFileTests(unittest.TestCase):
             staged.write_text("copc")
 
             convert = mock.Mock()
-            fake_main_tile = mock.Mock(_convert_laz_to_copc=convert)
+            fake_tile_copc = mock.Mock(convert_laz_to_copc=convert)
             with mock.patch("main_create_merged_file._is_reusable_copc", return_value=True):
                 with mock.patch("main_create_merged_file.staged_copc_matches_source", return_value=True):
-                    with mock.patch.dict(sys.modules, {"main_tile": fake_main_tile}):
+                    with mock.patch.dict(sys.modules, {"tile_copc": fake_tile_copc}):
                         outputs = prepare_copc_inputs(input_dir, output_dir)
 
             self.assertEqual(outputs, [staged])
@@ -807,10 +809,10 @@ class CreateMergedFileTests(unittest.TestCase):
             staged.write_text("copc")
 
             convert = mock.Mock()
-            fake_main_tile = mock.Mock(_convert_laz_to_copc=convert)
+            fake_tile_copc = mock.Mock(convert_laz_to_copc=convert)
             with mock.patch("main_create_merged_file._is_reusable_copc", return_value=True):
                 with mock.patch("main_create_merged_file.staged_copc_matches_source", return_value=True):
-                    with mock.patch.dict(sys.modules, {"main_tile": fake_main_tile}):
+                    with mock.patch.dict(sys.modules, {"tile_copc": fake_tile_copc}):
                         outputs = prepare_copc_inputs(input_dir, output_dir, staged_copc_dir=staged_dir)
 
             self.assertEqual(outputs, [staged])
@@ -833,10 +835,10 @@ class CreateMergedFileTests(unittest.TestCase):
             unrelated.write_text("stale copc")
 
             convert = mock.Mock()
-            fake_main_tile = mock.Mock(_convert_laz_to_copc=convert)
+            fake_tile_copc = mock.Mock(convert_laz_to_copc=convert)
             with mock.patch("main_create_merged_file._is_reusable_copc", return_value=True):
                 with mock.patch("main_create_merged_file.staged_copc_matches_source", return_value=True):
-                    with mock.patch.dict(sys.modules, {"main_tile": fake_main_tile}):
+                    with mock.patch.dict(sys.modules, {"tile_copc": fake_tile_copc}):
                         outputs = prepare_copc_inputs(input_dir, output_dir, staged_copc_dir=staged_dir)
 
             self.assertEqual(outputs, [staged])
@@ -862,10 +864,10 @@ class CreateMergedFileTests(unittest.TestCase):
                 return True
 
             convert = mock.Mock(side_effect=convert_input)
-            fake_main_tile = mock.Mock(_convert_laz_to_copc=convert)
+            fake_tile_copc = mock.Mock(convert_laz_to_copc=convert)
             with mock.patch("main_create_merged_file._is_reusable_copc", return_value=False):
                 with mock.patch("main_create_merged_file.write_copc_stage_manifest_entry"):
-                    with mock.patch.dict(sys.modules, {"main_tile": fake_main_tile}):
+                    with mock.patch.dict(sys.modules, {"tile_copc": fake_tile_copc}):
                         outputs = prepare_copc_inputs(input_dir, output_dir, staged_copc_dir=staged_dir)
 
             expected = output_dir / "original_with_predictions_copc/original.copc.laz"
@@ -875,3 +877,49 @@ class CreateMergedFileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_product_point_selection_is_reproducible_and_in_acquisition_order(tmp_path):
+    import laspy
+    import numpy as np
+    from main_create_merged_file import select_voxel_points
+    rng = np.random.default_rng(3)
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales, header.offsets = np.full(3, 0.001), np.zeros(3)
+    las = laspy.LasData(header)
+    xyz = np.round(rng.uniform(0, 2, (5000, 3)), 3)
+    xyz[100:110] = xyz[100]  # identical coordinates with different attributes
+    las.x, las.y, las.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+    las.gps_time = rng.uniform(0, 100, 5000)
+    las.intensity = rng.integers(0, 1000, 5000)
+    points = las.points
+    chosen = select_voxel_points(points, 0.25)
+    picked = points.array[chosen]
+    keys = np.floor(np.c_[points.x, points.y, points.z][chosen] / 0.25)
+    assert len(np.unique(keys, axis=0)) == len(chosen) == len(np.unique(np.floor(xyz / 0.25), axis=0))
+    assert np.all(np.diff(picked["gps_time"]) >= 0)
+    las.gps_time[::7] = 5.0  # equal times (returns of one pulse) must not follow read order
+    points = las.points
+    picked = points.array[select_voxel_points(points, 0.25)]
+    for seed in (1, 2):  # any read order gives the same records in the same order
+        order = np.random.default_rng(seed).permutation(len(points))
+        assert np.array_equal(points[order].array[select_voxel_points(points[order], 0.25)], picked)
+    # Each voxel keeps its point nearest the voxel mean.
+    cell = np.floor(xyz / 0.25)
+    first = tuple(cell[chosen[0]])
+    members = np.flatnonzero(np.all(cell == first, axis=1))
+    distance = np.linalg.norm(xyz[members] - xyz[members].mean(axis=0), axis=1)
+    assert np.isclose(np.linalg.norm(xyz[chosen[0]] - xyz[members].mean(axis=0)), distance.min())
+
+
+def test_chunk_pipeline_only_reads_and_merges(tmp_path):
+    import laspy
+    from main_create_merged_file import _chunked_prod_merged_pipeline
+    las = laspy.LasData(laspy.LasHeader(point_format=3, version="1.4"))
+    las.x, las.y, las.z = [0.0, 1.0], [0.0, 1.0], [0.0, 1.0]
+    sources = [tmp_path / "a.las", tmp_path / "b.las"]
+    for source in sources:
+        las.write(source)
+    kinds = [stage.get("type") for stage in _chunked_prod_merged_pipeline(
+        sources, tmp_path / "raw.las", "([0,1],[0,1])", 0.1, {})["pipeline"]]
+    assert kinds == ["readers.las", "readers.las", "filters.merge", "writers.las"]

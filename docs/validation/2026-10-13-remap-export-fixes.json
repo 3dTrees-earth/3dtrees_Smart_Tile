@@ -1,0 +1,1575 @@
+{
+  "date": "2026-10-13",
+  "created_utc": "2026-10-13T15:23:04.727592+00:00",
+  "source_commit": "f2d8ecb89df142d440079f3b9965248ac80b9b98",
+  "runtime_image": "sha256:b8c79e45dc52a363f8273f83a27b57c9954e8befaa8ea2fe20883bbfff119a52",
+  "acceptance": "passed",
+  "scope": "Local GFZ remap and product replay, two adjoining files, existing SAT/ForestMamba/RCT species and segmentation results; no inference or production/downstream services.",
+  "original_files": 2,
+  "original_points": 867599,
+  "fixes": [
+    "Same-instance nearest queries share the canonical global tie rule, including equality-filtered cache identity.",
+    "Full-resolution PLY OriginalPointIndex is checked uint32; LAZ/COPC remain uint64.",
+    "Missing-value declarations are translated to output storage encoding and validated before publishing; incompatible collection metadata fails before staging."
+  ],
+  "full_suite": {
+    "tests_passed": 513,
+    "subtests_passed": 90,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0,
+    "pytest_wall_seconds": 119.25,
+    "state": "passed",
+    "command": [
+      "/opt/smarttile/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "-o",
+      "faulthandler_timeout=300",
+      "--junitxml=/work/tool-tests.xml",
+      "tests"
+    ],
+    "cpus": 10,
+    "memory_limit_bytes": 53687091200,
+    "tmpfs_limit_bytes": 8589934592,
+    "network": "none",
+    "memory_peak": "524673024",
+    "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+    "cpu_stat": "usage_usec 168867612\nuser_usec 131841601\nsystem_usec 37026011\ncore_sched.force_idle_usec 0\nnr_periods 1199\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0",
+    "elapsed_seconds": 119.65692153316922,
+    "exit_code": 0
+  },
+  "gfz_limits": {
+    "cpus_per_container": 4,
+    "memory_bytes_per_container": 21474836480,
+    "swap_additional_bytes": 0,
+    "network": "none",
+    "source_inputs": "read-only",
+    "scratch": "SSD"
+  },
+  "products": {
+    "scope": "Two complete adjoining GFZ files; real cached SAT/FM/RCT and species attributes; no inference or downstream services",
+    "checks": [
+      {
+        "name": "direct_exit",
+        "passed": true
+      },
+      {
+        "name": "direct/merged.laz",
+        "passed": true,
+        "points": 867599,
+        "fields_checked": 36,
+        "index_dtype": "uint64"
+      },
+      {
+        "name": "direct/merged.laz_missing_declarations",
+        "passed": true,
+        "fields": {
+          "Amplitude": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": [
+                0.0
+              ]
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Reflectance": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": [
+                0.0
+              ]
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Deviation": {
+            "source": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              -1.0
+            ]
+          }
+        }
+      },
+      {
+        "name": "direct/merged.copc.laz",
+        "passed": true,
+        "points": 867599,
+        "fields_checked": 36,
+        "index_dtype": "uint64"
+      },
+      {
+        "name": "direct/merged.copc.laz_missing_declarations",
+        "passed": true,
+        "fields": {
+          "Amplitude": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0.0
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Reflectance": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0.0
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Deviation": {
+            "source": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              -1.0
+            ]
+          }
+        }
+      },
+      {
+        "name": "direct/merged.ply",
+        "passed": true,
+        "points": 867599,
+        "index_dtype": "uint32",
+        "source_geometry_and_extra_fields_preserved": true
+      },
+      {
+        "name": "direct/prod_merged_10cm.laz_missing_declarations",
+        "passed": true,
+        "fields": {
+          "Amplitude": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0.0
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Reflectance": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0.0
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Deviation": {
+            "source": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              -1.0
+            ]
+          }
+        }
+      },
+      {
+        "name": "direct/prod_merged_10cm.laz",
+        "passed": true,
+        "points": 139401,
+        "fields_checked": 36,
+        "selected_source_records": true
+      },
+      {
+        "name": "direct/prod_merged_10cm.copc.laz_missing_declarations",
+        "passed": true,
+        "fields": {
+          "Amplitude": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0.0
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Reflectance": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0.0
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Deviation": {
+            "source": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              -1.0
+            ]
+          }
+        }
+      },
+      {
+        "name": "direct/prod_merged_10cm.copc.laz",
+        "passed": true,
+        "points": 139401,
+        "fields_checked": 36,
+        "selected_source_records": true
+      },
+      {
+        "name": "direct/prod_merged_10cm.ply",
+        "passed": true,
+        "points": 139401,
+        "geometry_and_extra_fields_preserved": true
+      },
+      {
+        "name": "joined_exit",
+        "passed": true
+      },
+      {
+        "name": "joined/merged.laz",
+        "passed": true,
+        "points": 867599,
+        "fields_checked": 36,
+        "index_dtype": "uint64"
+      },
+      {
+        "name": "joined/merged.laz_missing_declarations",
+        "passed": true,
+        "fields": {
+          "Amplitude": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": [
+                0.0
+              ]
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Reflectance": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": [
+                0.0
+              ]
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Deviation": {
+            "source": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              -1.0
+            ]
+          }
+        }
+      },
+      {
+        "name": "joined/merged.copc.laz",
+        "passed": true,
+        "points": 867599,
+        "fields_checked": 36,
+        "index_dtype": "uint64"
+      },
+      {
+        "name": "joined/merged.copc.laz_missing_declarations",
+        "passed": true,
+        "fields": {
+          "Amplitude": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0.0
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Reflectance": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0.0
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Deviation": {
+            "source": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              -1.0
+            ]
+          }
+        }
+      },
+      {
+        "name": "joined/merged.ply",
+        "passed": true,
+        "points": 867599,
+        "index_dtype": "uint32",
+        "source_geometry_and_extra_fields_preserved": true
+      },
+      {
+        "name": "joined/prod_merged_10cm.laz_missing_declarations",
+        "passed": true,
+        "fields": {
+          "Amplitude": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0.0
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Reflectance": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0.0
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Deviation": {
+            "source": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              -1.0
+            ]
+          }
+        }
+      },
+      {
+        "name": "joined/prod_merged_10cm.laz",
+        "passed": true,
+        "points": 139401,
+        "fields_checked": 36,
+        "selected_source_records": true
+      },
+      {
+        "name": "joined/prod_merged_10cm.copc.laz_missing_declarations",
+        "passed": true,
+        "fields": {
+          "Amplitude": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0.0
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Reflectance": {
+            "source": {
+              "no_data": [
+                0
+              ],
+              "scale": [
+                0.01
+              ],
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                0.0
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              0.0
+            ]
+          },
+          "Deviation": {
+            "source": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "output": {
+              "no_data": [
+                -1
+              ],
+              "scale": null,
+              "offset": null
+            },
+            "physical_missing_value": [
+              -1.0
+            ]
+          }
+        }
+      },
+      {
+        "name": "joined/prod_merged_10cm.copc.laz",
+        "passed": true,
+        "points": 139401,
+        "fields_checked": 36,
+        "selected_source_records": true
+      },
+      {
+        "name": "joined/prod_merged_10cm.ply",
+        "passed": true,
+        "points": 139401,
+        "geometry_and_extra_fields_preserved": true
+      },
+      {
+        "name": "joined_direct_parity",
+        "passed": true
+      },
+      {
+        "name": "input_hashes_unchanged",
+        "passed": true
+      }
+    ],
+    "commands": [
+      {
+        "name": "direct",
+        "argv": [
+          "/opt/smarttile/bin/python",
+          "/tool/src/run.py",
+          "--task",
+          "create_merged_file",
+          "--original-with-predictions-dir",
+          "/work/products/input_all",
+          "--output-dir",
+          "/work/products/direct",
+          "--merged-resolutions",
+          "full,10cm",
+          "--merged-output-formats",
+          "laz,copc.laz,ply",
+          "--workers",
+          "2"
+        ],
+        "exit_code": 0,
+        "seconds": 14.600704796146601
+      },
+      {
+        "name": "joined",
+        "argv": [
+          "/opt/smarttile/bin/python",
+          "/tool/src/run.py",
+          "--task",
+          "create_merged_file",
+          "--original-with-predictions-dir",
+          "/previous/products/view_preserved_SAT,/previous/products/view_preserved_FM,/previous/products/view_preserved_RCT",
+          "--output-dir",
+          "/work/products/joined",
+          "--merged-resolutions",
+          "full,10cm",
+          "--merged-output-formats",
+          "laz,copc.laz,ply",
+          "--workers",
+          "2"
+        ],
+        "exit_code": 0,
+        "seconds": 15.600994410226122
+      }
+    ],
+    "input_sha256": {
+      "/data/398700_5646160.laz": "3cd61d322aee0d2267648cf1085bf10509168cfd11358fe72732664233b21262",
+      "/data/398720_5646160.laz": "23d528396fc71dae7f99ab2247e0d55dc753afaf4a3413cf00a2ae851587824e",
+      "/previous/products/view_preserved_SAT/398700_5646160.laz": "ae48a53cb1f1e0c8b74e3c4eb5b474b34eb1e11177d1ba9dcb18098f2f6e6171",
+      "/previous/products/view_preserved_SAT/398720_5646160.laz": "f3dae6d7191b9e78aad1038f76274fbe301ec0105fa3041526ffc831ecb35404",
+      "/previous/products/view_preserved_FM/398700_5646160.laz": "db538264e9e8330464276400169917e29392ec754068cf95573960f74e212612",
+      "/previous/products/view_preserved_FM/398720_5646160.laz": "4a5f67a3993e5c35af3439bfb92c623fd8d54699e8d99d1ef024a933e598ec01",
+      "/previous/products/view_preserved_RCT/398700_5646160.laz": "20a9a7373454daad2a827b76bd86b45e1330e2d637edb2c5bfb3fc97095d7374",
+      "/previous/products/view_preserved_RCT/398720_5646160.laz": "f4f631d9d8011fa0aee9390627329b10d37dbc25979a5fe5d15409984f65f86c"
+    },
+    "original_points": 867599,
+    "elapsed_seconds": 47.96886740112677,
+    "outputs": {
+      "direct/prod_merged_10cm.ply": {
+        "bytes": 15475594,
+        "sha256": "9289435f85eae4e7d51c7f1cc67f133d8396711ca00b05fc26d9a382235ff778"
+      },
+      "direct/prod_merged_10cm.copc.laz": {
+        "bytes": 3504335,
+        "sha256": "6a7b1d4f60d0796ce61738b0e3c6c62af38e7468f3a868a9ff911bdaf131d7ed"
+      },
+      "direct/merged.ply": {
+        "bytes": 99776003,
+        "sha256": "f127ae552d2422f8c390c8dc56dd3c79bddd3c697ed09373f8a6a5b73eb06b5c"
+      },
+      "direct/merged.copc.laz": {
+        "bytes": 18243339,
+        "sha256": "4d8c04045531cf8f4074c01a5a2654333eba928348ed88fa9bde77eef7e13380"
+      },
+      "direct/merged.laz": {
+        "bytes": 10007210,
+        "sha256": "d4f0f8bb75ad3201e9dfb7be5422029a20f7c8bb3eea712e4ee3fdba6398aa51"
+      },
+      "direct/prod_merged_10cm.laz": {
+        "bytes": 3311830,
+        "sha256": "60359595179462e73266692995b745617517ee6b4e564ed67aa99aafa48600ca"
+      },
+      "joined/prod_merged_10cm.ply": {
+        "bytes": 15475594,
+        "sha256": "dc084abf7ec6885e539243dbd6d4fce814e9cf55a7b2f5b2239e16f9a8b9b724"
+      },
+      "joined/prod_merged_10cm.copc.laz": {
+        "bytes": 3501343,
+        "sha256": "57f93886ef0b5d0e17385f306416fd0c2ee5254a8b4ea862699ae8e193c071c8"
+      },
+      "joined/merged.ply": {
+        "bytes": 99776003,
+        "sha256": "f127ae552d2422f8c390c8dc56dd3c79bddd3c697ed09373f8a6a5b73eb06b5c"
+      },
+      "joined/merged.copc.laz": {
+        "bytes": 18240666,
+        "sha256": "48cffb8f96da0a09acd2dea46c6ce23f0a7d171ad0273c30d47df0542af6b1c3"
+      },
+      "joined/merged.laz": {
+        "bytes": 10007210,
+        "sha256": "d4f0f8bb75ad3201e9dfb7be5422029a20f7c8bb3eea712e4ee3fdba6398aa51"
+      },
+      "joined/prod_merged_10cm.laz": {
+        "bytes": 3311830,
+        "sha256": "a457dc849f2539e0a7e94a3e2d23fbec4a80af0cdf5f53a4383c6614b77e4375"
+      }
+    },
+    "status": "passed",
+    "peak_rss_kib": 1053836,
+    "child_peak_rss_kib": 969272,
+    "memory.peak": "1404792832",
+    "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+    "cpu.stat": "usage_usec 71545907\nuser_usec 64629853\nsystem_usec 6916054\ncore_sched.force_idle_usec 0\nnr_periods 483\nnr_throttled 17\nthrottled_usec 1126819\nnr_bursts 0\nburst_usec 0"
+  },
+  "remap": {
+    "scope": "GFZ same-instance species replay; two adjoining files, SAT/FM at1cm/10cm; compare to previously independently validated outputs",
+    "commands": [
+      {
+        "name": "1cm_workers1_cache0",
+        "argv": [
+          "/opt/smarttile/bin/python",
+          "/tool/src/run.py",
+          "--task",
+          "remap",
+          "--segmented-folders",
+          "/previous/instance-metadata-preserved/species_replay_SAT_1cm,/previous/instance-metadata-preserved/species_replay_FM_1cm",
+          "--original-laz-input-dir",
+          "/previous/instance-metadata-preserved/originals_without_sat_fm_species",
+          "--original-laz-output-dir",
+          "/work/remap/1cm_workers1_cache0",
+          "--match-instances",
+          "--resolution-1",
+          ".01",
+          "--remap-dims",
+          "species_id_SAT,species_prob_SAT,species_id_FM,species_prob_FM",
+          "--workers",
+          "1"
+        ],
+        "exit_code": 0,
+        "cache_mb": 0,
+        "seconds": 10.937371281906962
+      },
+      {
+        "name": "1cm_workers4_cache32",
+        "argv": [
+          "/opt/smarttile/bin/python",
+          "/tool/src/run.py",
+          "--task",
+          "remap",
+          "--segmented-folders",
+          "/previous/instance-metadata-preserved/species_replay_SAT_1cm,/previous/instance-metadata-preserved/species_replay_FM_1cm",
+          "--original-laz-input-dir",
+          "/previous/instance-metadata-preserved/originals_without_sat_fm_species",
+          "--original-laz-output-dir",
+          "/work/remap/1cm_workers4_cache32",
+          "--match-instances",
+          "--resolution-1",
+          ".01",
+          "--remap-dims",
+          "species_id_SAT,species_prob_SAT,species_id_FM,species_prob_FM",
+          "--workers",
+          "4"
+        ],
+        "exit_code": 0,
+        "cache_mb": 32,
+        "seconds": 7.231403211131692
+      },
+      {
+        "name": "10cm_workers1_cache0",
+        "argv": [
+          "/opt/smarttile/bin/python",
+          "/tool/src/run.py",
+          "--task",
+          "remap",
+          "--segmented-folders",
+          "/previous/instance-metadata-preserved/species_replay_SAT_10cm,/previous/instance-metadata-preserved/species_replay_FM_10cm",
+          "--original-laz-input-dir",
+          "/previous/instance-metadata-preserved/originals_without_sat_fm_species",
+          "--original-laz-output-dir",
+          "/work/remap/10cm_workers1_cache0",
+          "--match-instances",
+          "--resolution-1",
+          ".1",
+          "--remap-dims",
+          "species_id_SAT,species_prob_SAT,species_id_FM,species_prob_FM",
+          "--workers",
+          "1"
+        ],
+        "exit_code": 0,
+        "cache_mb": 0,
+        "seconds": 7.130684373900294
+      },
+      {
+        "name": "10cm_workers4_cache32",
+        "argv": [
+          "/opt/smarttile/bin/python",
+          "/tool/src/run.py",
+          "--task",
+          "remap",
+          "--segmented-folders",
+          "/previous/instance-metadata-preserved/species_replay_SAT_10cm,/previous/instance-metadata-preserved/species_replay_FM_10cm",
+          "--original-laz-input-dir",
+          "/previous/instance-metadata-preserved/originals_without_sat_fm_species",
+          "--original-laz-output-dir",
+          "/work/remap/10cm_workers4_cache32",
+          "--match-instances",
+          "--resolution-1",
+          ".1",
+          "--remap-dims",
+          "species_id_SAT,species_prob_SAT,species_id_FM,species_prob_FM",
+          "--workers",
+          "4"
+        ],
+        "exit_code": 0,
+        "cache_mb": 32,
+        "seconds": 4.072800784138963
+      }
+    ],
+    "checks": [
+      {
+        "name": "1cm_workers1_cache0_exit",
+        "passed": true
+      },
+      {
+        "name": "1cm_workers1_cache0_coverage",
+        "passed": true,
+        "original_coverage": [
+          {
+            "file": "398700_5646160.laz",
+            "model": "species_replay_SAT_1cm",
+            "stage": "final_survivors",
+            "radius_m": 0.017320508075688773,
+            "total": 213148,
+            "matched": 213148,
+            "max_matched_distance_m": 0.014525839121851986,
+            "distance_histogram": [
+              209243,
+              3122,
+              776,
+              7,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.004330127018922193,
+              0.008660254037844387,
+              0.01299038105676658,
+              0.017320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_SAT"
+          },
+          {
+            "file": "398700_5646160.laz",
+            "model": "species_replay_FM_1cm",
+            "stage": "final_survivors",
+            "radius_m": 0.017320508075688773,
+            "total": 213148,
+            "matched": 213148,
+            "max_matched_distance_m": 0.014525839121851986,
+            "distance_histogram": [
+              209243,
+              3122,
+              776,
+              7,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.004330127018922193,
+              0.008660254037844387,
+              0.01299038105676658,
+              0.017320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_FM"
+          },
+          {
+            "file": "398720_5646160.laz",
+            "model": "species_replay_SAT_1cm",
+            "stage": "final_survivors",
+            "radius_m": 0.017320508075688773,
+            "total": 654451,
+            "matched": 654451,
+            "max_matched_distance_m": 0.014071247359292995,
+            "distance_histogram": [
+              642096,
+              9786,
+              2556,
+              13,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.004330127018922193,
+              0.008660254037844387,
+              0.01299038105676658,
+              0.017320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_SAT"
+          },
+          {
+            "file": "398720_5646160.laz",
+            "model": "species_replay_FM_1cm",
+            "stage": "final_survivors",
+            "radius_m": 0.017320508075688773,
+            "total": 654451,
+            "matched": 654451,
+            "max_matched_distance_m": 0.014071247359292995,
+            "distance_histogram": [
+              642096,
+              9787,
+              2555,
+              13,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.004330127018922193,
+              0.008660254037844387,
+              0.01299038105676658,
+              0.017320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_FM"
+          }
+        ]
+      },
+      {
+        "name": "1cm_workers1_cache0/398700_5646160.laz",
+        "passed": true,
+        "points": 213148,
+        "all_fields_equal_to_independent_oracle_accepted_reference": true,
+        "metadata_and_original_geometry_preserved": true
+      },
+      {
+        "name": "1cm_workers1_cache0/398720_5646160.laz",
+        "passed": true,
+        "points": 654451,
+        "all_fields_equal_to_independent_oracle_accepted_reference": true,
+        "metadata_and_original_geometry_preserved": true
+      },
+      {
+        "name": "1cm_workers4_cache32_exit",
+        "passed": true
+      },
+      {
+        "name": "1cm_workers4_cache32_coverage",
+        "passed": true,
+        "original_coverage": [
+          {
+            "file": "398700_5646160.laz",
+            "model": "species_replay_SAT_1cm",
+            "stage": "final_survivors",
+            "radius_m": 0.017320508075688773,
+            "total": 213148,
+            "matched": 213148,
+            "max_matched_distance_m": 0.014525839121851986,
+            "distance_histogram": [
+              209243,
+              3122,
+              776,
+              7,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.004330127018922193,
+              0.008660254037844387,
+              0.01299038105676658,
+              0.017320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_SAT"
+          },
+          {
+            "file": "398700_5646160.laz",
+            "model": "species_replay_FM_1cm",
+            "stage": "final_survivors",
+            "radius_m": 0.017320508075688773,
+            "total": 213148,
+            "matched": 213148,
+            "max_matched_distance_m": 0.014525839121851986,
+            "distance_histogram": [
+              209243,
+              3122,
+              776,
+              7,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.004330127018922193,
+              0.008660254037844387,
+              0.01299038105676658,
+              0.017320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_FM"
+          },
+          {
+            "file": "398720_5646160.laz",
+            "model": "species_replay_SAT_1cm",
+            "stage": "final_survivors",
+            "radius_m": 0.017320508075688773,
+            "total": 654451,
+            "matched": 654451,
+            "max_matched_distance_m": 0.014071247359292995,
+            "distance_histogram": [
+              642096,
+              9786,
+              2556,
+              13,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.004330127018922193,
+              0.008660254037844387,
+              0.01299038105676658,
+              0.017320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_SAT"
+          },
+          {
+            "file": "398720_5646160.laz",
+            "model": "species_replay_FM_1cm",
+            "stage": "final_survivors",
+            "radius_m": 0.017320508075688773,
+            "total": 654451,
+            "matched": 654451,
+            "max_matched_distance_m": 0.014071247359292995,
+            "distance_histogram": [
+              642096,
+              9787,
+              2555,
+              13,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.004330127018922193,
+              0.008660254037844387,
+              0.01299038105676658,
+              0.017320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_FM"
+          }
+        ]
+      },
+      {
+        "name": "1cm_workers4_cache32/398700_5646160.laz",
+        "passed": true,
+        "points": 213148,
+        "all_fields_equal_to_independent_oracle_accepted_reference": true,
+        "metadata_and_original_geometry_preserved": true
+      },
+      {
+        "name": "1cm_workers4_cache32/398720_5646160.laz",
+        "passed": true,
+        "points": 654451,
+        "all_fields_equal_to_independent_oracle_accepted_reference": true,
+        "metadata_and_original_geometry_preserved": true
+      },
+      {
+        "name": "10cm_workers1_cache0_exit",
+        "passed": true
+      },
+      {
+        "name": "10cm_workers1_cache0_coverage",
+        "passed": true,
+        "original_coverage": [
+          {
+            "file": "398700_5646160.laz",
+            "model": "species_replay_SAT_10cm",
+            "stage": "final_survivors",
+            "radius_m": 0.17320508075688773,
+            "total": 213148,
+            "matched": 213148,
+            "max_matched_distance_m": 0.11820744474426562,
+            "distance_histogram": [
+              160703,
+              52150,
+              295,
+              0,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.04330127018922193,
+              0.08660254037844387,
+              0.1299038105676658,
+              0.17320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_SAT"
+          },
+          {
+            "file": "398700_5646160.laz",
+            "model": "species_replay_FM_10cm",
+            "stage": "final_survivors",
+            "radius_m": 0.17320508075688773,
+            "total": 213148,
+            "matched": 213148,
+            "max_matched_distance_m": 0.11820744474426562,
+            "distance_histogram": [
+              160680,
+              52171,
+              297,
+              0,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.04330127018922193,
+              0.08660254037844387,
+              0.1299038105676658,
+              0.17320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_FM"
+          },
+          {
+            "file": "398720_5646160.laz",
+            "model": "species_replay_SAT_10cm",
+            "stage": "final_survivors",
+            "radius_m": 0.17320508075688773,
+            "total": 654451,
+            "matched": 654451,
+            "max_matched_distance_m": 0.130065368104108,
+            "distance_histogram": [
+              490985,
+              162719,
+              746,
+              1,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.04330127018922193,
+              0.08660254037844387,
+              0.1299038105676658,
+              0.17320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_SAT"
+          },
+          {
+            "file": "398720_5646160.laz",
+            "model": "species_replay_FM_10cm",
+            "stage": "final_survivors",
+            "radius_m": 0.17320508075688773,
+            "total": 654451,
+            "matched": 654451,
+            "max_matched_distance_m": 0.130065368104108,
+            "distance_histogram": [
+              490855,
+              162850,
+              745,
+              1,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.04330127018922193,
+              0.08660254037844387,
+              0.1299038105676658,
+              0.17320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_FM"
+          }
+        ]
+      },
+      {
+        "name": "10cm_workers1_cache0/398700_5646160.laz",
+        "passed": true,
+        "points": 213148,
+        "all_fields_equal_to_independent_oracle_accepted_reference": true,
+        "metadata_and_original_geometry_preserved": true
+      },
+      {
+        "name": "10cm_workers1_cache0/398720_5646160.laz",
+        "passed": true,
+        "points": 654451,
+        "all_fields_equal_to_independent_oracle_accepted_reference": true,
+        "metadata_and_original_geometry_preserved": true
+      },
+      {
+        "name": "10cm_workers4_cache32_exit",
+        "passed": true
+      },
+      {
+        "name": "10cm_workers4_cache32_coverage",
+        "passed": true,
+        "original_coverage": [
+          {
+            "file": "398700_5646160.laz",
+            "model": "species_replay_SAT_10cm",
+            "stage": "final_survivors",
+            "radius_m": 0.17320508075688773,
+            "total": 213148,
+            "matched": 213148,
+            "max_matched_distance_m": 0.11820744474426562,
+            "distance_histogram": [
+              160703,
+              52150,
+              295,
+              0,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.04330127018922193,
+              0.08660254037844387,
+              0.1299038105676658,
+              0.17320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_SAT"
+          },
+          {
+            "file": "398700_5646160.laz",
+            "model": "species_replay_FM_10cm",
+            "stage": "final_survivors",
+            "radius_m": 0.17320508075688773,
+            "total": 213148,
+            "matched": 213148,
+            "max_matched_distance_m": 0.11820744474426562,
+            "distance_histogram": [
+              160680,
+              52171,
+              297,
+              0,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.04330127018922193,
+              0.08660254037844387,
+              0.1299038105676658,
+              0.17320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_FM"
+          },
+          {
+            "file": "398720_5646160.laz",
+            "model": "species_replay_SAT_10cm",
+            "stage": "final_survivors",
+            "radius_m": 0.17320508075688773,
+            "total": 654451,
+            "matched": 654451,
+            "max_matched_distance_m": 0.130065368104108,
+            "distance_histogram": [
+              490985,
+              162719,
+              746,
+              1,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.04330127018922193,
+              0.08660254037844387,
+              0.1299038105676658,
+              0.17320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_SAT"
+          },
+          {
+            "file": "398720_5646160.laz",
+            "model": "species_replay_FM_10cm",
+            "stage": "final_survivors",
+            "radius_m": 0.17320508075688773,
+            "total": 654451,
+            "matched": 654451,
+            "max_matched_distance_m": 0.130065368104108,
+            "distance_histogram": [
+              490855,
+              162850,
+              745,
+              1,
+              0
+            ],
+            "histogram_upper_bounds_m": [
+              0.04330127018922193,
+              0.08660254037844387,
+              0.1299038105676658,
+              0.17320508075688773
+            ],
+            "missing_examples": [],
+            "match_instance_dimension": "PredInstance_FM"
+          }
+        ]
+      },
+      {
+        "name": "10cm_workers4_cache32/398700_5646160.laz",
+        "passed": true,
+        "points": 213148,
+        "all_fields_equal_to_independent_oracle_accepted_reference": true,
+        "metadata_and_original_geometry_preserved": true
+      },
+      {
+        "name": "10cm_workers4_cache32/398720_5646160.laz",
+        "passed": true,
+        "points": 654451,
+        "all_fields_equal_to_independent_oracle_accepted_reference": true,
+        "metadata_and_original_geometry_preserved": true
+      },
+      {
+        "name": "fixture_hashes_unchanged",
+        "passed": true
+      }
+    ],
+    "prior_accepted_report_sha256": "39045ab42968f787949af9aeae791d91992e1f64f47829834c15379a04c96430",
+    "fixture_sha256": {
+      "/previous/instance-metadata-preserved/originals_without_sat_fm_species/398700_5646160.laz": "646fc1a2fc5f8766b9e829c2dccb20a9376d9cb410ec40bf5d2f954996884ee2",
+      "/previous/instance-metadata-preserved/originals_without_sat_fm_species/398720_5646160.laz": "80c214da53b1fb67f7fb68d462eaab0299822c599c7da54629386bcb6654184f",
+      "/previous/instance-metadata-preserved/remapped_1cm/398700_5646160.laz": "2f6478ec80da59990c783e142a155c908475b72bfad983eee16f7e0b727357a2",
+      "/previous/instance-metadata-preserved/remapped_1cm/398720_5646160.laz": "3e8e23ec4e72e9f3ba464fb21ab3fc33614d00790930619ca13dba762e127067",
+      "/previous/instance-metadata-preserved/species_replay_SAT_1cm/c00_r00.laz": "e1b0e2b8f3b4e2c3873ce50003b53679fc7053a0e8b8054138994a4134bc290d",
+      "/previous/instance-metadata-preserved/species_replay_SAT_1cm/c01_r00.laz": "8f340dedc73d7c07c9829f707f07b9f6cc5b088b45a10dd3b47a3484d6d950ac",
+      "/previous/instance-metadata-preserved/species_replay_SAT_1cm/c02_r00.laz": "8cf392800fbc8656a6aad4e3fefdd83ab7c14cd58907b0bef69d2c94a37b0eaf",
+      "/previous/instance-metadata-preserved/species_replay_SAT_1cm/c03_r00.laz": "48adc95207f47c38f2e291c257ae68cf04626e4e80f5f9af5f7cdf2b7e7f4763",
+      "/previous/instance-metadata-preserved/species_replay_FM_1cm/c00_r00.laz": "8e39cdb79a597a1e8c4ca61b20e0f0c0717c938a132c91ff1082abbd56a25ac1",
+      "/previous/instance-metadata-preserved/species_replay_FM_1cm/c01_r00.laz": "29f6552d6cb1b225a9ef1badfee8e9dd9d4f0ada91bc2609984f5b89f8d35f16",
+      "/previous/instance-metadata-preserved/species_replay_FM_1cm/c02_r00.laz": "9b60241816f6fd199d472e5e6b95a78e39257bf4f1bb68d4822dfc796e551bb9",
+      "/previous/instance-metadata-preserved/species_replay_FM_1cm/c03_r00.laz": "b9fcc152a8fc70f9a881d15778094d2a9740c23c701c66197bc97721a269c337",
+      "/previous/instance-metadata-preserved/remapped_10cm/398700_5646160.laz": "eab5a038e724013b41f901c6ef24475d16966827281f365169a7c1d38eca121d",
+      "/previous/instance-metadata-preserved/remapped_10cm/398720_5646160.laz": "3173b0ac3d1ef1124ec1f671630d6383d6aef2c282dc17c821920867abc4e481",
+      "/previous/instance-metadata-preserved/species_replay_SAT_10cm/c00_r00.laz": "5d91fa321749a8a40e5a248432cfc812a83a76913a9eb945eb241a8a0fbe72a6",
+      "/previous/instance-metadata-preserved/species_replay_SAT_10cm/c01_r00.laz": "f3d14b0ec3bb6ad27e41fa832881a4066dd1cd4d5f225c51fc075b72d488972d",
+      "/previous/instance-metadata-preserved/species_replay_SAT_10cm/c02_r00.laz": "e2fb69d1c037a8cd0a25b4c07052d5593b7d7f494b75af32e5c8622c00a893e3",
+      "/previous/instance-metadata-preserved/species_replay_SAT_10cm/c03_r00.laz": "b8caeac53aa125c7709675ff80d467095d9a3bae7c559290fa617cecb046c0c2",
+      "/previous/instance-metadata-preserved/species_replay_FM_10cm/c00_r00.laz": "238cce14944f343b5680313654a7b7ec71c33fab05b66cbf4b100163f144365f",
+      "/previous/instance-metadata-preserved/species_replay_FM_10cm/c01_r00.laz": "f1bbd8c57b657f7e52982341cd83a352cbb45f04fc08b2facf20b84fab9f8592",
+      "/previous/instance-metadata-preserved/species_replay_FM_10cm/c02_r00.laz": "e8ab961881cb8acf3d5ff4204a02052689a424190ba0c41149cd11ccbd779525",
+      "/previous/instance-metadata-preserved/species_replay_FM_10cm/c03_r00.laz": "a2bd330026138d8f6622e8e84c241a6489033ec81736a1d85c34d7461a4c401e"
+    },
+    "elapsed_seconds": 34.157785234972835,
+    "status": "passed",
+    "peak_rss_kib": 267308,
+    "memory.peak": "1002389504",
+    "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+    "cpu.stat": "usage_usec 49026526\nuser_usec 44120771\nsystem_usec 4905754\ncore_sched.force_idle_usec 0\nnr_periods 346\nnr_throttled 6\nthrottled_usec 23044\nnr_bursts 0\nburst_usec 0"
+  },
+  "source_and_snapshot_file_checks_passed": 332,
+  "outputs_sha256": {
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/remap/10cm_workers1_cache0/398700_5646160.laz": "eab5a038e724013b41f901c6ef24475d16966827281f365169a7c1d38eca121d",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/remap/10cm_workers1_cache0/398720_5646160.laz": "3173b0ac3d1ef1124ec1f671630d6383d6aef2c282dc17c821920867abc4e481",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/remap/10cm_workers4_cache32/398700_5646160.laz": "eab5a038e724013b41f901c6ef24475d16966827281f365169a7c1d38eca121d",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/remap/10cm_workers4_cache32/398720_5646160.laz": "3173b0ac3d1ef1124ec1f671630d6383d6aef2c282dc17c821920867abc4e481",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/remap/1cm_workers1_cache0/398700_5646160.laz": "2f6478ec80da59990c783e142a155c908475b72bfad983eee16f7e0b727357a2",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/remap/1cm_workers1_cache0/398720_5646160.laz": "3e8e23ec4e72e9f3ba464fb21ab3fc33614d00790930619ca13dba762e127067",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/remap/1cm_workers4_cache32/398700_5646160.laz": "2f6478ec80da59990c783e142a155c908475b72bfad983eee16f7e0b727357a2",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/remap/1cm_workers4_cache32/398720_5646160.laz": "3e8e23ec4e72e9f3ba464fb21ab3fc33614d00790930619ca13dba762e127067",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/direct/prod_merged_10cm.ply": "9289435f85eae4e7d51c7f1cc67f133d8396711ca00b05fc26d9a382235ff778",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/direct/prod_merged_10cm.copc.laz": "6a7b1d4f60d0796ce61738b0e3c6c62af38e7468f3a868a9ff911bdaf131d7ed",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/direct/merged.ply": "f127ae552d2422f8c390c8dc56dd3c79bddd3c697ed09373f8a6a5b73eb06b5c",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/direct/merged.copc.laz": "4d8c04045531cf8f4074c01a5a2654333eba928348ed88fa9bde77eef7e13380",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/direct/merged.laz": "d4f0f8bb75ad3201e9dfb7be5422029a20f7c8bb3eea712e4ee3fdba6398aa51",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/direct/prod_merged_10cm.laz": "60359595179462e73266692995b745617517ee6b4e564ed67aa99aafa48600ca",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/joined/prod_merged_10cm.ply": "dc084abf7ec6885e539243dbd6d4fce814e9cf55a7b2f5b2239e16f9a8b9b724",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/joined/prod_merged_10cm.copc.laz": "57f93886ef0b5d0e17385f306416fd0c2ee5254a8b4ea862699ae8e193c071c8",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/joined/merged.ply": "f127ae552d2422f8c390c8dc56dd3c79bddd3c697ed09373f8a6a5b73eb06b5c",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/joined/merged.copc.laz": "48cffb8f96da0a09acd2dea46c6ce23f0a7d171ad0273c30d47df0542af6b1c3",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/joined/merged.laz": "d4f0f8bb75ad3201e9dfb7be5422029a20f7c8bb3eea712e4ee3fdba6398aa51",
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/joined/prod_merged_10cm.laz": "a457dc849f2539e0a7e94a3e2d23fbec4a80af0cdf5f53a4383c6614b77e4375"
+  },
+  "artifacts": {
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/source-manifest.json": {
+      "sha256": "7ead5f930d4af9ac4b4f01f6043cbe074e716326aa567468fe4dc5b6121f5529",
+      "bytes": 18151
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/source-verification.json": {
+      "sha256": "bdfcdc15dbbcdf49c8a1764c5218e83cf176ba344066f198f0e031070fed14cf",
+      "bytes": 64511
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/driver_suite.py": {
+      "sha256": "c6557a5b7acbebeee46d4db3cd65b38505c07ba6757a886d78a5cb5288301915",
+      "bytes": 1166
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/run_suite.sh": {
+      "sha256": "bf67c1310c009af65510b920aee9cef8a6acd3f98f2b9ce1afe6a76300e7dcd7",
+      "bytes": 874
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/run_gfz.sh": {
+      "sha256": "7fc64755c1dd3028c96102987fd4c4617a90d9c0a2ac2d440944ce24ceef30b5",
+      "bytes": 1047
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/validate_products.py": {
+      "sha256": "134d66062142d78d01d9314368c7a688706c2db82658a202b17de006b85b88c5",
+      "bytes": 11949
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/validate_remap.py": {
+      "sha256": "f43f45df9538ff1612ca5d6c08605f52b778ec418b4585b5fd86f3740b0b7212",
+      "bytes": 5811
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/logs/tool-tests.log": {
+      "sha256": "c3d48a20398492168dfa715f5c2cc7015dc848428e4376e17e779132ec8a4844",
+      "bytes": 674
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/tool-tests.xml": {
+      "sha256": "5b34da8ec72e78ecc0aa4ae3923dc40e339136104b4f52e13801534f2a26b7ee",
+      "bytes": 75386
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/metrics/tool-suite.json": {
+      "sha256": "4555050e1fad7abd0cb0360408ec8e6d2a112c1c6956e1649393d946f5074127",
+      "bytes": 703
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products/report.json": {
+      "sha256": "af5d16ddae536db26a0af48781c83f1142aebec4645e396092e12439005fec6f",
+      "bytes": 36467
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/remap/report.json": {
+      "sha256": "d92447c554ddb72654b95e6f09181a18238a106171a4d1b8e74d71894505e17f",
+      "bytes": 39914
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products-harness-setup-failed/report.json": {
+      "sha256": "ad025f327442e7466defcd76f65f709b65def5f591b0bedb8a2108dd98230b8e",
+      "bytes": 20412
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/products-harness-comparison-failed/report.json": {
+      "sha256": "2bf2902e21d683736862a77ba91105cda46978949ec9f5e7a9e15e12c003aee2",
+      "bytes": 24422
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/validate_products.initial.py": {
+      "sha256": "c5fe09f312d0201cc6d93e117f580bc7e2ddcd7770ca41cffd29602d3e7315fb",
+      "bytes": 11769
+    },
+    "/mnt/ssds/kg281/smarttile-remap-export-fixes-20261013/validate_products.second.py": {
+      "sha256": "01a5c4f4b3a348a36dd840b2ed0c420ca13a94fed8dc4012a9f044fef2f283aa",
+      "bytes": 11944
+    },
+    "/mnt/ssds/kg281/smarttile-metadata-fix-20261013/final/red.log": {
+      "sha256": "17eb7cba87d4afd533b8c7f00c791203229944815f6091dc370f26cecb3a4338",
+      "bytes": 2931
+    },
+    "/mnt/ssds/kg281/smarttile-metadata-fix-20261013/final/red.xml": {
+      "sha256": "da204d9785ccfaeee55275235cbe4c31f8fe0951ba4a03d3fbb1408720109b11",
+      "bytes": 2375
+    },
+    "/mnt/ssds/kg281/smarttile-metadata-fix-20261013/final/green.log": {
+      "sha256": "57b87f037ad9541ac0e8851c6cfdff8204f8d70d78ed8f6a885b704d1fca2a85",
+      "bytes": 188
+    },
+    "/mnt/ssds/kg281/smarttile-metadata-fix-20261013/final/green.xml": {
+      "sha256": "e88e417f482213ffcdcc4ab142d097ff44d707a81f8b0e80cdfee552878f6588",
+      "bytes": 14207
+    },
+    "/mnt/ssds/kg281/smarttile-metadata-fix-20261013/final/results.json": {
+      "sha256": "bd722ed56fc18fd52a15637282b31211a7bc8b25f73cce03cc47bdaf0054473b",
+      "bytes": 949
+    },
+    "/mnt/ssds/kg281/smarttile-metadata-fix-20261013/narrowing-followup.json": {
+      "sha256": "4486bd264b0f0d05b2f9ca031253e8b5c1a51f655a2d4f1f26ec27a997d04ab5",
+      "bytes": 1191
+    },
+    "/mnt/ssds/kg281/smarttile-matching-tie-fix-20261013/evidence.json": {
+      "sha256": "baa595a9ee1bf44bc8b2e395362cd13c2ddcee369ffa406fca513585ce0e967c",
+      "bytes": 2773
+    },
+    "/mnt/ssds/kg281/smarttile-ply-uint32-fix-20261013/final-focused.xml": {
+      "sha256": "174fc71112474c99cf8a7499008abf98deb814fe03bd38151e41b2c9d0d0ff6a",
+      "bytes": 4431
+    }
+  },
+  "limitations": [
+    "GFZ crop has no actual sentinel-valued points; dedicated integration tests cover real missing points through all four LAS/LAZ/COPC product paths.",
+    "Remap compares every field against prior independently accepted GFZ references; new synthetic regressions establish tie correctness across batch/cache/worker arrangements.",
+    "PLY exports point properties and a CRS comment; LAS ExtraBytes no_data declarations are not part of PLY.",
+    "Subsampled PLY with a preexisting uint64 index still rejects explicitly; the uint32 conversion applies to full-resolution PLY.",
+    "No new full 16,426,961-point filter rerun; prior boundary-fix acceptance is retained separately.",
+    "Hard dense-cell memory bounds and downstream workflow/release certification remain outside this acceptance."
+  ],
+  "retained_harness_failures": [
+    "Initial authority-only CRS check rejected the custom GFZ WKT before launching SmartTile.",
+    "Second harness passed direct full exports but failed constructing a NumPy void dtype for subsampled comparison. Both corrected harness versions and reports are retained; no tool source change resulted."
+  ]
+}

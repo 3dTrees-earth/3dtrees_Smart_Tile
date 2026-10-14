@@ -1,22 +1,11 @@
-#!/usr/bin/env python3
-"""
-Load tindex, compute tile/grid metadata, and emit both the JSON summary
-and a per-tile job list that can be consumed by retiling.sh.
-
-This wraps get_bounds_from_tindex.py so the bash script can stay cleaner.
-"""
+"""Write the per-tile job list (label, projected and geographic bounds) from the bounds JSON."""
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
-import subprocess
 import sys
-import argparse
+from pathlib import Path
 from typing import List, Tuple
-
-
-DEFAULT_BOUNDS_JSON = Path("tile_bounds_tindex.json")
 
 
 def _transformer_from_crs(srs: str):
@@ -31,40 +20,6 @@ def _transformer_from_crs(srs: str):
         )
         return None
     return Transformer.from_crs(srs, "EPSG:4326", always_xy=True)
-
-
-def run_get_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, bounds_json_path: Path) -> dict:
-    cmd = [
-        sys.executable,
-        str(Path(__file__).with_name("get_bounds_from_tindex.py")),
-        str(tindex_path),
-        f"--tile-length={tile_length}",
-        f"--tile-buffer={tile_buffer}",
-        f"--out={bounds_json_path}",
-    ]
-    print(f"[prepare_tile_jobs] running: {' '.join(cmd)}", file=sys.stderr)
-    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-
-    if completed.returncode != 0:
-        # Print the full error message
-        if completed.stderr:
-            print(f"[prepare_tile_jobs] Error output:", file=sys.stderr)
-            print(completed.stderr, file=sys.stderr)
-        if completed.stdout:
-            print(f"[prepare_tile_jobs] Standard output:", file=sys.stderr)
-            print(completed.stdout, file=sys.stderr)
-        raise RuntimeError(
-            f"get_bounds_from_tindex.py failed with exit code {completed.returncode}.\n"
-            f"stderr: {completed.stderr}\n"
-            f"stdout: {completed.stdout}"
-        )
-
-    env = {}
-    for line in completed.stdout.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            env[key.strip()] = value.strip().strip('"')
-    return env
 
 
 def write_job_list(bounds_json: Path, job_file: Path) -> None:
@@ -108,42 +63,3 @@ def write_job_list(bounds_json: Path, job_file: Path) -> None:
     # Ensure the file ends with a newline so shell read loops don't drop the last tile.
     job_file.write_text("\n".join(lines) + "\n")
     print(f"[prepare_tile_jobs] wrote {len(lines)} jobs to {job_file}", file=sys.stderr)
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Prepare tile job list and bounds env from tindex.")
-    parser.add_argument("tindex_path", type=Path, help="Path to the tindex shapefile")
-    parser.add_argument("--tile-length", type=float, default=40.0)
-    parser.add_argument("--tile-buffer", type=float, default=5.0)
-    parser.add_argument(
-        "--grid-offset",
-        type=float,
-        default=1.0,
-        help="Accepted for compatibility with tile_tindex.py; tiling remains data-aligned.",
-    )
-    parser.add_argument(
-        "--jobs-out",
-        type=Path,
-        default=Path("tile_jobs.txt"),
-    )
-    parser.add_argument(
-        "--bounds-out",
-        type=Path,
-        default=DEFAULT_BOUNDS_JSON,
-        help="Path to write the tile bounds JSON file",
-    )
-    args = parser.parse_args()
-
-    env = run_get_bounds(args.tindex_path, args.tile_length, args.tile_buffer, args.bounds_out)
-    bounds_json = args.bounds_out
-    write_job_list(bounds_json, args.jobs_out)
-
-    print(f"tile_jobs_file={args.jobs_out}")
-    print(f"tile_bounds_file={bounds_json}")
-    print(f"tile_count={env.get('tile_count')}")
-    print(f"crop_bounds=\"{env.get('crop_bounds')}\"")
-    print(f"reader_bounds=\"{env.get('reader_bounds')}\"")
-
-
-if __name__ == "__main__":  # pragma: no cover
-    main()

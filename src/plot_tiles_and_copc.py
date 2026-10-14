@@ -7,7 +7,6 @@ Shows input LAZ/LAS file extents and output tiles on the same plot.
 import json
 import sys
 from pathlib import Path
-import argparse
 
 try:
     import fiona
@@ -213,41 +212,3 @@ def plot_extents(tindex_path: Path, tile_bounds_json: Path, output_png: Path):
 
     # Optionally show plot
     # plt.show()
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Visualize source file extents and generated tile extents"
-    )
-    parser.add_argument(
-        "tindex_path",
-        type=Path,
-        help="Path to tindex file (shapefile or GeoPackage)"
-    )
-    parser.add_argument(
-        "tile_bounds_json",
-        type=Path,
-        help="Path to tile_bounds_tindex.json"
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("tiles_and_copc_visualization.png"),
-        help="Output PNG file path"
-    )
-    args = parser.parse_args()
-
-    if not args.tindex_path.exists():
-        print(f"ERROR: Tindex file not found: {args.tindex_path}")
-        sys.exit(1)
-
-    if not args.tile_bounds_json.exists():
-        print(f"ERROR: Tile bounds JSON not found: {args.tile_bounds_json}")
-        sys.exit(1)
-
-    plot_extents(args.tindex_path, args.tile_bounds_json, args.output)
-
-
-if __name__ == "__main__":
-    main()
-
