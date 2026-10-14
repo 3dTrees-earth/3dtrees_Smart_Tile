@@ -17,8 +17,16 @@ floating drift and the reproduced gap at X=0.3 m in a ten-chunk input.
 
 ## Validation
 
-**515 tests passed**, zero failures/errors/skips, in the existing local scientific
-environment (Python 3.11, NumPy 2.3.5, laspy 2.6.1, pytest 8.3.5).
+**Final image: 1,016 tests and 94 subtests passed** (1,110 JUnit cases), zero
+failures/errors/skips, in 142.73 seconds. The full suite ran without network
+access, with 10 CPUs, 50 GiB RAM and SSD scratch. All 57 source files match the
+image below and source commit `a539134`. Reports: `final-full-suite.xml` and
+`final-full-suite.log` under `/tmp/smarttile-premerge-20261015`; checksums are in
+the accompanying JSON record.
+
+The earlier targeted suite passed **515 tests**, zero failures/errors/skips, in
+the existing local scientific environment (Python 3.11, NumPy 2.3.5, laspy 2.6.1,
+pytest 8.3.5).
 
 The 20-point fixture from the earlier Galaxy failure now produces **4 SAT and
 2 ForestMamba representatives at 10 cm**; ordinary spatial sampling produces 2.
@@ -54,5 +62,5 @@ record and interrupted build logs remain preserved. New evidence is under
 `/tmp/smarttile-premerge-20261015`, including `galaxy-final-oracle/evidence.json` and
 `final-image-source-check.json`.
 
-These focused tests do not replace the full release canary or production
+These local tests do not replace the full release canary or production
 promotion under 3DT-1903. No new full GFZ inference/remap run is claimed.

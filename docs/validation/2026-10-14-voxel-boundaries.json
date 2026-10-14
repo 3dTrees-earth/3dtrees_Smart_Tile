@@ -1,5 +1,5 @@
 {
-  "status": "image_and_galaxy_validated",
+  "status": "full_suite_image_and_galaxy_validated",
   "issue": "3DT-2391",
   "tests": {
     "tests": "515",
@@ -310,5 +310,29 @@
     "runtime_ast_equal": true,
     "tested_sha256": "a142e84858ad64dedc05e937d92ea0663dc1c61134191a49672c1af937e5c9c0",
     "final_sha256": "b9e781e786844c2a4a5d4d089d4dfe44698937a95feeea41874b454b3190b063"
+  },
+  "final_full_suite": {
+    "status": "passed",
+    "validation_date": "2026-10-15",
+    "source_commit": "a5391349de1fba605b4a8c216316c1e499c9dbbe",
+    "image": "sha256:41cd03e0f991669efdac8b0128ed53fc31fdae0f9f56528c48526b207ccbf018",
+    "tests_passed": 1016,
+    "subtests_passed": 94,
+    "junit_cases": 1110,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "elapsed_seconds": 142.73,
+    "resources": {
+      "cpus": 10,
+      "memory_gib": 50,
+      "network": "none",
+      "scratch": "SSD bind mount"
+    },
+    "junit_xml": "/tmp/smarttile-premerge-20261015/final-full-suite.xml",
+    "junit_sha256": "11e9500d45fe2a4df8189c24fb0093d180e5dd3aac288c744252be46283b1876",
+    "log": "/tmp/smarttile-premerge-20261015/final-full-suite.log",
+    "log_sha256": "e2c1f431fc7a26ae29ec59254a748926878d9e7c1afd0f00afa0929b911ad689",
+    "command": "python -m pytest -q -p no:cacheprovider /tests --junitxml=/artifacts/final-full-suite.xml"
   }
 }

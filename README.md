@@ -32,9 +32,11 @@ the original points. It also builds merged analysis products from those original
 
 **v2.4 status:** the tested local SmartTile paths and the GFZ COPC → ForestStructure
 handoff pass the recorded acceptance checks. Production release still requires
-the exact release-image workflow/visualization canary and exact dataset 3110/3111
-replays. Dense-cell memory targets are soft; successful capped GFZ runs establish
-a measured workload envelope, not a density-independent memory bound. See
+the exact release-image workflow/visualization canary and resolution of the
+remaining failure classifications under 3DT-1902. Each confirmed error group
+requires one passing representative replay. Dense-cell memory targets are soft;
+successful capped GFZ runs establish a measured workload envelope, not a
+density-independent memory bound. See
 [local validation and remaining release checks](#local-validation).
 
 ### The three workflows
@@ -696,11 +698,12 @@ Subsampled products are reproducible. PDAL only reads and merges each chunk; Sma
 
 ### Local Validation
 
-The voxel-boundary correction passes **515 targeted tests**, including the
-20-point regression (4 SAT / 2 ForestMamba representatives at 10 cm), both tiling
-modes and merged-product sampling. The corrected image and independent live
-Galaxy replay also pass; see the validation record for the exact image identity.
-See [voxel-boundary fix validation](docs/validation/2026-10-14-voxel-boundaries.md).
+The final v2.4 image passes the complete suite: **1,016 tests and 94 subtests**,
+with zero failures, errors or skips. The independent live Galaxy replay also
+passes, including the 20-point voxel-boundary regression (4 SAT / 2 ForestMamba
+representatives at 10 cm). All 57 embedded Python files match the reviewed
+source. See [voxel-boundary fix validation](docs/validation/2026-10-14-voxel-boundaries.md)
+for the immutable image, resource limits and evidence.
 
 The current coarse-only acceptance passes on cached GFZ SAT and ForestMamba
 10 cm tiles: **8,280,988 input records per model**, zero unsupported positive
