@@ -33,9 +33,11 @@ flowchart TD
 ```
 
 Galaxy exposes the same four tasks; its **Filter / merge segmented tiles** tool
-is `merge` and returns processed tiles and RCT companions. Original enrichment
-and products use the separate Remap and Create merged file tools; the CLI merge
-can also enrich originals when `--original-laz-input-dir` is given.
+is `merge` and returns processed tiles and RCT companions. Its **Remap target**
+is either subsampled tiles (optional; empty filters at the segmented voxel size)
+or the original files, which merge then enriches like `remap`
+(`--original-laz-input-dir`). Several models and products use the Remap and
+Create merged file tools.
 
 `merge --segmented-remapped-folder` accepts predictions that already lie on the
 dense geometry and skips the transfer. With `--resolution-1` set to their
@@ -146,7 +148,7 @@ for whole instances from two segmentations: the first dimension uses
 `instance_dim2/subsampled_res1/`, …. Each collection keeps only its own instance
 field plus requested attributes. Original resolution keeps duplicate points and
 the source coordinate grid; incompatible grids fail. After species annotation,
-remap with `--prediction-resolution-original` (Galaxy: **Prediction resolution →
+remap with `--prediction-resolution-original` (Galaxy: **Resolution of the predictions →
 Original resolution**) and `--match-instances`: coordinates match within LAS
 encoding precision and every original point must match for all models.
 
