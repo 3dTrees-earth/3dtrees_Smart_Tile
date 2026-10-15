@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.4.0 - unreleased
+## v2.4.0 - 2026-10-15
 
 ### Correctness
 - Merge output tiles have distinct instances: every instance ID is in exactly one tile (split reconciled instances move whole into the tile whose core holds their centroid; points are moved, never dropped), so DetailView sees each tree once. v2.3 retiled labels onto the buffered tiles, so border trees reached DetailView in two tiles. Output tiles are named `cXX_rYY.laz`.
