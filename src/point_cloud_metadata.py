@@ -426,7 +426,11 @@ def point_cloud_files(directory: Optional[Path]) -> List[Path]:
     for path in files:
         key = point_cloud_source_key(path)
         existing = by_source.get(key)
-        if existing is None or path.name.lower().endswith(".copc.laz"):
+        is_copc = path.name.lower().endswith(".copc.laz")
+        if existing is not None and existing.name.lower().endswith(".copc.laz") == is_copc:
+            # e.g. Plot1.las and plot1.laz: two sources, one key; never drop one silently.
+            raise ValueError(f"{existing.name} and {path.name} name the same source; rename one of them")
+        if existing is None or is_copc:
             by_source[key] = path
     return [by_source[key] for key in sorted(by_source)]
 
@@ -434,7 +438,20 @@ def point_cloud_files(directory: Optional[Path]) -> List[Path]:
 def raw_point_cloud_files(directory: Optional[Path]) -> List[Path]:
     """Return only non-COPC LAS/LAZ point-cloud files."""
     files = _point_cloud_paths(directory)
-    return [path for path in files if not path.name.lower().endswith(".copc.laz")]
+    raw = [path for path in files if not path.name.lower().endswith(".copc.laz")]
+    keys = {}
+    for path in raw:
+        key = point_cloud_source_key(path)
+        if key in keys:
+            raise ValueError(f"{keys[key].name} and {path.name} name the same source; rename one of them")
+        keys[key] = path
+    return raw
+
+
+def copc_only_files(directory: Optional[Path]) -> List[Path]:
+    """Return COPC files whose source has no LAS/LAZ twin in ``directory``."""
+    raw_keys = {point_cloud_source_key(path) for path in raw_point_cloud_files(directory)}
+    return [path for path in copc_files(directory) if point_cloud_source_key(path) not in raw_keys]
 
 
 def copc_files(directory: Optional[Path]) -> List[Path]:

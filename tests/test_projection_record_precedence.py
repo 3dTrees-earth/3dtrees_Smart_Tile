@@ -1,6 +1,5 @@
 """Every output carries exactly one standardized CRS record (3DT-2200 class)."""
 import laspy
-import numpy as np
 from laspy.vlrs.known import WktCoordinateSystemVlr
 from laspy.vlrs.vlrlist import VLRList
 from pyproj import CRS

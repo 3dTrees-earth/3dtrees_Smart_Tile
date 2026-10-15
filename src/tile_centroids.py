@@ -186,7 +186,7 @@ def _spill_range(task):
     core_counts = np.zeros(len(tiles), dtype=np.int64)
     full_mask = np.uint8((1 << len(resolutions)) - 1)
     name = f"{task_id:06d}.bin"
-    read = 0
+    read = uncovered = 0
     with laspy.open(source, **kwargs) as reader:
         reader.seek(start)
         while read < count:
@@ -197,16 +197,21 @@ def _spill_range(task):
             x, y, z = np.asarray(chunk.x), np.asarray(chunk.y), np.asarray(chunk.z)
             candidates = np.flatnonzero((bounds[:, 2] >= x.min()) & (bounds[:, 0] <= x.max())
                                         & (bounds[:, 3] >= y.min()) & (bounds[:, 1] <= y.max()))
+            covered = np.zeros(len(x), dtype=bool)
             for i in candidates:
                 xmin, ymin, xmax, ymax = bounds[i]
                 rows = np.flatnonzero((x >= xmin) & (x <= xmax) & (y >= ymin) & (y <= ymax))
                 if not len(rows):
                     continue
                 tile = tiles[i]
-                if tile.core is not None:
+                if tile.core is None:
+                    covered[rows] = True
+                else:
                     cx0, cy0, cx1, cy1 = tile.core
                     xs, ys = x[rows], y[rows]
-                    core_counts[i] += int(np.count_nonzero((xs >= cx0) & (xs <= cx1) & (ys >= cy0) & (ys <= cy1)))
+                    in_core = (xs >= cx0) & (xs <= cx1) & (ys >= cy0) & (ys <= cy1)
+                    core_counts[i] += int(np.count_nonzero(in_core))
+                    covered[rows[in_core]] = True
                 records = np.empty(len(rows), dtype=RECORD)
                 for axis, values in zip(("X", "Y", "Z"), (x, y, z)):
                     index = "XYZ".index(axis)
@@ -218,7 +223,18 @@ def _spill_range(task):
                 routed["m"] = bits
                 _write_blocks(Path(spill_dir) / tile.label, name, routed, block_ids)
                 counts[i] += len(rows)
-    return counts, core_counts
+            uncovered += int(np.count_nonzero(~covered))
+    return counts, core_counts, uncovered
+
+
+def tile_offsets(bounds, z_offset):
+    """LAS offsets of a tile: its centre in whole metres, and the source Z offset.
+
+    Voxel keys read offsets as decimals, so a float midpoint such as
+    32704.229999999996 would floor points on voxel faces into the lower voxel.
+    """
+    return (float(round((bounds[0] + bounds[2]) / 2.0)), float(round((bounds[1] + bounds[3]) / 2.0)),
+            float(z_offset))
 
 
 def _round_half_even(numerator, denominator):
@@ -521,7 +537,7 @@ def _fragments_to_copc(directory, target, template, metadata_source, expected):
 
 
 def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, metadata_source,
-                         converters=2, nearest=False):
+                         converters=2, nearest=False, require_coverage=False):
     """Write original or subsampled outputs for every tile from one source scan.
 
     With `nearest`, each voxel keeps the original point nearest its mean
@@ -533,7 +549,8 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
     Tiles with a `core` and no source point inside it are dropped (the layout
     is planned before reading). Returns ({label: [output point counts]},
     [occupied flag per tile]). Fails before publishing on any point-count
-    mismatch.
+    mismatch and, with `require_coverage`, when a source point lies in no
+    tile core.
     """
     from point_cloud_metadata import write_retained_evlrs
     from main_tile import _make_tile_header
@@ -565,9 +582,15 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
             tasks = [task[:6] + (cells, task[7]) for task in probe]
             tile_points = np.zeros(len(tiles), dtype=np.int64)
             core_points = np.zeros(len(tiles), dtype=np.int64)
-            for counts, cores in pool.map(_spill_range, tasks):
+            uncovered = 0
+            for counts, cores, outside in pool.map(_spill_range, tasks):
                 tile_points += counts
                 core_points += cores
+                uncovered += outside
+            # The grid comes from header bounds; a stale header must not drop points silently.
+            if require_coverage and uncovered:
+                raise ValueError(f"{uncovered:,} source points lie outside every planned tile core "
+                                 "(input header bounds do not cover the points)")
             # Occupancy comes from the same read: drop tiles whose core is empty.
             occupied = np.array([tile.core is None or core_points[i] > 0 for i, tile in enumerate(tiles)])
             if not occupied.any():
@@ -663,7 +686,7 @@ def subsample_tiles_single_scan(plan, output_dir, resolutions, formats, *, worke
     scale of all sources per axis and tile-centre offsets. A single-cloud plan
     is one unbounded tile in the source's own encoding.
     """
-    from main_subsample import subsample_output_name
+    from output_names import subsample_output_name
     from main_tile import plot_overview, read_tile_jobs
     from tile_core_occupancy import publish_occupied_tiles
 
@@ -688,7 +711,7 @@ def subsample_tiles_single_scan(plan, output_dir, resolutions, formats, *, worke
         if sorted(jobs) != sorted(cores):
             raise ValueError("Tile jobs and tile layout disagree")
         tiles = [Tile(label, bounds, scales,
-                      ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0, float(header.offsets[2])),
+                      tile_offsets(bounds, header.offsets[2]),
                       core=(cores[label][0][0], cores[label][1][0], cores[label][0][1], cores[label][1][1]))
                  for label, bounds in sorted(jobs.items())]
     output_dirs = [Path(output_dir) / f"subsampled_res{index + 1}" for index in range(len(resolutions))]
@@ -706,7 +729,8 @@ def subsample_tiles_single_scan(plan, output_dir, resolutions, formats, *, worke
     labels = ["original" if r == 0 else f"{r} m" for r in resolutions]
     print(f"  Tiles: {len(tiles)}; resolutions: {', '.join(labels)}")
     _, occupied = write_tile_centroids(sources, tiles, header, outputs, workers=workers, work_dir=output_dir,
-                                       metadata_source=sources[0], converters=converters, nearest=nearest)
+                                       metadata_source=sources[0], converters=converters, nearest=nearest,
+                                       require_coverage=True)
     if not plan.skip_tiling:
         by_label = dict(zip((tile.label for tile in tiles), occupied))
         layout = json.loads(Path(plan.bounds_json).read_text())["tiles"]

@@ -41,15 +41,6 @@ SUPPORTED_OUTPUT_FORMATS = {"laz", "copc.laz", "ply"}
 FULL_RESOLUTION_TOKENS = {"full", "original"}
 
 
-def get_pdal_path() -> str:
-    import shutil
-
-    pdal_path = shutil.which("pdal")
-    if pdal_path is None:
-        raise RuntimeError("PDAL executable not found on PATH; create_merged_file requires pdal")
-    return pdal_path
-
-
 def resolution_label(resolution: float) -> str:
     centimeters = resolution * 100.0
     if math.isclose(centimeters, round(centimeters), rel_tol=0.0, abs_tol=1e-9):
@@ -267,43 +258,27 @@ def prod_merged_writer_stage(output_file: Path, output_format: str) -> dict:
     raise ValueError(f"Unsupported merged output format '{output_format}'")
 
 
-def _scale_offset_options(source_file: Path) -> dict:
+def _scale_offset_options(source_files: List[Path]) -> dict:
+    """Finest scale of all sources and the first source's offsets (int32-safe), as PDAL writer options.
+
+    The first source's scale alone would requantize finer sources.
+    """
     import laspy
+    import numpy as np
 
-    with laspy.open(str(source_file)) as reader:
-        header = reader.header
-        return {
-            "scale_x": float(header.scales[0]),
-            "scale_y": float(header.scales[1]),
-            "scale_z": float(header.scales[2]),
-            "offset_x": float(header.offsets[0]),
-            "offset_y": float(header.offsets[1]),
-            "offset_z": float(header.offsets[2]),
-        }
-
-
-def prod_merged_pipeline(
-    input_files: List[Path],
-    output_file: Path,
-    resolution: float,
-    output_format: str = "copc.laz",
-) -> dict:
-    """Build the PDAL pipeline for one prod-merged output."""
-    readers = [
-        {
-            "type": "readers.copc" if path.name.lower().endswith(".copc.laz") else "readers.las",
-            "filename": str(path),
-        }
-        for path in input_files
-    ]
-    pipeline = [*readers]
-    if len(readers) > 1:
-        pipeline.append({"type": "filters.merge"})
-    pipeline.extend([
-        {"type": "filters.voxelcentroidnearestneighbor", "cell": resolution},
-        prod_merged_writer_stage(output_file, output_format),
-    ])
-    return {"pipeline": pipeline}
+    headers = []
+    for source_file in source_files:
+        with laspy.open(str(source_file)) as reader:
+            headers.append(reader.header)
+    scales = np.min([header.scales for header in headers], axis=0)
+    mins = np.min([header.mins for header in headers], axis=0)
+    maxs = np.max([header.maxs for header in headers], axis=0)
+    offsets = np.asarray(headers[0].offsets, dtype=float)
+    limit = np.iinfo(np.int32)
+    if np.any((mins - offsets) / scales < limit.min) or np.any((maxs - offsets) / scales > limit.max):
+        offsets = np.floor(mins)
+    return {**{f"scale_{axis}": float(value) for axis, value in zip("xyz", scales)},
+            **{f"offset_{axis}": float(value) for axis, value in zip("xyz", offsets)}}
 
 
 def _run_pdal_pipeline(pipeline: dict, pipeline_file: Path) -> subprocess.CompletedProcess:
@@ -312,7 +287,7 @@ def _run_pdal_pipeline(pipeline: dict, pipeline_file: Path) -> subprocess.Comple
         json.dump(pipeline, f, indent=2)
     try:
         return subprocess.run(
-            [get_pdal_path(), "pipeline", str(pipeline_file)],
+            ["pdal", "pipeline", str(pipeline_file)],
             capture_output=True,
             text=True,
             check=False,
@@ -337,22 +312,21 @@ def _point_cloud_point_count(path: Path) -> int:
         return int(reader.header.point_count)
 
 
-def _copc_union_bounds(input_files: List[Path]) -> Tuple[float, float, float, float]:
-    from main_subsample import get_file_bounds
+def _union_bounds(input_files: List[Path]) -> Tuple[float, float, float, float]:
+    """(minx, maxx, miny, maxy) of every input from the LAS headers.
 
-    bounds = []
+    ``pdal info`` prints about ten significant digits, which can cut off
+    the true edge rows of a dataset.
+    """
+    import laspy
+
+    mins, maxs = [], []
     for input_file in input_files:
-        file_bounds = get_file_bounds(input_file)
-        if file_bounds is None:
-            raise RuntimeError(f"Could not determine bounds for {input_file}")
-        bounds.append(file_bounds)
-
-    return (
-        min(bound[0] for bound in bounds),
-        max(bound[1] for bound in bounds),
-        min(bound[2] for bound in bounds),
-        max(bound[3] for bound in bounds),
-    )
+        with laspy.open(str(input_file)) as reader:
+            mins.append(reader.header.mins)
+            maxs.append(reader.header.maxs)
+    return (min(m[0] for m in mins), max(m[0] for m in maxs),
+            min(m[1] for m in mins), max(m[1] for m in maxs))
 
 
 # PDAL holds a whole chunk in memory (dataset 645: about 330 B per point with
@@ -366,31 +340,38 @@ def _prod_merged_chunk_bounds(
     input_files: List[Path],
     resolution: float,
     num_spatial_chunks: int,
-) -> List[str]:
+) -> List[Tuple[str, Optional[int], Optional[int]]]:
+    """Spatial strips as (PDAL bounds, first voxel column, end voxel column).
+
+    Strips are read with a margin so no point falls between two queries; each
+    point is then kept only by the strip owning its voxel column ``[lo, hi)``
+    (None is unbounded), so every voxel has exactly one owner and products do
+    not depend on the chunk count.
+    """
     import laspy
-    from main_subsample import get_file_xy_scales
     from subsample_com import aligned_edges
 
-    minx, maxx, miny, maxy = _copc_union_bounds(input_files)
-    if maxx - minx == 0 or maxy - miny == 0:
-        return [f"([{minx},{maxx}],[{miny},{maxy}])"]
-
+    minx, maxx, miny, maxy = _union_bounds(input_files)
+    margin = 0.0
     total_points = 0
     for input_file in input_files:
         with laspy.open(input_file) as reader:
             total_points += int(reader.header.point_count)
+            margin = max(margin, *map(float, reader.header.scales[:2]))
+    miny, maxy = miny - margin, maxy + margin
+    if maxx - minx == 0 or maxy - miny == 0:
+        return [(f"([{minx - margin},{maxx + margin}],[{miny},{maxy}])", None, None)]
     chunks = max(1, int(num_spatial_chunks or 1), math.ceil(total_points / PRODUCT_CHUNK_POINTS))
     raw_x_step = (maxx - minx) / chunks
     x_step = max(resolution, math.ceil(raw_x_step / resolution) * resolution)
-    scale_x = min(get_file_xy_scales(input_file)[0] for input_file in input_files)
     edges = aligned_edges(minx, maxx, x_step, resolution)
 
     bounds = []
     for chunk_idx, (chunk_minx, chunk_maxx) in enumerate(edges):
-        query_maxx = chunk_maxx if chunk_idx == len(edges) - 1 else chunk_maxx - scale_x * 0.5
-        if query_maxx < chunk_minx:
-            continue
-        bounds.append(f"([{chunk_minx},{query_maxx}],[{miny},{maxy}])")
+        # Interior edges lie on the voxel grid (aligned_edges).
+        lo = None if chunk_idx == 0 else round(chunk_minx / resolution)
+        hi = None if chunk_idx == len(edges) - 1 else round(chunk_maxx / resolution)
+        bounds.append((f"([{chunk_minx - margin},{chunk_maxx + margin}],[{miny},{maxy}])", lo, hi))
     return bounds
 
 
@@ -434,17 +415,9 @@ def _chunked_prod_merged_pipeline(
     input_files: List[Path],
     output_file: Path,
     bounds_str: str,
-    resolution: float,
     scale_offset_options: dict,
 ) -> dict:
-    readers = [
-        {
-            "type": "readers.copc" if path.name.lower().endswith(".copc.laz") else "readers.las",
-            "filename": str(path),
-            "bounds": bounds_str,
-        }
-        for path in input_files
-    ]
+    readers = [{"type": "readers.copc", "filename": str(path), "bounds": bounds_str} for path in input_files]
     # PDAL only reads and merges the chunk; SmartTile selects the points
     # (select_voxel_points). PDAL's voxel filter places its grid by point
     # order, which varies between COPC reads, so products were not repeatable.
@@ -470,18 +443,18 @@ def _create_prod_merged_chunk(
     work_dir: Path,
     output_stem: str,
     chunk_idx: int,
-    bounds_str: str,
+    chunk: Tuple[str, Optional[int], Optional[int]],
     resolution: float,
     scale_offset_options: dict,
 ) -> Optional[Path]:
     """Create one bounded prod-merged LAZ chunk and return it when non-empty."""
     chunk_file = work_dir / f"{output_stem}_chunk{chunk_idx:04d}.laz"
     raw_file = work_dir / f"{output_stem}_chunk{chunk_idx:04d}.raw.las"
+    bounds_str, lo, hi = chunk
     pipeline = _chunked_prod_merged_pipeline(
         copc_input_files,
         raw_file,
         bounds_str,
-        resolution,
         scale_offset_options,
     )
     result = _run_pdal_pipeline(pipeline, work_dir / f"_chunk{chunk_idx:04d}.json")
@@ -490,16 +463,31 @@ def _create_prod_merged_chunk(
     if not raw_file.exists() or raw_file.stat().st_size == 0:
         return None
     try:
-        return chunk_file if _select_chunk_points(raw_file, chunk_file, resolution) else None
+        return chunk_file if _select_chunk_points(raw_file, chunk_file, resolution, lo, hi) else None
     finally:
         raw_file.unlink(missing_ok=True)
 
 
-def _select_chunk_points(raw_file: Path, chunk_file: Path, resolution: float) -> bool:
-    """Write the selected points of one raw chunk as LAZ; False when it is empty."""
+def _select_chunk_points(raw_file: Path, chunk_file: Path, resolution: float,
+                         lo: Optional[int] = None, hi: Optional[int] = None) -> bool:
+    """Write the selected points of one raw chunk as LAZ; False when it is empty.
+
+    Only points in voxel columns ``[lo, hi)`` belong to this chunk.
+    """
     import laspy
+    import numpy as np
+    from voxel_grid import voxel_keys
 
     cloud = laspy.read(str(raw_file))
+    if lo is not None or hi is not None:
+        columns = voxel_keys(np.asarray(cloud.points.array["X"])[:, None], cloud.header.scales[:1],
+                             cloud.header.offsets[:1], resolution)[:, 0]
+        owned = np.ones(len(columns), dtype=bool)
+        if lo is not None:
+            owned &= columns >= lo
+        if hi is not None:
+            owned &= columns < hi
+        cloud.points = cloud.points[owned]
     if len(cloud.points) == 0:
         return False
     cloud.points = cloud.points[select_voxel_points(cloud.points, resolution)]
@@ -511,7 +499,7 @@ def _create_prod_merged_chunks(
     copc_input_files: List[Path],
     work_dir: Path,
     output_stem: str,
-    chunk_bounds: List[str],
+    chunk_bounds: List[Tuple[str, Optional[int], Optional[int]]],
     resolution: float,
     scale_offset_options: dict,
     chunk_workers: Optional[int] = None,
@@ -527,13 +515,13 @@ def _create_prod_merged_chunks(
 
     chunk_by_idx: dict[int, Optional[Path]] = {}
     if workers == 1:
-        for chunk_idx, bounds_str in enumerate(chunk_bounds):
+        for chunk_idx, chunk in enumerate(chunk_bounds):
             chunk_file = _create_prod_merged_chunk(
                 copc_input_files,
                 work_dir,
                 output_stem,
                 chunk_idx,
-                bounds_str,
+                chunk,
                 resolution,
                 scale_offset_options,
             )
@@ -549,15 +537,20 @@ def _create_prod_merged_chunks(
                     work_dir,
                     output_stem,
                     chunk_idx,
-                    bounds_str,
+                    chunk,
                     resolution,
                     scale_offset_options,
                 ): chunk_idx
-                for chunk_idx, bounds_str in enumerate(chunk_bounds)
+                for chunk_idx, chunk in enumerate(chunk_bounds)
             }
             for future in as_completed(future_to_idx):
                 chunk_idx = future_to_idx[future]
-                chunk_file = future.result()
+                try:
+                    chunk_file = future.result()
+                except BaseException:
+                    # Do not run the remaining chunks of a failed product.
+                    executor.shutdown(wait=True, cancel_futures=True)
+                    raise
                 chunk_by_idx[chunk_idx] = chunk_file
                 message = "empty" if chunk_file is None else f"complete: {chunk_file.name}"
                 print(f"    Chunk {chunk_idx + 1}/{len(chunk_bounds)}: {message}")
@@ -649,7 +642,18 @@ def _validate_preserved_product_dims(
 
     # COPC needs point formats 6-8, which name the LAS 1.0-1.3 field differently.
     renamed = {"scan_angle_rank": "scan_angle"}
-    missing = sorted(name for name in expected - output_dims if renamed.get(name) not in output_dims)
+    missing = {name for name in expected - output_dims if renamed.get(name) not in output_dims}
+    if missing:
+        # COPC carries vector ExtraBytes as scalar components recorded in the vector schema.
+        from vector_extra_bytes import read_vector_schema
+
+        try:
+            schema = read_vector_schema(output_file) or {}
+        except OSError:
+            schema = {}
+        components = {entry["original_name"]: entry["component_names"] for entry in schema.get("dimensions", [])}
+        missing = sorted(name for name in missing
+                         if not (name in components and set(components[name]) <= output_dims))
     if missing:
         return (
             False,
@@ -855,7 +859,7 @@ def create_chunked_prod_merged_files_for_resolution(
         first_output = outputs[0][0]
         work_dir = first_output.parent / f"_{first_output.stem}_shared_chunks"
         work_dir.mkdir(parents=True, exist_ok=True)
-        scale_offset_options = _scale_offset_options(copc_input_files[0])
+        scale_offset_options = _scale_offset_options(copc_input_files)
 
         chunk_files: List[Path] = []
         created: List[Path] = []
@@ -894,34 +898,6 @@ def create_chunked_prod_merged_files_for_resolution(
 
         publication.commit()
         return destinations
-
-
-def create_prod_merged_file(
-    copc_input_files: List[Path],
-    output_file: Path,
-    resolution: float,
-    output_format: str = "copc.laz",
-) -> Path:
-    """Create one prod-merged product with a single PDAL pipeline (no spatial chunks)."""
-    if not copc_input_files:
-        raise ValueError("No COPC input files provided")
-
-    validate_collection_extra_bytes(copc_input_files)
-    destination = Path(output_file)
-    with OutputTransaction([destination], inputs=copc_input_files,
-                           sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX,)) as publication:
-        output_file = publication.path(destination)
-        pipeline = prod_merged_pipeline(copc_input_files, output_file, resolution, output_format)
-        pipeline_file = output_file.parent / f"_{output_file.stem}_pipeline.json"
-        result = _run_pdal_pipeline(pipeline, pipeline_file)
-
-        if result.returncode != 0:
-            raise RuntimeError(f"PDAL prod-merged pipeline failed: {_pdal_error(result, 500)}")
-        if not output_file.exists() or output_file.stat().st_size == 0:
-            raise RuntimeError(f"Prod-merged output was not created: {output_file}")
-        _finalize_product(output_file, output_format, copc_input_files, copc_input_files[0])
-        publication.commit()
-        return destination
 
 
 def create_prod_merged_files(
@@ -972,7 +948,9 @@ def create_prod_merged_files(
         if any(label == "full" for label, _ in selections):
             from full_resolution_merge import create_full_resolution_product
 
-            inputs = point_cloud_files(original_with_predictions_dir)
+            # Every source once, like the subsampled products: a COPC without a raw twin is a source too.
+            inputs = sorted([*raw_inputs, *(path for path in copc_inputs if source_key(path) not in raw_keys)],
+                            key=lambda path: path.name.lower())
             for output_format in output_formats:
                 output_file = publication.path(prod_merged_output_path(output_dir, "full", output_format))
                 print(f"  Creating {output_file.name} at full resolution from {len(inputs)} file(s) in record order"

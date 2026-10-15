@@ -1,0 +1,28 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create the locked runtime
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          micromamba-version: 1.5.10-0
+          environment-file: conda-linux-64.lock
+          environment-name: smarttile
+          cache-environment: true
+
+      - name: Run tests
+        shell: bash -el {0}
+        run: |
+          # The locked runtime has no pip; keep the test tools outside it.
+          /usr/bin/python3 -m pip install --target "$RUNNER_TEMP/pytest" pytest==9.1.1 pytest-subtests==0.15.0
+          PYTHONPATH="src:$RUNNER_TEMP/pytest" python -m pytest tests -q -p no:cacheprovider

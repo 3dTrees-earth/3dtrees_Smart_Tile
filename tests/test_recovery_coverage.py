@@ -1,5 +1,4 @@
 """Recovery coverage stays identical to the uncached positive-tree search."""
-from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np

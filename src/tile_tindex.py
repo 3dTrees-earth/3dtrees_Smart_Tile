@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,12 +12,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from point_cloud_metadata import point_cloud_files
-
-
-def get_pdal_path() -> str:
-    """Return the PDAL executable path."""
-    pdal_path = shutil.which("pdal")
-    return pdal_path if pdal_path else "pdal"
 
 
 def _common_header_srs(paths: List[Path]) -> Optional[str]:
@@ -57,7 +52,7 @@ def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
     tindex_srs = common_header_srs
     try:
         info_result = subprocess.run(
-            [get_pdal_path(), "info", "--metadata", str(source_files[0])],
+            ["pdal", "info", "--metadata", str(source_files[0])],
             capture_output=True,
             text=True,
             check=False,
@@ -84,7 +79,7 @@ def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
         with tempfile.TemporaryDirectory(prefix="smarttile_tindex_") as tmp_dir:
             tmp_gpkg = Path(tmp_dir) / output_gpkg.name
             tmp_cmd = [
-                get_pdal_path(),
+                "pdal",
                 "tindex",
                 "create",
                 str(tmp_gpkg),
@@ -104,7 +99,7 @@ def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
             result = subprocess.run(tmp_cmd, capture_output=True, text=True, check=False)
             if result.returncode != 0 and "Unexpected argument 'filelist'" in (result.stderr or result.stdout):
                 stdin_cmd = [
-                    get_pdal_path(),
+                    "pdal",
                     "tindex",
                     "create",
                     str(tmp_gpkg),
@@ -188,13 +183,19 @@ def write_single_cloud_bounds(tile_bounds_json: Path, source_file: Path) -> None
 
 def update_tile_bounds_json_from_files(
     tile_bounds_json: Path,
-    files_dir: Path,
+    files_dirs,
     file_glob: str = "*.laz",
 ) -> int:
-    """Update tile_bounds_tindex.json from created tile file headers."""
+    """Set each tile's bounds to the union of its output file headers in ``files_dirs``.
+
+    Merge finds overlaps from these bounds, so they must hold the points of
+    every resolution, not only the first output's (a coarse first output can
+    be up to one voxel tighter than the 1 cm tiles merged later).
+    """
     from tile_file_matching import get_file_bounds
 
-    if not tile_bounds_json.exists():
+    files_dirs = [Path(files_dirs)] if isinstance(files_dirs, (str, Path)) else [Path(d) for d in files_dirs]
+    if not tile_bounds_json.exists() or not files_dirs:
         return 0
     with tile_bounds_json.open() as handle:
         data = json.load(handle)
@@ -203,29 +204,27 @@ def update_tile_bounds_json_from_files(
         return 0
 
     if data.get("tiling_skipped"):
-        files = point_cloud_files(files_dir)
+        files = point_cloud_files(files_dirs[0])
         if len(tiles) != 1 or len(files) != 1:
             raise ValueError("Skipped tiling requires exactly one cloud and one layout entry")
         write_single_cloud_bounds(tile_bounds_json, files[0])
         return 1
 
-    label_to_path: Dict[str, Path] = {}
-    for path in files_dir.glob(file_glob):
-        stem = path.stem
-        for sep in ("_subsampled", "_chunk", "."):
-            if sep in stem:
-                stem = stem.split(sep)[0]
-                break
-        if stem and stem not in label_to_path:
-            label_to_path[stem] = path
+    extents: Dict[str, Tuple[float, float, float, float]] = {}
+    for files_dir in files_dirs:
+        for path in sorted(files_dir.glob(file_glob)):
+            match = re.search(r"c\d+_r\d+", path.name)
+            bounds = get_file_bounds(path) if match else None
+            if bounds is None:
+                continue
+            label = match.group(0)
+            seen = extents.get(label)
+            extents[label] = bounds if seen is None else (
+                min(seen[0], bounds[0]), max(seen[1], bounds[1]), min(seen[2], bounds[2]), max(seen[3], bounds[3]))
 
     updated = 0
     for tile in tiles:
-        label = f"c{tile['col']:02d}_r{tile['row']:02d}"
-        path = label_to_path.get(label)
-        if path is None:
-            continue
-        bounds = get_file_bounds(path)
+        bounds = extents.get(f"c{tile['col']:02d}_r{tile['row']:02d}")
         if bounds is None:
             continue
         minx, maxx, miny, maxy = bounds

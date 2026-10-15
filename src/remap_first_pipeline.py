@@ -22,7 +22,7 @@ from merge_stages import (
     prepare_dense, reconcile_instances,
 )
 from point_cloud_metadata import (
-    copy_single_source_header, raw_point_cloud_files,
+    copc_only_files, copy_single_source_header, raw_point_cloud_files,
     update_extra_dimensions, write_retained_evlrs,
 )
 from dense_instance_ownership import (
@@ -141,6 +141,18 @@ def _record_coverage(metric, xyz, distances, origin):
 ORIGINAL_WRITE_POINTS = 1_000_000
 
 
+def original_files(originals):
+    """The LAS/LAZ originals to enrich; a COPC without its LAS/LAZ source fails instead of being skipped."""
+    orphans = copc_only_files(originals)
+    if orphans:
+        raise ValueError("COPC-only originals cannot be enriched; provide the LAS/LAZ source for: "
+                         + ", ".join(path.name for path in orphans))
+    files = raw_point_cloud_files(originals)
+    if not files:
+        raise ValueError(f"No raw LAS/LAZ originals found in {originals}")
+    return files
+
+
 def enrich_originals(models, indices, baseline_indices, originals, output_dir, origin, report, *,
                      target_dims=None, matches=None):
     """Stage all originals and measure every model independently before failing.
@@ -150,9 +162,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
     is then not transferred.
     """
     matches = list(matches or [None] * len(models))
-    files = raw_point_cloud_files(originals)
-    if not files:
-        raise ValueError(f"No raw LAS/LAZ originals found in {originals}")
+    files = original_files(originals)
     query_workers = report['parallelism']['query_workers']
     source_point_count = 0
     for file in files:
@@ -745,9 +755,7 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
         with tempfile.TemporaryDirectory(prefix=".strict-remap-", dir=output.parent) as temporary, ExitStack() as stack:
             work = Path(temporary)
             models, indices, baselines = [], [], []
-            source_files = raw_point_cloud_files(originals)
-            if not source_files:
-                raise ValueError(f"No raw original files in {originals}")
+            source_files = original_files(originals)
             origin = origin_for(source_files)
             indexing_start = time.monotonic()
             for i, (collection, baseline) in enumerate(zip(collections, baseline_collections)):

@@ -4,15 +4,14 @@ Main orchestrator script for the 3DTrees smart tiling pipeline.
 
 Routes to appropriate task modules based on --task parameter:
 - tile: tile layout, then one read of every source point into subsampled tiles (default 1cm and 10cm)
-- merge: Remap predictions and merge tiles with instance matching
-- filter: Remove non-owned dense instances, then reconcile and deduplicate
+- merge: Transfer predictions to dense tiles, filter ownership, reconcile and deduplicate
+  (--segmented-remapped-folder: tiles that are already dense are only filtered)
 - remap: Remap merged file dimensions to original input files
 - create_merged_file: Create prod-merged files from original_with_predictions
 
 Usage:
     python src/run.py --task tile --input-dir /path/to/input --output-dir /path/to/output
     python src/run.py --task merge --subsampled-10cm-folder /path/to/10cm --tile-bounds-json /path/to/tile_bounds_tindex.json --original-laz-input-dir /path/to/input
-    python src/run.py --task filter --input-dir /path/to/segmented_remapped --output-dir /path/to/filtered --tile-bounds-json /path/to/tile_bounds_tindex.json
     python src/run.py --task remap --merged-laz /path/to/merged.laz --original-laz-input-dir /path/to/originals --original-laz-output-dir /path/to/output
     python src/run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output
 """
@@ -348,9 +347,9 @@ def _write_tile_task(params: Parameters):
         las_dirs = [d for d, (_, f) in zip(output_dirs, tile_outputs) if f != "ply"]
         if bounds_json.exists() and las_dirs:
             from tile_tindex import update_tile_bounds_json_from_files
-            num_updated = update_tile_bounds_json_from_files(bounds_json, las_dirs[0])
+            num_updated = update_tile_bounds_json_from_files(bounds_json, las_dirs)
             if num_updated > 0:
-                print(f"  Updated tile_bounds_tindex.json with bounds from {num_updated} tile(s) in {las_dirs[0].name}")
+                print(f"  Updated tile_bounds_tindex.json with the bounds of {num_updated} tile(s)")
 
         print()
         print("=" * 60)
@@ -516,36 +515,6 @@ def run_create_merged_file_task(params: Parameters):
         sys.exit(1)
     print()
     print("Create merged file complete.")
-
-
-def run_filter_task(params: Parameters):
-    """Filter core ownership and deduplicate already-dense tiles.
-
-    ``--output-dir`` is the work root, as for merge: tiles go to
-    ``<output-dir>/output_tiles`` (or ``--output-tiles-folder``), the report
-    and the unfiltered copy beside them inside ``--output-dir``.
-    """
-    from remap_first_pipeline import merge_collections
-
-    if not params.input_dir or not params.output_dir:
-        print("Error: --input-dir and --output-dir are required for filter")
-        sys.exit(1)
-    if Path(params.input_dir).resolve() == Path(params.output_dir).resolve():
-        print("Error: filter input and output must differ")
-        sys.exit(1)
-    tile_bounds = _require_tile_bounds_json(params.tile_bounds_json)
-    try:
-        output_tiles = Path(params.output_tiles_folder or Path(params.output_dir) / "output_tiles")
-        merge_collections(collections=[Path(params.input_dir)], target_dir=None,
-                          output_tiles=output_tiles, tile_bounds_json=tile_bounds,
-                          ready=True, matching=not params.disable_matching, workers=params.workers,
-                          instance_dimension=params.instance_dimension,
-                          overlap_threshold=params.overlap_threshold, filter_anchor=params.filter_anchor,
-                          small_instances=_small_instance_policy(params),
-                          keep_unfiltered=not params.skip_unfiltered_tiles)
-    except Exception as exc:
-        print(f"Error: {exc}")
-        sys.exit(1)
 
 
 def preprocess_boolean_flags(args_list):
@@ -747,9 +716,8 @@ def _print_cli_help() -> None:
     print("  python src/run.py --task merge --subsampled-10cm-folder SEGMENTED_10CM --tile-bounds-json TILE_BOUNDS_JSON --output-folder OUTPUT")
     print("  python src/run.py --task remap --segmented-folders COLLECTIONS --original-laz-input-dir ORIGINALS --original-laz-output-dir OUTPUT")
     print("  python src/run.py --task create_merged_file --original-with-predictions-dir INPUT --output-dir OUTPUT")
-    print("  python src/run.py --task filter --input-dir INPUT --output-dir OUTPUT --tile-bounds-json TILE_BOUNDS_JSON")
     print()
-    print("Tasks: tile, merge, filter, remap, create_merged_file")
+    print("Tasks: tile, merge, remap, create_merged_file")
     print("Use --show-params to print resolved defaults and environment overrides.")
     print()
     print("Options:")
@@ -832,7 +800,6 @@ def main():
         print("Error: --task is required (unless using --show-params)")
         print("Usage: python run.py --task tile --input-dir /path/to/input --output-dir /path/to/output")
         print("       python run.py --task merge --subsampled-10cm-folder /path/to/10cm --tile-bounds-json /path/to/tile_bounds_tindex.json")
-        print("       python run.py --task filter --input-dir /path/to/segmented_remapped --output-dir /path/to/filtered --tile-bounds-json /path/to/tile_bounds_tindex.json")
         print("       python run.py --task remap --merged-laz /path/to/merged.laz --original-laz-input-dir /path/to/originals")
         print("       python run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output")
         print("       python run.py --show-params")
@@ -843,15 +810,13 @@ def main():
         run_tile_task(params)
     elif params.task == "merge":
         run_merge_task(params)
-    elif params.task == "filter":
-        run_filter_task(params)
     elif params.task == "remap":
         run_remap_task(params)
     elif params.task == "create_merged_file":
         run_create_merged_file_task(params)
     else:
         print(f"Error: Unknown task: {params.task}")
-        print("Valid tasks: tile, merge, filter, remap, create_merged_file")
+        print("Valid tasks: tile, merge, remap, create_merged_file")
         sys.exit(1)
 
 

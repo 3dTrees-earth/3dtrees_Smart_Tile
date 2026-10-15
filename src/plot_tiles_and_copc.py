@@ -15,7 +15,7 @@ try:
     from matplotlib.collections import PatchCollection
     from pyproj import Transformer
 except ImportError as e:
-    print(f"ERROR: Required packages missing. Install with: pip install fiona matplotlib pyproj")
+    print("ERROR: Required packages missing. Install with: pip install fiona matplotlib pyproj")
     print(f"Error: {e}")
     sys.exit(1)
 

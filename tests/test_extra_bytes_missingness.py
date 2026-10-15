@@ -1,6 +1,5 @@
 """Missing-value declarations must describe the stored output values after conversion."""
 import hashlib
-from pathlib import Path
 
 import laspy
 import numpy as np

@@ -1,5 +1,4 @@
 """3DT-2209: accepted groups preserve member geometry through final remap."""
-import json
 import sys
 import tempfile
 import unittest

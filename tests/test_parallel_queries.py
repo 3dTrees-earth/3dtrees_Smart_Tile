@@ -127,14 +127,14 @@ class ParallelQueryTests(unittest.TestCase):
             for a, b in zip(*results):
                 np.testing.assert_array_equal(a, b)
 
-    def test_cli_merge_and_filter_forward_worker_budget(self):
+    def test_cli_merge_forwards_worker_budget(self):
         from parameters import Parameters
         import run
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp);source = root / 'source';source.mkdir()
             write_cloud(source / 'a.las', [.5], [7])
             layout = core_layout(root)
-            for task in ['merge', 'filter']:
+            for task in ['merge']:
                 params = Parameters(task=task, input_dir=source, output_dir=root / 'out',
                     segmented_remapped_folder=source,
                     output_tiles_folder=root / 'out', tile_bounds_json=layout,

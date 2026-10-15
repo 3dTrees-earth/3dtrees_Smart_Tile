@@ -12,30 +12,28 @@ import laspy
 from output_tiles import output_tile  # noqa: E402
 
 
-class RunFilterTaskTests(unittest.TestCase):
+class MergeFilterOnlyTests(unittest.TestCase):
     def test_filter_preserves_same_tile_points_and_uses_dense_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "input"
             source.mkdir()
             write_cloud(source / "a.las", [0, 0, .1], [1, 1, 1])
-            params = Parameters(task="filter", input_dir=source, output_dir=root / "output",
-                                tile_bounds_json=layout(root, 1), _cli_parse_args=False)
-            run.run_filter_task(params)
+            params = Parameters(task="merge", segmented_remapped_folder=source, output_dir=root / "output",
+                                tile_bounds_json=layout(root, 1), skip_merged_file=True, _cli_parse_args=False)
+            run.run_merge_task(params)
             self.assertEqual(len(laspy.read(output_tile(root / "output/output_tiles", 0)).points), 3)
             # Everything stays inside --output-dir.
             self.assertTrue((root / "output/remap_first_report.json").is_file())
             self.assertEqual(sorted(p.name for p in root.iterdir()), ["bounds.json", "input", "output"])
 
-    def test_filter_requires_layout_and_refuses_in_place_operation(self):
+    def test_filter_requires_layout(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for params in [
-                Parameters(task="filter", input_dir=root, output_dir=root, _cli_parse_args=False),
-                Parameters(task="filter", input_dir=root, output_dir=root / "out", _cli_parse_args=False),
-            ]:
-                with self.assertRaises(SystemExit):
-                    run.run_filter_task(params)
+            params = Parameters(task="merge", segmented_remapped_folder=root, output_dir=root / "out",
+                                _cli_parse_args=False)
+            with self.assertRaises(SystemExit):
+                run.run_merge_task(params)
 
 
 if __name__ == "__main__":

@@ -469,7 +469,7 @@ def test_original_routing_and_split_keep_every_point_once_per_output(tmp_path):
 
 def test_original_output_selector_and_filename():
     from product_formats import parse_tile_outputs
-    from main_subsample import resolution_label, subsample_output_name
+    from output_names import resolution_label, subsample_output_name
 
     assert parse_tile_outputs("original:laz,0.1:copc.laz") == [(0.0, "laz"), (0.1, "copc.laz")]
     assert parse_tile_outputs("ORIGINAL:ply") == [(0.0, "ply")]

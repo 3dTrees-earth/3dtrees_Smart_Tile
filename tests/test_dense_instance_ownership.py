@@ -361,13 +361,13 @@ class CoreOwnershipTests(unittest.TestCase):
             np.testing.assert_array_equal(owned_background(np.array([[.9, 0], [1, 0], [1.1, 0], [-2, 0]]), region),
                                           [True, False, False, True])
 
-    def test_cli_passes_anchor_for_both_merge_and_filter(self):
+    def test_cli_passes_anchor_to_merge(self):
         from parameters import Parameters
         import run
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); source = root / 'source'; source.mkdir()
             write_cloud(source / 'a.las', [.9], [1])
-            for task in ['merge', 'filter']:
+            for task in ['merge']:
                 params = Parameters(task=task, input_dir=source, output_dir=root / 'out',
                     segmented_remapped_folder=source, output_tiles_folder=root / 'out',
                     tile_bounds_json=core_layout(root), filter_anchor='highest_point',

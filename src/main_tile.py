@@ -30,9 +30,11 @@ from tile_tindex import (
 
 
 
-def _tiling_input_files(input_dir: Path) -> List[Path]:
-    """Return tiling inputs, preferring COPC twins over matching raw files."""
-    return point_cloud_files(input_dir)
+def _point_count(path: Path) -> int:
+    import laspy
+
+    with laspy.open(path) as reader:
+        return int(reader.header.point_count)
 
 
 def _make_tile_header(header_snapshot, offsets=None, scales=None):
@@ -127,9 +129,13 @@ def plan_tiling(input_dir, output_dir, tile_length, tile_buffer, tiling_threshol
     output_dir.mkdir(parents=True, exist_ok=True)
     tindex_file = output_dir / f"tindex_{int(tile_length)}m.gpkg"
 
-    source_files = _tiling_input_files(input_dir)
+    source_files = point_cloud_files(input_dir)
     if not source_files:
         raise ValueError(f"No LAZ/LAS files found in {input_dir}")
+    empty = [path.name for path in source_files if _point_count(path) == 0]
+    if empty:
+        # An empty file would otherwise put (0, 0) into the tindex extent.
+        raise ValueError(f"Input file(s) without points: {', '.join(empty)}; remove them and run again")
     should_skip_tiling = False
     if tiling_threshold is not None and len(source_files) == 1:
         original_size_mb = source_files[0].stat().st_size / (1024 * 1024)

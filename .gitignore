@@ -1,13 +1,10 @@
-Location/*
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
 *.egg-info/
-out/*
-.serena/*
-*md
-!CONTEXT.md
-!docs/**/*.md
+out/
+Location/
+.serena/
 run_*
-scripts/*
+.pytest-deps/

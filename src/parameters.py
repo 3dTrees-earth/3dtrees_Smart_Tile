@@ -34,8 +34,8 @@ class Parameters(BaseSettings):
     task: str = Field(
         "tile",
         description=(
-            "Task to perform: 'tile' (tiling + subsampling), 'merge' (remap + merge), "
-            "'filter' (remove duplicate buffer-zone instances), 'remap' "
+            "Task to perform: 'tile' (tiling + subsampling), 'merge' (transfer, filter and merge; "
+            "--segmented-remapped-folder filters already-dense tiles), 'remap' "
             "(prediction source -> original files), or 'create_merged_file' "
             "(prod-merged from original_with_predictions)"
         ),
@@ -56,7 +56,7 @@ class Parameters(BaseSettings):
     workers: int = Field(
         default_factory=allocated_cpu_count,
         description="CPUs to use in every task (default: the allocated CPUs from GALAXY_SLOTS, CPU affinity and "
-                    "cgroup quota; larger values are capped to them): tiling read/reduce processes, merge/filter "
+                    "cgroup quota; larger values are capped to them): tiling read/reduce processes, merge "
                     "query workers, remap enrichment processes and prod-merged product chunks.",
         validation_alias=AliasChoices("workers", "number-of-threads", "number_of_threads"),
     )
@@ -185,7 +185,7 @@ class Parameters(BaseSettings):
 
     filter_anchor: str = Field(
         "centroid",
-        description="Representative point used by merge/filter instance ownership on 1 cm tiles: centroid, highest_point, or lowest_point",
+        description="Representative point used by merge instance ownership on 1 cm tiles: centroid, highest_point, or lowest_point",
         validation_alias=AliasChoices("filter-anchor", "filter_anchor"),
     )
 
@@ -231,7 +231,7 @@ class Parameters(BaseSettings):
 
     tile_bounds_json: Optional[Path] = Field(
         default=None,
-        description="Required for merge and filter: tile_bounds_tindex.json from the same tile run (tile cores and buffers)",
+        description="Required for merge: tile_bounds_tindex.json from the same tile run (tile cores and buffers)",
         validation_alias=AliasChoices("tile-bounds-json", "tile_bounds_json"),
     )
 
@@ -305,8 +305,7 @@ class Parameters(BaseSettings):
 
     output_folder: Optional[Path] = Field(
         default=None,
-        description="Merge work root for output_tiles and the report (default: next to the first input collection). "
-                    "Filter requires --output-dir.",
+        description="Merge work root for output_tiles and the report (default: next to the first input collection).",
         validation_alias=AliasChoices("output-folder", "output_folder"),
     )
 
@@ -432,7 +431,7 @@ class Parameters(BaseSettings):
 
     pre_remap_reassign_instances: bool = Field(
         False,
-        description="Unsupported legacy option: remap rejects label reassignment. Use --reassign-small-instances during merge/filter.",
+        description="Unsupported legacy option: remap rejects label reassignment. Use --reassign-small-instances during merge.",
         validation_alias=AliasChoices("pre-remap-reassign-instances", "pre_remap_reassign_instances"),
     )
 
@@ -455,7 +454,7 @@ class Parameters(BaseSettings):
 
     reassign_small_instances: bool = Field(
         False,
-        description=("Merge/filter: after deduplication, give instances with fewer than --max-cluster-size "
+        description=("Merge: after deduplication, give instances with fewer than --max-cluster-size "
                      "points and a bounding box below --max-volume-for-merge the ID of the remaining "
                      "instance with the nearest XY centroid within 5 m. Not supported for PredInstance_RCT."),
         validation_alias=AliasChoices("reassign-small-instances", "reassign_small_instances"),
@@ -475,7 +474,7 @@ class Parameters(BaseSettings):
 
     skip_unfiltered_tiles: bool = Field(
         False,
-        description="Merge/filter: do not publish <output-tiles>_unfiltered_1cm (the remap baseline); "
+        description="Merge: do not publish <output-tiles>_unfiltered_1cm (the remap baseline); "
                     "frees that scratch early. Standalone remap then checks final coverage only.",
         validation_alias=AliasChoices("skip-unfiltered-tiles", "skip_unfiltered_tiles"),
     )
@@ -580,10 +579,16 @@ class Parameters(BaseSettings):
         case_sensitive=False,
         cli_parse_args=True,
         cli_ignore_unknown_args=True,
-        env_prefix="",  # No prefix for env vars
         extra="ignore",  # Ignore unknown fields
         populate_by_name=True,
     )
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
+                                   dotenv_settings, file_secret_settings):
+        # Only the CLI and explicit keyword arguments configure a run; job
+        # variables such as WORKERS or TASK must not change it silently.
+        return (init_settings,)
 
 
 def print_params(params: Parameters):

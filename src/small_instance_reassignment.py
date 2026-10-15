@@ -78,7 +78,9 @@ def relabel_tiles(files, instance_dimension, mapping):
         points = 0
         with laspy.open(file) as reader:
             header = copy_single_source_header(reader.header)
-            with laspy.open(temporary, mode="w", header=header) as writer:
+            # laspy picks compression from the name; ".relabel" would write plain LAS into a .laz.
+            with laspy.open(temporary, mode="w", header=header,
+                            do_compress=file.suffix.lower() == ".laz") as writer:
                 for record in reader.chunk_iterator(MAX_BATCH_POINTS):
                     labels = np.asarray(record[instance_dimension])
                     hit = np.isin(labels, source)

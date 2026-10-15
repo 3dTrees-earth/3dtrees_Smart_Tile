@@ -26,7 +26,7 @@ class MainTileInputDiscoveryTests(unittest.TestCase):
             (input_dir / "source.copc.laz").write_text("copc")
             (input_dir / "other.las").write_text("raw")
 
-            files = [path.name for path in main_tile._tiling_input_files(input_dir)]
+            files = [path.name for path in main_tile.point_cloud_files(input_dir)]
 
         self.assertEqual(files, ["other.las", "source.copc.laz"])
 

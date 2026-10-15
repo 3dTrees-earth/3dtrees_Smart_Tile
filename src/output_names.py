@@ -1,93 +1,10 @@
-"""
-Subsampled-output naming and point-cloud bounds helpers.
-
-`subsample_output_name`/`resolution_label` name the tile task's subsampled
-outputs (tile_centroids); `get_file_bounds`/`get_file_xy_scales` serve
-create_merged_file's chunk bounds.
-"""
+"""Subsampled-output naming: `subsample_output_name` and `resolution_label`."""
 
 from __future__ import annotations
 
-import json
-import math
 import re
-import subprocess
 from pathlib import Path
-from typing import Optional, Tuple
-
-import laspy
-
-
-def get_pdal_path() -> str:
-    """Get the path to pdal executable."""
-    import shutil
-    # Use shutil.which to find pdal in PATH
-    pdal_path = shutil.which("pdal")
-    return pdal_path if pdal_path else "pdal"
-
-
-def _parse_bounds_metadata(metadata) -> Optional[Tuple[float, float, float, float]]:
-    """Extract finite XY bounds from PDAL metadata."""
-    if not isinstance(metadata, dict):
-        return None
-
-    keys = ("minx", "maxx", "miny", "maxy")
-    if all(key in metadata for key in keys):
-        try:
-            minx, maxx, miny, maxy = (float(metadata[key]) for key in keys)
-        except (TypeError, ValueError):
-            return None
-        if (
-            all(math.isfinite(value) for value in (minx, maxx, miny, maxy))
-            and maxx >= minx
-            and maxy >= miny
-        ):
-            return (minx, maxx, miny, maxy)
-        return None
-
-    for value in metadata.values():
-        if isinstance(value, dict):
-            bounds = _parse_bounds_metadata(value)
-            if bounds is not None:
-                return bounds
-        elif isinstance(value, list):
-            for item in value:
-                bounds = _parse_bounds_metadata(item)
-                if bounds is not None:
-                    return bounds
-    return None
-
-
-def get_file_bounds(filepath: Path) -> Optional[Tuple[float, float, float, float]]:
-    """
-    Get spatial bounds of a point cloud file using pdal info.
-
-    Returns:
-        Tuple of (minx, maxx, miny, maxy) or None on error
-    """
-    try:
-        pdal_cmd = get_pdal_path()
-        result = subprocess.run(
-            [pdal_cmd, "info", "--metadata", str(filepath)],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-
-        payload = json.loads(result.stdout)
-        return _parse_bounds_metadata(payload.get("metadata", payload))
-    except Exception:
-        return None
-
-
-def get_file_xy_scales(filepath: Path) -> Tuple[float, float]:
-    """Return LAS/COPC XY scales for half-open chunk bounds."""
-    try:
-        with laspy.open(str(filepath), laz_backend=laspy.LazBackend.LazrsParallel) as reader:
-            scales = reader.header.scales
-            return (float(scales[0]), float(scales[1]))
-    except Exception:
-        return (0.001, 0.001)
+from typing import Optional
 
 
 def resolution_label(resolution: float) -> str:
