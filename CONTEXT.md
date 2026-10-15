@@ -14,8 +14,8 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
   filters core ownership, recovers, reconciles and deduplicates tile-local
   instances. `--segmented-remapped-folder` skips the transfer and only filters
   already-dense (or coarse-only, with `--resolution-1`) tiles; it replaced the
-  removed `filter` task. The CLI can also enrich originals; Galaxy uses separate
-  Remap/Create tasks.
+  removed `filter` task. With `--original-laz-input-dir` it also enriches the
+  originals (Galaxy: Filter / merge, Remap target → Original files).
 - `remap`: transfers prediction dimensions from one or more collections onto the
   uploaded LAS/LAZ originals (`--original-laz-input-dir`; the hidden legacy alias
   `--original-input-dir` is still accepted). `--original-copc-input-dir` only
