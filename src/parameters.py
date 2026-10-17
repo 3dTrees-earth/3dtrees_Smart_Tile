@@ -53,6 +53,18 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("output-dir", "output_dir"),
     )
 
+    collection_dir: Optional[Path] = Field(
+        default=None,
+        description="After a successful task, also hard-link every product into one flat folder per "
+                    "output collection: DIR/<collection>/<name>.<ext> (tiles_1..N, merged_tiles, "
+                    "tree_tables, tree_info_tables, tree_meshes, originals_with_predictions, "
+                    "merged_laz, merged_copc, merged_ply; the tile task adds DIR/tile_bounds_tindex.json "
+                    "and DIR/overview_copc_tiles.png). <name> has no extension, so COPC tiles end in "
+                    ".laz. DIR must be new or empty and on the outputs' filesystem. The task's own "
+                    "output layout is unchanged.",
+        validation_alias=AliasChoices("collection-dir", "collection_dir"),
+    )
+
     workers: int = Field(
         default_factory=allocated_cpu_count,
         description="CPUs to use in every task (default: the allocated CPUs from GALAXY_SLOTS, CPU affinity and "
@@ -227,6 +239,28 @@ class Parameters(BaseSettings):
         default=None,
         description="Alias for --subsampled-target-folder: the high-resolution tiles for merge",
         validation_alias=AliasChoices("original-tiles-dir", "original_tiles_dir"),
+    )
+
+    tree_tables_folder: Optional[Path] = Field(
+        default=None,
+        description="Merge of RayCloudTools tiles: folder with one tree table per segmented tile, "
+                    "paired with the tiles by tile name (e.g. c00_r00.txt); requires --tree-info-folder. "
+                    "Without it, <tile>_trees.txt and <tile>_trees_info.txt beside the tiles are used.",
+        validation_alias=AliasChoices("tree-tables-folder", "tree_tables_folder"),
+    )
+
+    tree_info_folder: Optional[Path] = Field(
+        default=None,
+        description="Merge of RayCloudTools tiles: folder with one tree-info table per segmented tile, "
+                    "paired by tile name; requires --tree-tables-folder.",
+        validation_alias=AliasChoices("tree-info-folder", "tree_info_folder"),
+    )
+
+    tree_meshes_folder: Optional[Path] = Field(
+        default=None,
+        description="Merge of RayCloudTools tiles: optional folder with one tree mesh (PLY) per "
+                    "segmented tile, paired by tile name; requires the two table folders.",
+        validation_alias=AliasChoices("tree-meshes-folder", "tree_meshes_folder"),
     )
 
     tile_bounds_json: Optional[Path] = Field(
@@ -602,6 +636,7 @@ def print_params(params: Parameters):
     print(f"  input_dir: {params.input_dir}")
     print(f"  output_dir: {params.output_dir}")
     print(f"  workers: {params.workers}")
+    print(f"  collection_dir: {params.collection_dir}")
     print(f"  instance_dimension: {params.instance_dimension}")
     print(f"  filter_anchor: {params.filter_anchor}")
 
@@ -621,6 +656,9 @@ def print_params(params: Parameters):
     print(f"  original_input_dir: {params.original_input_dir}")
     print(f"  original_raw_input_dir: {params.original_raw_input_dir}")
     print(f"  original_raw_output_dir: {params.original_raw_output_dir}")
+    print(f"  tree_tables_folder: {params.tree_tables_folder}")
+    print(f"  tree_info_folder: {params.tree_info_folder}")
+    print(f"  tree_meshes_folder: {params.tree_meshes_folder}")
     print(f"  overlap_threshold: {params.overlap_threshold}")
     print(f"  max_volume_for_merge: {params.max_volume_for_merge}")
     print(f"  max_cluster_size: {params.max_cluster_size}")

@@ -47,6 +47,7 @@ import numpy as np
 from tile_centroids import (CHUNK_POINTS, Tile, _block_key, _init_worker, _nearest_to_mean,
                             _raw_xyz, _write_blocks, block_cells, choose_block_size, route, sample_xy,
                             tile_offsets)
+from output_names import file_stem
 from voxel_grid import voxel_keys
 from point_cloud_metadata import extra_bytes_metadata_equal, extra_bytes_params_from_dimension_info
 from prediction_collections import assign_prediction_values, promote_collection_extra_dim
@@ -570,7 +571,7 @@ def instance_tiles_from_plan(plan, output_dir, dimensions, *, resolutions, attri
     if plan.skip_tiling:
         with laspy.open(sources[0]) as reader:
             h = reader.header
-        stem = sources[0].name[:-len(".copc.laz")] if sources[0].name.endswith(".copc.laz") else sources[0].stem
+        stem = file_stem(sources[0])
         tiles = [Tile(stem, (-math.inf, -math.inf, math.inf, math.inf), scales,
                       tuple(float(v) for v in h.offsets), core=(-math.inf, -math.inf, math.inf, math.inf))]
     else:

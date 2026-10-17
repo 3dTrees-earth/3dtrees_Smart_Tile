@@ -32,8 +32,9 @@ from dense_instance_ownership import (
 from prediction_collections import (assign_prediction_values, original_prediction_radius,
                                     prediction_collection_files)
 from instance_labels import instance_extra_bytes_params
+from output_names import file_stem
 from orphan_instance_recovery import recover_orphaned_instances, validate_recovered_geometry
-from raycloud_tree_files import filter_tree_sidecars, tree_sidecars
+from raycloud_tree_files import TABLE_KINDS, filter_tree_sidecars, folder_files, tree_sidecars
 from raycloud_finalization import finalize_rct_originals, remap_tree_sidecars
 from raycloud_meshes import filter_tree_meshes, remap_tree_meshes, tree_meshes
 from instance_finalization import compact_originals
@@ -400,7 +401,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                       ready=False, matching=True, target_dims=None,
                       instance_dimension="PredInstance", filter_anchor="centroid", workers=1,
                       resolution_1=0.01, remap_tolerance=None, small_instances=None,
-                      keep_unfiltered=True):
+                      keep_unfiltered=True, rct_folders=None):
     """The sole remap-first merge path for one or more independent models.
 
     ``small_instances`` (a SmallInstancePolicy) reassigns small final instances
@@ -408,15 +409,26 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
     ``keep_unfiltered`` publishes the unfiltered dense tiles as the remap
     baseline (``<output_tiles>_unfiltered_1cm``); without it they are deleted
     as soon as orphan recovery no longer needs them.
+    ``rct_folders`` ({"trees": dir, "trees_info": dir, "trees_mesh": dir or None})
+    supplies RayCloudTools tables and meshes from folders of their own, paired
+    with the tiles by tile name; otherwise they are found beside the tiles as
+    ``<tile>_trees.txt``, ``<tile>_trees_info.txt`` and ``<tile>_trees_mesh.ply``.
     """
     from tile_file_matching import find_matching_files
     if filter_anchor not in ANCHORS:
         raise ValueError(f"Unknown filter anchor: {filter_anchor}")
     if not collections:
         raise ValueError("At least one prediction collection is required")
-    sidecars_by_collection = [tree_sidecars(collection) for collection in collections]
+    if rct_folders:
+        if len(collections) != 1:
+            raise ValueError("RayCloudTools tree files require one prediction collection")
+        sidecars_by_collection = [{kind: folder_files(rct_folders[kind]) for kind in TABLE_KINDS}]
+        meshes_by_collection = [folder_files(rct_folders.get("trees_mesh"))]
+    else:
+        sidecars_by_collection = [tree_sidecars(collection) for collection in collections]
+        meshes_by_collection = [tree_meshes(collection) for collection in collections]
     tree_mode = any(sidecars_by_collection)
-    if any(tree_meshes(c) and not t for c, t in zip(collections, sidecars_by_collection)):
+    if any(m and not t for m, t in zip(meshes_by_collection, sidecars_by_collection)):
         raise ValueError("RayCloudTools tree meshes require the matching _trees.txt and _trees_info.txt tables")
     if tree_mode and len(collections) != 1:
         raise ValueError("RayCloudTools tree files require one prediction collection")
@@ -478,7 +490,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                                 "instance_dimension": model.instance, "semantic_dimension": model.semantic}
                 report["models"].append(model_report)
                 if ready:
-                    pairs = [(p, p, p.stem) for p in sorted(prediction_collection_files(collection))]
+                    pairs = [(p, p, file_stem(p)) for p in sorted(prediction_collection_files(collection))]
                 else:
                     if target_dir is None:
                         raise ValueError("Remap-first merge requires --subsampled-target-folder with the 1 cm tiles")
@@ -539,7 +551,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                     model_report["tree_sidecars"] = filter_tree_sidecars(
                         pairs, sidecars_by_collection[i], model_report["instance_ownership"],
                         work / "tree_files", id_mapping=mapping)
-                    source_meshes = tree_meshes(collection)
+                    source_meshes = meshes_by_collection[i]
                     if source_meshes:
                         model_report["tree_meshes"] = timed_stage(model_report, 'tree_mesh_filter', filter_tree_meshes,
                             pairs, source_meshes, model_report["tree_sidecars"], work / "tree_files",

@@ -55,7 +55,7 @@ def _create_prod_merged_outputs(
     """Create prod-merged outputs using the shared create_merged_file implementation."""
     if not original_with_predictions_dir.exists():
         print(f"  Skipping prod-merged outputs; missing {original_with_predictions_dir}")
-        return
+        return []
 
     try:
         from main_create_merged_file import create_prod_merged_files
@@ -95,6 +95,7 @@ def _create_prod_merged_outputs(
     print("  Prod-merged outputs:")
     for output in outputs:
         print(f"    {output}")
+    return outputs
 
 
 def _raw_original_output_dir(params: Parameters, raw_input_dir: Path) -> Path:
@@ -202,6 +203,19 @@ def _require_tile_bounds_json(tile_bounds_json: Path | None) -> Path:
     return tile_bounds_json
 
 
+def _check_collection_dir(params: Parameters, output_root: Path) -> None:
+    """Fail before a task runs if --collection-dir cannot be published."""
+    if params.collection_dir is not None:
+        from collection_folders import check_collection_dir
+        check_collection_dir(Path(params.collection_dir), output_root)
+
+
+def _publish_collections(params: Parameters, collections: dict, files=None) -> None:
+    if params.collection_dir is not None:
+        from collection_folders import publish_collections
+        publish_collections(Path(params.collection_dir), collections, files)
+
+
 # Tile outputs assembled or converted to COPC at once after the single read:
 # Untwine runs its own thread pools, so more parallel conversions oversubscribe.
 TILE_CONVERTERS = 2
@@ -220,6 +234,7 @@ def run_tile_task(params: Parameters):
         print(f"Error: Input directory does not exist: {input_dir}")
         sys.exit(1)
     try:
+        _check_collection_dir(params, output_dir)
         with DirectoryTransaction(output_dir, inputs=[input_dir]) as transaction:
             _write_tile_task(params.model_copy(update={"output_dir": transaction.path}))
             # The GeoPackage stores source paths, but the layout points at the
@@ -232,6 +247,9 @@ def run_tile_task(params: Parameters):
                     layout["tindex"] = str(output_dir.resolve() / relative)
                     bounds.write_text(json.dumps(layout, indent=2) + "\n")
             transaction.commit()
+        from collection_folders import tile_collections
+        _publish_collections(params, tile_collections(output_dir), {
+            name: output_dir / name for name in ("tile_bounds_tindex.json", "overview_copc_tiles.png")})
     except Exception as exc:
         print(f"Error: {exc}")
         sys.exit(1)
@@ -404,7 +422,18 @@ def run_merge_task(params: Parameters):
     ready = bool(params.segmented_remapped_folder) or (bool(params.segmented_folders) and target is None)
     originals = params.original_raw_input_dir or params.original_input_dir
     original_output = Path(params.original_raw_output_dir or output_tiles.parent / "original_with_predictions")
+    rct_folders = None
+    if params.tree_tables_folder or params.tree_info_folder or params.tree_meshes_folder:
+        if not (params.tree_tables_folder and params.tree_info_folder):
+            print("Error: --tree-tables-folder and --tree-info-folder are required together "
+                  "(and with --tree-meshes-folder)")
+            sys.exit(1)
+        rct_folders = {"trees": Path(params.tree_tables_folder), "trees_info": Path(params.tree_info_folder),
+                       "trees_mesh": Path(params.tree_meshes_folder) if params.tree_meshes_folder else None}
     try:
+        if params.collection_dir is not None and len(collections) != 1:
+            raise ValueError("--collection-dir supports one prediction collection")
+        _check_collection_dir(params, output_tiles.parent)
         if params.original_copc_input_dir:
             if not originals:
                 raise ValueError("--original-laz-input-dir is required with --original-copc-input-dir")
@@ -433,9 +462,16 @@ def run_merge_task(params: Parameters):
             target_dims=set(_parse_csv(params.remap_dims)) if params.remap_dims else None,
             small_instances=_small_instance_policy(params),
             keep_unfiltered=not params.skip_unfiltered_tiles,
+            rct_folders=rct_folders,
         )
+        products = []
         if originals and params.transfer_original_dims_to_merged:
-            _create_prod_merged_outputs(original_output, output_tiles.parent, params)
+            products = _create_prod_merged_outputs(original_output, output_tiles.parent, params)
+        from collection_folders import merged_product_collections, merged_tile_collections, original_collections
+        _publish_collections(params, {
+            **merged_tile_collections(output_tiles, output_tiles.parent / "segmented_filtered"),
+            **(original_collections(original_output) if originals else {}),
+            **merged_product_collections(products)})
         print(f"Merge complete: {report['state']}; report: {output_tiles.parent / 'remap_first_report.json'}")
     except Exception as exc:
         print(f"Error: {exc}")
@@ -459,6 +495,7 @@ def run_remap_task(params: Parameters):
         if params.prediction_resolution_original and ("resolution_1" in params.model_fields_set or params.remap_tolerance is not None):
             raise ValueError("--prediction-resolution-original cannot be combined with --resolution-1 or --remap-tolerance")
         _validate_raw_original_lane(original_dir, output)
+        _check_collection_dir(params, output.parent)
         if params.original_copc_input_dir:
             _validate_copc_original_lane(Path(params.original_copc_input_dir))
             _validate_copc_laz_source_pairs(Path(params.original_copc_input_dir), original_dir)
@@ -474,8 +511,11 @@ def run_remap_task(params: Parameters):
             match_instances=params.match_instances,
             prediction_resolution_original=params.prediction_resolution_original,
         )
+        products = []
         if params.transfer_original_dims_to_merged:
-            _create_prod_merged_outputs(output, output.parent, params)
+            products = _create_prod_merged_outputs(output, output.parent, params)
+        from collection_folders import merged_product_collections, original_collections
+        _publish_collections(params, {**original_collections(output), **merged_product_collections(products)})
         print(f"Strict original remap complete: {output}")
     except Exception as exc:
         print(f"Error: {exc}")
@@ -495,6 +535,7 @@ def run_create_merged_file_task(params: Parameters):
         sys.exit(1)
     output_dir = Path(params.output_dir) if params.output_dir is not None else input_dirs[0].parent
     try:
+        _check_collection_dir(params, output_dir)
         if len(input_dirs) > 1:
             import shutil
             import tempfile
@@ -504,10 +545,12 @@ def run_create_merged_file_task(params: Parameters):
             print(f"Joining attributes of {len(input_dirs)} collections of the same originals")
             with tempfile.TemporaryDirectory(prefix=".joined-originals-", dir=output_dir) as work:
                 joined = join_attribute_collections(input_dirs, Path(work) / "originals")
-                _create_prod_merged_outputs(joined, output_dir, params)
+                products = _create_prod_merged_outputs(joined, output_dir, params)
                 shutil.rmtree(joined)
         else:
-            _create_prod_merged_outputs(input_dirs[0], output_dir, params)
+            products = _create_prod_merged_outputs(input_dirs[0], output_dir, params)
+        from collection_folders import merged_product_collections
+        _publish_collections(params, merged_product_collections(products))
     except Exception as e:
         print(f"Error: {e}")
         import traceback
@@ -636,7 +679,7 @@ def _field_cli_flags(field_name: str) -> list[str]:
 def _print_cli_help() -> None:
     """Print a compact SmartTile CLI help page."""
     option_groups = [
-        ("Common", ["task", "input_dir", "output_dir", "workers", "instance_dimension"]),
+        ("Common", ["task", "input_dir", "output_dir", "workers", "instance_dimension", "collection_dir"]),
         (
             "Tile",
             [
@@ -666,6 +709,9 @@ def _print_cli_help() -> None:
                 "subsampled_10cm_folder",
                 "subsampled_target_folder",
                 "segmented_remapped_folder",
+                "tree_tables_folder",
+                "tree_info_folder",
+                "tree_meshes_folder",
                 "prediction_transfer_tolerance",
                 "original_raw_input_dir",
                 "original_raw_output_dir",

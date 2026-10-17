@@ -13,6 +13,7 @@ import numpy as np
 from laspy.vlrs.vlrlist import VLRList
 
 from crs_records import standardize_projection_records
+from output_names import file_stem, split_known_extensions
 
 
 # R/lidR, LAS, and laspy names can all appear in standardization summaries.
@@ -419,6 +420,12 @@ def _point_cloud_paths(directory: Optional[Path]) -> List[Path]:
     )
 
 
+def is_copc_name(path: Path) -> bool:
+    """Whether a LAZ name marks a COPC file (`x.copc.laz`, also `x.copc.laz.laz`)."""
+    _, extensions = split_known_extensions(path)
+    return extensions[:1] == [".laz"] and ".copc" in extensions
+
+
 def point_cloud_files(directory: Optional[Path]) -> List[Path]:
     """Return point-cloud files, preferring COPC over matching plain LAZ/LAS."""
     files = _point_cloud_paths(directory)
@@ -426,8 +433,8 @@ def point_cloud_files(directory: Optional[Path]) -> List[Path]:
     for path in files:
         key = point_cloud_source_key(path)
         existing = by_source.get(key)
-        is_copc = path.name.lower().endswith(".copc.laz")
-        if existing is not None and existing.name.lower().endswith(".copc.laz") == is_copc:
+        is_copc = is_copc_name(path)
+        if existing is not None and is_copc_name(existing) == is_copc:
             # e.g. Plot1.las and plot1.laz: two sources, one key; never drop one silently.
             raise ValueError(f"{existing.name} and {path.name} name the same source; rename one of them")
         if existing is None or is_copc:
@@ -438,7 +445,7 @@ def point_cloud_files(directory: Optional[Path]) -> List[Path]:
 def raw_point_cloud_files(directory: Optional[Path]) -> List[Path]:
     """Return only non-COPC LAS/LAZ point-cloud files."""
     files = _point_cloud_paths(directory)
-    raw = [path for path in files if not path.name.lower().endswith(".copc.laz")]
+    raw = [path for path in files if not is_copc_name(path)]
     keys = {}
     for path in raw:
         key = point_cloud_source_key(path)
@@ -456,17 +463,12 @@ def copc_only_files(directory: Optional[Path]) -> List[Path]:
 
 def copc_files(directory: Optional[Path]) -> List[Path]:
     """Return COPC LAZ point-cloud files."""
-    return [path for path in _point_cloud_paths(directory) if path.name.lower().endswith(".copc.laz")]
+    return [path for path in _point_cloud_paths(directory) if is_copc_name(path)]
 
 
 def point_cloud_source_key(path: Path) -> str:
     """Return a stable source key shared by raw LAS/LAZ and derived COPC files."""
-    name = path.name.lower()
-    if name.endswith(".copc.laz"):
-        return name[:-9]
-    if name.endswith(".laz") or name.endswith(".las"):
-        return name.rsplit(".", 1)[0]
-    return path.stem.lower()
+    return file_stem(path).lower()
 
 
 def point_cloud_dimension_names(path: Path) -> Set[str]:
