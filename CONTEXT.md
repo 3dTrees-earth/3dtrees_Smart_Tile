@@ -15,7 +15,7 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
   instances. `--segmented-remapped-folder` skips the transfer and only filters
   already-dense (or coarse-only, with `--resolution-1`) tiles; it replaced the
   removed `filter` task. With `--original-laz-input-dir` it also enriches the
-  originals (Galaxy: Filter/Merge with Original LAZ/LAS files).
+  originals (Galaxy: Filter / merge, Remap target → Original files).
 - `remap`: transfers prediction dimensions from one or more collections onto the
   uploaded LAS/LAZ originals (`--original-laz-input-dir`; the hidden legacy alias
   `--original-input-dir` is still accepted). `--original-copc-input-dir` only
@@ -29,8 +29,8 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
   `dense_instance_ownership.py` and `bounded_point_index.py`. Do not reintroduce
   a second merge path.
 - With target geometry, transfer each model's predictions before filtering and
-  require 100% assignment (`--prediction-transfer-tolerance`; Galaxy uses the
-  0.1732 m default, √3 × a 10 cm source voxel). Without targets use the supplied geometry; coarse-only inputs
+  require 100% assignment (`--prediction-transfer-tolerance`, Galaxy: √3 ×
+  source voxel). Without targets use the supplied geometry; coarse-only inputs
   must keep samples from the same tiling run. Record the actual resolution. Do
   not enlarge the 5 cm correspondence or 1 cm duplicate radii to the voxel size.
 - Remove whole instances whose anchor (`centroid`, `highest_point`,
