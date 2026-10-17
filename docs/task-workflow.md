@@ -33,11 +33,10 @@ flowchart TD
 ```
 
 Galaxy exposes the same four tasks; its **Filter / merge segmented tiles** tool
-is `merge` and returns processed tiles and RCT companions. Its **Remap target**
-is either subsampled tiles (optional; empty filters at the segmented voxel size)
-or the original files, which merge then enriches like `remap`
+is `merge` with the 1 cm target tiles and returns processed tiles and RCT
+companions. When original files are given, it also enriches them like `remap`
 (`--original-laz-input-dir`). Several models and products use the Remap and
-Create merged file tools.
+Create prod-merged file tools.
 
 `merge --segmented-remapped-folder` accepts predictions that already lie on the
 dense geometry and skips the transfer. With `--resolution-1` set to their
@@ -114,7 +113,7 @@ still qualifies. The single-cloud bypass is unchanged.
 
 | Check | Distance / rule |
 | --- | --- |
-| Coarse prediction to target tile | Galaxy: √3 × segmented voxel size; CLI `--prediction-transfer-tolerance` default **0.1732 m**. Every target point must match. |
+| Coarse prediction to target tile | CLI `--prediction-transfer-tolerance` default **0.1732 m** (√3 × 10 cm), also used by Galaxy. Every target point must match. |
 | Cross-tile instance correspondence | **0.05 m**, then mutual-best pairing and `--overlap-threshold`. Independent of the transfer radius. |
 | Tree support, RCT recovery conflicts, duplicates | **0.01 m** XYZ. |
 | Original point to prediction | Default **√3 × res1** (0.0173 m at 1 cm); `--remap-tolerance` overrides it. |
@@ -139,8 +138,8 @@ the processed spacing, even where report or baseline names contain `1cm`.
 
 ## Original-resolution handoff
 
-Spatial and whole-instance tiling share the Galaxy **Output** selections: a voxel
-size or **Original resolution**, then LAZ, COPC LAZ or binary PLY. On the CLI use
+In Galaxy, spatial and whole-instance tiling both write resolution 1 and 2, each
+as LAZ or COPC LAZ; original resolution and PLY tiles are CLI only. On the CLI use
 `--tile-outputs original:laz` for spatial geometry, or
 `--instance-tiles PredInstance_SAT,PredInstance_FM --instance-outputs original:copc.laz,0.1:laz`
 for whole instances from two segmentations: the first dimension uses
@@ -148,8 +147,8 @@ for whole instances from two segmentations: the first dimension uses
 `instance_dim2/subsampled_res1/`, …. Each collection keeps only its own instance
 field plus requested attributes. Original resolution keeps duplicate points and
 the source coordinate grid; incompatible grids fail. After species annotation,
-remap with `--prediction-resolution-original` (Galaxy: **Resolution of the predictions →
-Original resolution**) and `--match-instances`: coordinates match within LAS
+remap with `--prediction-resolution-original` (CLI only) and `--match-instances`
+(Galaxy: **Match within the same instance**): coordinates match within LAS
 encoding precision and every original point must match for all models.
 
 ## Implementation entry points
