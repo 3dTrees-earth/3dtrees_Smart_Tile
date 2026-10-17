@@ -1,4 +1,4 @@
-"""Galaxy-facing I/O (v2.4.1): tolerant input names, RCT input folders, --collection-dir."""
+"""Galaxy-facing I/O: tolerant input names, RCT input folders, --collection-dir."""
 import json
 import shutil
 import sys
