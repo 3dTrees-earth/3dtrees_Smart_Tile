@@ -13,6 +13,7 @@ import numpy as np
 from laspy.vlrs.vlrlist import VLRList
 
 from crs_records import standardize_projection_records
+from output_names import file_stem
 
 
 # R/lidR, LAS, and laspy names can all appear in standardization summaries.
@@ -461,12 +462,7 @@ def copc_files(directory: Optional[Path]) -> List[Path]:
 
 def point_cloud_source_key(path: Path) -> str:
     """Return a stable source key shared by raw LAS/LAZ and derived COPC files."""
-    name = path.name.lower()
-    if name.endswith(".copc.laz"):
-        return name[:-9]
-    if name.endswith(".laz") or name.endswith(".las"):
-        return name.rsplit(".", 1)[0]
-    return path.stem.lower()
+    return file_stem(path).lower()
 
 
 def point_cloud_dimension_names(path: Path) -> Set[str]:

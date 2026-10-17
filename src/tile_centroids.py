@@ -33,6 +33,7 @@ import laspy
 import numpy as np
 
 from output_publication import publish_files, validate_output_paths
+from output_names import file_stem
 from voxel_grid import voxel_keys
 
 # One spilled point: XYZ in its tile's LAS encoding plus a bit per resolution.
@@ -700,7 +701,7 @@ def subsample_tiles_single_scan(plan, output_dir, resolutions, formats, *, worke
             source_scales.append(tuple(float(v) for v in reader.header.scales))
     scales = tuple(min(axis) for axis in zip(*source_scales))
     if plan.skip_tiling:
-        stem = sources[0].name[:-len(".copc.laz")] if sources[0].name.endswith(".copc.laz") else sources[0].stem
+        stem = file_stem(sources[0])
         tiles = [Tile(stem, (-math.inf, -math.inf, math.inf, math.inf), scales,
                       tuple(float(v) for v in header.offsets))]
     else:

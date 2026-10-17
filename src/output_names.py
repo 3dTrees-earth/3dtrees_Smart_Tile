@@ -1,10 +1,18 @@
-"""Subsampled-output naming: `subsample_output_name` and `resolution_label`."""
+"""File naming: `file_stem`, `subsample_output_name` and `resolution_label`."""
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
 from typing import Optional
+
+
+def file_stem(path) -> str:
+    """The name that pairs and names a file: its name without its extension (`x.copc.laz` -> `x`)."""
+    name = Path(path).name
+    if name.lower().endswith(".copc.laz"):
+        return name[:-len(".copc.laz")]
+    return Path(name).stem
 
 
 def resolution_label(resolution: float) -> str:
@@ -22,11 +30,7 @@ def subsample_output_name(input_file: Path, resolution: float, output_prefix: Op
     """Output file name for one subsampled input, shared by every subsampling path."""
     res_label = resolution_label(resolution)
     output_ext = ".copc.laz" if output_copc else ".laz"
-    # Generate output filename
-    stem = input_file.stem
-    # Remove .copc suffix if present
-    if stem.endswith('.copc'):
-        stem = stem[:-5]
+    stem = file_stem(input_file)
 
     # Extract original base filename by removing prefixes and resolution suffixes
     base_name = stem

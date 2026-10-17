@@ -8,7 +8,9 @@ from pathlib import Path
 import numpy as np
 
 from raycloud_instance_ids import RCT_ID_STRIDE, read_tile_namespace, validate_namespaced_labels
-from raycloud_tree_files import pair_tree_sidecars, rct_sidecar_folder, read_tree_header, tree_rows, tree_sidecars
+from output_names import file_stem
+from raycloud_tree_files import (TABLE_KINDS, pair_tree_sidecars, rct_sidecar_folder, read_tree_header,
+                                 tree_rows, tree_sidecars)
 from raycloud_meshes import DATASET_SCOPE, TILE_SCOPE, TreeMesh, pair_tree_meshes, write_tree_mesh
 from ply_crs import crs_comment_from_file
 
@@ -29,8 +31,8 @@ def _catalogue_tables(db, predictions, sidecars):
     for tile, files in pair_tree_sidecars(predictions, sidecars).items():
         namespace = read_tile_namespace(predictions[tile])
         table_ids = []
-        for source in files:
-            kind = "trees_info" if source.name.lower().endswith("_trees_info.txt") else "trees"
+        for kind in TABLE_KINDS:
+            source = files[kind]
             with source.open(encoding="utf-8", newline="") as stream:
                 description, heading, explicit = read_tree_header(stream, source)
                 heading = (heading.split(",", 1)[1] if explicit else heading).rstrip("\r\n")
@@ -81,7 +83,7 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
     same compact IDs as its LAZ and tables.
     """
     output_dir = Path(output_dir)
-    stems = [Path(name).stem.casefold() for name in ids_by_file]
+    stems = [file_stem(name).casefold() for name in ids_by_file]
     if len(stems) != len(set(stems)):
         raise ValueError("RCT originals require distinct stems for per-original tree files")
     all_ids = sorted({uid for ids in ids_by_file.values() for uid in ids if uid > 0})
@@ -106,7 +108,7 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
             kept = sorted(uid for uid in ids if uid > 0)
             entry = {"file": name, "tree_count": len(kept), "sidecars": {}}
             for kind, (description, heading) in headers.items():
-                table = file.with_name(f"{file.stem}_{kind}.txt")
+                table = file.with_name(f"{file_stem(file)}_{kind}.txt")
                 with table.open("w", encoding="utf-8", newline="") as stream:
                     stream.write(description)
                     stream.write(f"predinstance,{heading}\n")
@@ -117,7 +119,7 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
                             stream.write("\n")
                 entry["sidecars"][kind] = table.name
             if tile_meshes:
-                mesh_file = file.with_name(f"{file.stem}_trees_mesh.ply")
+                mesh_file = file.with_name(f"{file_stem(file)}_trees_mesh.ply")
                 wanted = {uid: mapping[uid] for uid in kept}
                 vertices, faces, per_tree = write_tree_mesh(
                     mesh_file, [(mesh, wanted) for mesh in tile_meshes], scope=DATASET_SCOPE,

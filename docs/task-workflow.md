@@ -34,9 +34,8 @@ flowchart TD
 
 Galaxy exposes the same four tasks; its **Filter / merge segmented tiles** tool
 is `merge` and returns processed tiles and RCT companions. Its **Remap target**
-is either subsampled tiles (optional; empty filters at the segmented voxel size)
-or the original files, which merge then enriches like `remap`
-(`--original-laz-input-dir`). Several models and products use the Remap and
+is subsampled tiles, the original files, which merge then enriches like `remap`
+(`--original-laz-input-dir`), or none (filter at the segmented voxel size). Several models and products use the Remap and
 Create merged file tools.
 
 `merge --segmented-remapped-folder` accepts predictions that already lie on the

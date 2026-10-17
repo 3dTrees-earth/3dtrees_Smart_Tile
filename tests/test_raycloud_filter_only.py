@@ -564,8 +564,8 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             with self.subTest(content=content), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 source = write_cloud(root / "c00_r00_segmented.las", [0], [1], instance="PredInstance_RCT")
-                tables = [root / f"c00_r00_{suffix}.txt" for suffix in ("trees", "trees_info")]
-                for table in tables:
+                tables = {kind: [root / f"c00_r00_{kind}.txt"] for kind in ("trees", "trees_info")}
+                for [table] in tables.values():
                     table.write_text("# RCT\npredinstance,header\n" + content)
                 ownership = {"tiles": [{"instances": [{"instance": 1, "kept": True}]}]}
                 with self.assertRaisesRegex(ValueError, expected_error):

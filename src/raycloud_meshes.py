@@ -35,7 +35,7 @@ _SCHEMA = ["ply", "format binary_little_endian 1.0", None,
 
 
 def tree_meshes(collection: Path) -> list[Path]:
-    """Find RCT tree meshes co-located with a prediction collection."""
+    """Find RCT tree meshes (``<tile>_trees_mesh.ply``) co-located with a prediction collection."""
     collection = Path(collection)
     folder = collection if collection.is_dir() else collection.parent
     return sorted((p for p in folder.glob("*.ply") if _MESH_FILE.fullmatch(p.name)),
@@ -49,8 +49,7 @@ def pair_tree_meshes(prediction_files, meshes) -> dict[int, Path]:
     by_key = {_prediction_key(p): i for i, p in enumerate(prediction_files)}
     result = {}
     for mesh in meshes:
-        key = _tile_key(Path(_MESH_FILE.fullmatch(mesh.name).group("stem")))
-        tile = by_key.get(key, 0 if len(prediction_files) == 1 else None)
+        tile = by_key.get(_tile_key(mesh), 0 if len(prediction_files) == 1 else None)
         if tile is None:
             raise ValueError(f"Cannot match RayCloudTools tree mesh {mesh.name} to a prediction tile")
         if tile in result:

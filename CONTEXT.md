@@ -71,7 +71,9 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
 ## RayCloudTools (RCT)
 
 - `PredInstance_RCT` with paired `_trees.txt`/`_trees_info.txt` per tile (and
-  optional `_trees_mesh.ply`) selects the membership-preserving path: no
+  optional `_trees_mesh.ply`), or the same files from `--tree-tables-folder`,
+  `--tree-info-folder` and `--tree-meshes-folder` (kind given by the folder,
+  tile by name), selects the membership-preserving path: no
   reconciliation, point reassignment or deduplication; small-instance
   reassignment and an intermediate merged LAZ are rejected (`--skip-merged-file`).
 - Retained IDs are `tile_id * 100000 + local_id` (one-based layout position;
@@ -180,8 +182,9 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
 - Tile: `main_tile.py` (`plan_tiling`), `tile_crs.py`, `tile_tindex.py`,
   `get_bounds_from_tindex.py`, `prepare_tile_jobs.py`, `tile_core_occupancy.py`,
   `tile_centroids.py` (single read), `tile_original_geometry.py`, `voxel_grid.py`,
-  `tile_copc.py` (Untwine/PDAL COPC), `output_names.py` (output names and
-  labels only), `subsample_*.py`, `plot_tiles_and_copc.py`.
+  `tile_copc.py` (Untwine/PDAL COPC), `output_names.py` (`file_stem`, the one
+  helper that drops the extension for pairing and naming; output names and
+  labels), `subsample_*.py`, `plot_tiles_and_copc.py`.
 - Instance tiles: `instance_tiles.py`, `instance_tile_outputs.py`.
 - Merge/remap: `remap_first_pipeline.py` (orchestration, `enrich_originals`,
   `strict_remap`), `merge_stages.py`, `dense_instance_ownership.py`,
@@ -189,7 +192,8 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
   `instance_consolidation.py`, `small_instance_reassignment.py`,
   `instance_statistics.py`, `instance_finalization.py`, `instance_labels.py`,
   `tile_bounds_graph.py`, `tile_file_matching.py`, `prediction_collections.py`,
-  `original_blocks.py`, `output_publication.py`.
+  `original_blocks.py`, `output_publication.py`, `collection_folders.py`
+  (`--collection-dir`: hard links into one flat folder per Galaxy collection).
 - Spatial index and parallelism: `bounded_point_index.py`,
   `spatial_query_cache.py`, `parallel_tiles.py`, `parallel_index_queries.py`,
   `parallel_remap.py`.

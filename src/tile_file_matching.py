@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 import laspy
 
+from output_names import file_stem
 from point_cloud_metadata import point_cloud_files
 from tile_bounds_graph import build_neighbor_graph_from_bounds_json, match_tiles_to_json_bounds
 
@@ -59,9 +60,9 @@ def _match_files_via_json(
     if len(source_files) == 1 and len(target_files) == 1:
         src = source_files[0]
         tgt = target_files[0]
-        tile_id = re.sub(r"_segmented$|_results$|_subsampled[\d.]+m$", "", src.stem)
+        tile_id = re.sub(r"_segmented$|_results$|_subsampled[\d.]+m$", "", file_stem(src))
         if not tile_id:
-            tile_id = src.stem
+            tile_id = file_stem(src)
         print(f"  Single file pair: {src.name} <-> {tgt.name}")
         return [(src, tgt, tile_id)]
 
@@ -72,7 +73,7 @@ def _match_files_via_json(
     for f in source_files:
         b = get_file_bounds(f)
         if b is not None:
-            stem = f.stem
+            stem = file_stem(f)
             source_boundaries[stem] = b
             stem_to_source_path[stem] = f
 
@@ -81,7 +82,7 @@ def _match_files_via_json(
     for f in target_files:
         b = get_file_bounds(f)
         if b is not None:
-            stem = f.stem
+            stem = file_stem(f)
             target_boundaries[stem] = b
             stem_to_target_path[stem] = f
 
