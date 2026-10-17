@@ -6,30 +6,13 @@ import re
 from pathlib import Path
 from typing import Optional
 
-KNOWN_EXTENSIONS = (".laz", ".las", ".copc", ".txt", ".ply")
-
-
-def split_known_extensions(path) -> tuple[str, list[str]]:
-    """Split a file name into its stem and trailing known extensions (lowercase, last first).
-
-    Extensions are stripped repeatedly and case-insensitively, so names that a
-    caller such as Galaxy built as `<name>.<ext>` from a name that already had
-    an extension still pair: `plot_A.laz.laz` and `plot_A.LAZ` -> `plot_A`,
-    `c00_r00.copc.laz` -> `c00_r00`. A name is never stripped to nothing.
-    """
-    name, extensions = Path(path).name, []
-    while True:
-        extension = next((e for e in KNOWN_EXTENSIONS
-                          if name.lower().endswith(e) and len(name) > len(e)), None)
-        if extension is None:
-            return name, extensions
-        name = name[:-len(extension)]
-        extensions.append(extension)
-
 
 def file_stem(path) -> str:
-    """The name that pairs and names a file: its name without known extensions."""
-    return split_known_extensions(path)[0]
+    """The name that pairs and names a file: its name without its extension (`x.copc.laz` -> `x`)."""
+    name = Path(path).name
+    if name.lower().endswith(".copc.laz"):
+        return name[:-len(".copc.laz")]
+    return Path(name).stem
 
 
 def resolution_label(resolution: float) -> str:

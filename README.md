@@ -227,11 +227,9 @@ products/
 
 ## Input names and collection folders
 
-Inputs are paired and named by their stem without known extensions, stripped
-repeatedly and case-insensitively (`.laz`, `.las`, `.copc`, `.txt`, `.ply`):
-`plot_A.laz.laz` and `plot_A.laz` are both `plot_A`, `c00_r00.copc.laz` is
-`c00_r00`. A caller such as Galaxy can therefore link every input as
-`<name>.<ext>` without cleaning the name first.
+Inputs are paired and named by their name without the extension:
+`plot_A.laz` is `plot_A`, `c00_r00.copc.laz` is `c00_r00`. A caller such as
+Galaxy links every input as `<name>.<ext>` from extension-free names.
 
 `--collection-dir DIR` (every task) additionally hard-links each product after
 a successful task into one flat folder per output collection, named

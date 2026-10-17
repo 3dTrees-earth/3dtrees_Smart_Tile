@@ -10,9 +10,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import run  # noqa: E402
 from collection_folders import merged_product_collections, original_collections, publish_collections  # noqa: E402
-from output_names import file_stem, subsample_output_name  # noqa: E402
+from output_names import file_stem  # noqa: E402
 from parameters import Parameters  # noqa: E402
-from point_cloud_metadata import is_copc_name, point_cloud_files, point_cloud_source_key  # noqa: E402
+from point_cloud_metadata import point_cloud_files  # noqa: E402
 from remap_first_pipeline import merge_collections  # noqa: E402
 from test_instance_tiles import inputs  # noqa: E402
 import test_raycloud_filter_only as rct_tests  # noqa: E402
@@ -25,31 +25,23 @@ def tree(root):
 
 
 @pytest.mark.parametrize("name, stem", [
-    ("plot_A.laz.laz", "plot_A"), ("c00_r00.copc.laz", "c00_r00"), ("Plot.LAZ", "Plot"),
-    ("plot_A.las.las", "plot_A"), ("c00_r00_trees.txt", "c00_r00_trees"), ("mesh.ply", "mesh"),
-    ("c00_r00", "c00_r00"), ("plot.v2.laz", "plot.v2"), ("scan.COPC.LAZ.laz", "scan"), (".laz", ".laz"),
+    ("plot_A.laz", "plot_A"), ("c00_r00.copc.laz", "c00_r00"), ("Plot.COPC.LAZ", "Plot"),
+    ("c00_r00_trees.txt", "c00_r00_trees"), ("mesh.ply", "mesh"), ("c00_r00", "c00_r00"),
 ])
-def test_file_stem_strips_known_extensions_repeatedly(name, stem):
+def test_file_stem_drops_the_extension(name, stem):
     assert file_stem(Path("folder") / name) == stem
 
 
-def test_doubled_extensions_name_one_source():
-    assert point_cloud_source_key(Path("Plot_A.laz.laz")) == "plot_a"
-    assert is_copc_name(Path("x.copc.laz")) and is_copc_name(Path("x.copc.laz.laz"))
-    assert not is_copc_name(Path("x.laz.laz")) and not is_copc_name(Path("copc.laz"))
-    assert subsample_output_name(Path("mikro.laz.copc.laz"), 0.1, None, False) == "mikro_subsampled_10cm.laz"
-
-
-def test_galaxy_named_inputs_with_one_source_key_fail(tmp_path):
-    (tmp_path / "plot.laz.laz").write_bytes(b"")
-    (tmp_path / "plot.las").write_bytes(b"")
+def test_inputs_with_one_source_key_fail(tmp_path):
+    (tmp_path / "plot.laz").write_bytes(b"")
+    (tmp_path / "Plot.las").write_bytes(b"")
     with pytest.raises(ValueError, match="name the same source"):
         point_cloud_files(tmp_path)
 
 
 def test_tile_collection_dir_holds_one_flat_folder_per_output(tmp_path):
     source = inputs(tmp_path)[0]
-    source.rename(source.with_name("plot_A.las.las"))  # Galaxy: '<element_identifier>.<ext>'
+    source.rename(source.with_name("plot_A.las"))  # Galaxy: '<element_identifier>.<ext>'
     (source.parent / "b.las").unlink()
     products, collections = tmp_path / "products", tmp_path / "collections"
     run.run_tile_task(Parameters(_cli_parse_args=[
@@ -142,7 +134,7 @@ def test_originals_and_merged_products_get_one_extension(tmp_path):
     work = tmp_path / "work"
     originals = work / "original_with_predictions"
     originals.mkdir(parents=True)
-    for name in ("plot_A.laz.laz", "plot_B.las", "plot_B_trees.txt", "rct_instance_mapping.json"):
+    for name in ("plot_A.laz", "plot_B.las", "plot_B_trees.txt", "rct_instance_mapping.json"):
         (originals / name).write_bytes(name.encode())
     products = [work / name for name in ("prod_merged_10cm.laz", "prod_merged_10cm.copc.laz", "merged.ply")]
     for product in products:

@@ -67,7 +67,7 @@ def rct_sidecar_folder(collection: Path) -> Path:
 def _tile_key(path: Path) -> str:
     """The tile a prediction, table or mesh belongs to: its grid name, else its stem.
 
-    The stem drops known extensions, an RCT ``_trees``/``_trees_info``/``_trees_mesh``
+    The stem drops the extension, an RCT ``_trees``/``_trees_info``/``_trees_mesh``
     suffix and then one SmartTile stage suffix.
     """
     match = _GRID_TILE.search(path.name)

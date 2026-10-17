@@ -183,7 +183,7 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
   `get_bounds_from_tindex.py`, `prepare_tile_jobs.py`, `tile_core_occupancy.py`,
   `tile_centroids.py` (single read), `tile_original_geometry.py`, `voxel_grid.py`,
   `tile_copc.py` (Untwine/PDAL COPC), `output_names.py` (`file_stem`, the one
-  helper that strips known extensions for pairing and naming; output names and
+  helper that drops the extension for pairing and naming; output names and
   labels), `subsample_*.py`, `plot_tiles_and_copc.py`.
 - Instance tiles: `instance_tiles.py`, `instance_tile_outputs.py`.
 - Merge/remap: `remap_first_pipeline.py` (orchestration, `enrich_originals`,
