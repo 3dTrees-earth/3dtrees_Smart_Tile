@@ -134,7 +134,10 @@ output tile ([decision diagrams](docs/filter-decision-flow.md)). With
 `--original-laz-input-dir` it also enriches the originals like `remap`.
 
 **RayCloudTools.** Put each tile's `*_trees.txt` and `*_trees_info.txt` (and
-optional `*_trees_mesh.ply`) beside its LAZ and pass
+optional `*_trees_mesh.ply`) beside its LAZ, or pass them in folders of their
+own with `--tree-tables-folder`, `--tree-info-folder` and optionally
+`--tree-meshes-folder` (one file per tile, paired with the tiles by tile name,
+e.g. `c00_r00.txt`; no `_trees` suffix needed), and pass
 `--instance-dimension PredInstance_RCT --skip-merged-file`. RCT trees are not
 reconciled or deduplicated; retained IDs become `tile_id * 100000 + local_id`,
 and the tables and meshes are filtered to the same IDs. See
@@ -222,6 +225,35 @@ products/
 - `--staged-copc-dir` reuses COPCs only when the staging manifest records their
   source; `--standardization-json` checks that expected dimensions survive.
 
+## Input names and collection folders
+
+Inputs are paired and named by their stem without known extensions, stripped
+repeatedly and case-insensitively (`.laz`, `.las`, `.copc`, `.txt`, `.ply`):
+`plot_A.laz.laz` and `plot_A.laz` are both `plot_A`, `c00_r00.copc.laz` is
+`c00_r00`. A caller such as Galaxy can therefore link every input as
+`<name>.<ext>` without cleaning the name first.
+
+`--collection-dir DIR` (every task) additionally hard-links each product after
+a successful task into one flat folder per output collection, named
+`<name>.<ext>` with a single extension (COPC files end in `.laz`); the task's
+own layout above is unchanged. `DIR` must be new or empty and on the same
+filesystem as the outputs.
+
+```
+DIR/
+├── tiles_1/ … tiles_N/            # tile: --tile-outputs entry i (or --instance-outputs, first dimension)
+├── tile_bounds_tindex.json        # tile
+├── overview_copc_tiles.png        # tile
+├── merged_tiles/                  # merge: c00_r00.laz, … (one prediction collection)
+├── tree_tables/                   # merge, RCT: c00_r00_filtered_trees.txt
+├── tree_info_tables/              # merge, RCT: c00_r00_filtered_trees_info.txt
+├── tree_meshes/                   # merge, RCT: c00_r00_filtered_trees_mesh.ply
+├── originals_with_predictions/    # merge with originals, remap: <original>.laz / .las
+├── merged_laz/                    # prod_merged_10cm.laz, merged.laz
+├── merged_copc/                   # prod_merged_10cm.laz, merged.laz (COPC content)
+└── merged_ply/                    # prod_merged_10cm.ply, merged.ply
+```
+
 ## Key parameters
 
 | Flag | Default | Notes |
@@ -235,6 +267,8 @@ products/
 | `--reassign-small-instances` | off | With `--max-cluster-size` 3000, `--max-volume-for-merge` 4 m³; not for RCT |
 | `--skip-merged-file` | off | No `merged_tiles.laz`; required for RCT |
 | `--skip-unfiltered-tiles` | off | Do not publish the dense baseline |
+| `--tree-tables-folder` / `--tree-info-folder` / `--tree-meshes-folder` | none | RCT tables and meshes in folders of their own, paired by tile name |
+| `--collection-dir` | none | Also publish one flat folder per output collection ([above](#input-names-and-collection-folders)) |
 | `--remap-tolerance` | √3 × `--resolution-1` | Final coverage radius override |
 | `--produce-merged-file` | off | Products after enrichment (merge, remap) |
 | `--merged-resolutions` | `res1,res2` | `full` = every point |

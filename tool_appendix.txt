@@ -2,7 +2,7 @@
 \noindent
 \begin{tabular}{@{}p{0.28\linewidth}p{0.68\linewidth}@{}}
 \textbf{Main developers} & Kilian Gerberding \\
-\textbf{Current version} & v2.4.0 \\
+\textbf{Current version} & v2.4.1 \\
 \textbf{Galaxy tool ID}  & \texttt{3dtrees\_smart\_tile} \\
 \textbf{Access on Galaxy} & \url{https://...} \\
 \textbf{GitHub repository} & \url{https://github.com/3dTrees-earth/3dtrees} (tools/tool\_smart\_tile) \\

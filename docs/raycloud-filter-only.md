@@ -10,6 +10,12 @@ are encoded with a reversible tile prefix. RCT processing skips cross-tile
 reconciliation, point deduplication, and membership changes. It can recover
 whole rejected trees under the strict ownership check below.
 
+The tables (and optional meshes) lie beside the tiles as `<tile>_trees.txt`,
+`<tile>_trees_info.txt` and `<tile>_trees_mesh.ply`, or come from folders of
+their own (`--tree-tables-folder`, `--tree-info-folder`,
+`--tree-meshes-folder`), where the folder gives the kind and the tile name in
+the file name gives the tile.
+
 ## Recovery without ownership conflicts
 
 A rejected RCT instance is eligible when it supplies unsupported tree geometry
