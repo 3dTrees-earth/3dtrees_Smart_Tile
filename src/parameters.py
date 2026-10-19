@@ -243,23 +243,24 @@ class Parameters(BaseSettings):
 
     tree_tables_folder: Optional[Path] = Field(
         default=None,
-        description="Merge of RayCloudTools tiles: folder with one tree table per segmented tile, "
-                    "paired with the tiles by tile name (e.g. c00_r00.txt); requires --tree-info-folder. "
-                    "Without it, <tile>_trees.txt and <tile>_trees_info.txt beside the tiles are used.",
+        description="Merge or remap of RayCloudTools tiles: folder with one tree table per segmented tile "
+                    "(remap: per merged tile), paired with the tiles by tile name (e.g. c00_r00.txt); "
+                    "requires --tree-info-folder. Without it, <tile>_trees.txt and <tile>_trees_info.txt "
+                    "beside the tiles (or the merge's own tables) are used.",
         validation_alias=AliasChoices("tree-tables-folder", "tree_tables_folder"),
     )
 
     tree_info_folder: Optional[Path] = Field(
         default=None,
-        description="Merge of RayCloudTools tiles: folder with one tree-info table per segmented tile, "
+        description="Merge or remap of RayCloudTools tiles: folder with one tree-info table per tile, "
                     "paired by tile name; requires --tree-tables-folder.",
         validation_alias=AliasChoices("tree-info-folder", "tree_info_folder"),
     )
 
     tree_meshes_folder: Optional[Path] = Field(
         default=None,
-        description="Merge of RayCloudTools tiles: optional folder with one tree mesh (PLY) per "
-                    "segmented tile, paired by tile name; requires the two table folders.",
+        description="Merge or remap of RayCloudTools tiles: optional folder with one tree mesh (PLY) per "
+                    "tile, paired by tile name; requires the two table folders.",
         validation_alias=AliasChoices("tree-meshes-folder", "tree_meshes_folder"),
     )
 

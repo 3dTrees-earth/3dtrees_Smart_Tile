@@ -422,14 +422,7 @@ def run_merge_task(params: Parameters):
     ready = bool(params.segmented_remapped_folder) or (bool(params.segmented_folders) and target is None)
     originals = params.original_raw_input_dir or params.original_input_dir
     original_output = Path(params.original_raw_output_dir or output_tiles.parent / "original_with_predictions")
-    rct_folders = None
-    if params.tree_tables_folder or params.tree_info_folder or params.tree_meshes_folder:
-        if not (params.tree_tables_folder and params.tree_info_folder):
-            print("Error: --tree-tables-folder and --tree-info-folder are required together "
-                  "(and with --tree-meshes-folder)")
-            sys.exit(1)
-        rct_folders = {"trees": Path(params.tree_tables_folder), "trees_info": Path(params.tree_info_folder),
-                       "trees_mesh": Path(params.tree_meshes_folder) if params.tree_meshes_folder else None}
+    rct_folders = _rct_folders(params)
     try:
         if params.collection_dir is not None and len(collections) != 1:
             raise ValueError("--collection-dir supports one prediction collection")
@@ -478,6 +471,18 @@ def run_merge_task(params: Parameters):
         sys.exit(1)
 
 
+def _rct_folders(params: Parameters):
+    """RayCloudTools tables and meshes from folders of their own, or None."""
+    if not (params.tree_tables_folder or params.tree_info_folder or params.tree_meshes_folder):
+        return None
+    if not (params.tree_tables_folder and params.tree_info_folder):
+        print("Error: --tree-tables-folder and --tree-info-folder are required together "
+              "(and with --tree-meshes-folder)")
+        sys.exit(1)
+    return {"trees": Path(params.tree_tables_folder), "trees_info": Path(params.tree_info_folder),
+            "trees_mesh": Path(params.tree_meshes_folder) if params.tree_meshes_folder else None}
+
+
 def run_remap_task(params: Parameters):
     """Validate baseline and final coverage independently for every model."""
     from remap_first_pipeline import strict_remap
@@ -491,6 +496,7 @@ def run_remap_task(params: Parameters):
         sys.exit(1)
     original_dir = Path(originals)
     output = _raw_original_output_dir(params, original_dir)
+    rct_folders = _rct_folders(params)
     try:
         if params.prediction_resolution_original and ("resolution_1" in params.model_fields_set or params.remap_tolerance is not None):
             raise ValueError("--prediction-resolution-original cannot be combined with --resolution-1 or --remap-tolerance")
@@ -510,6 +516,7 @@ def run_remap_task(params: Parameters):
             target_dims=set(_parse_csv(params.remap_dims)) if params.remap_dims else None,
             match_instances=params.match_instances,
             prediction_resolution_original=params.prediction_resolution_original,
+            rct_folders=rct_folders,
         )
         products = []
         if params.transfer_original_dims_to_merged:

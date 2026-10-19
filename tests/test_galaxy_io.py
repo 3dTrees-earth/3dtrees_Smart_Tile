@@ -130,6 +130,34 @@ def test_merge_collection_dir_layout(tmp_path):
     assert json.loads((tmp_path / "out/output_tiles/smarttile_merge.json").read_text())["rct_tree_sidecars"]
 
 
+def test_remap_takes_the_merged_rct_files_from_folders_of_their_own(tmp_path):
+    # Galaxy stages a merge's tiles, tables and meshes as separate collections.
+    source, layout, folders = rct_folders(tmp_path)
+    merged = tmp_path / "merged"
+    run.run_merge_task(Parameters(_cli_parse_args=[
+        "--task", "merge", "--segmented-remapped-folder", str(source), "--tile-bounds-json", str(layout),
+        "--output-tiles-folder", str(tmp_path / "out/output_tiles"), "--instance-dimension", "PredInstance_RCT",
+        "--disable-matching", "True", "--skip-merged-file", "True", "--skip-unfiltered-tiles", "True",
+        "--tree-tables-folder", str(folders["trees"]), "--tree-info-folder", str(folders["trees_info"]),
+        "--tree-meshes-folder", str(folders["trees_mesh"]), "--collection-dir", str(merged)]))
+    tiles = tmp_path / "tiles"
+    shutil.copytree(merged / "merged_tiles", tiles)
+    (tiles / "smarttile_merge.json").unlink(missing_ok=True)
+    originals = tmp_path / "originals"
+    originals.mkdir()
+    rct_tests.write_cloud(originals / "raw.las", [1, 11, 10.6])
+    collections = tmp_path / "collections"
+    run.run_remap_task(Parameters(_cli_parse_args=[
+        "--task", "remap", "--segmented-folders", str(tiles), "--original-raw-input-dir", str(originals),
+        "--original-raw-output-dir", str(tmp_path / "final"), "--instance-dimension", "PredInstance_RCT",
+        "--tree-tables-folder", str(merged / "tree_tables"), "--tree-info-folder", str(merged / "tree_info_tables"),
+        "--tree-meshes-folder", str(merged / "tree_meshes"), "--collection-dir", str(collections)]))
+    assert laspy.read(tmp_path / "final/raw.las").PredInstance_RCT.tolist() == [1, 2, 0]
+    assert tree(collections) == [
+        "original_tree_info_tables/raw_trees_info.txt", "original_tree_meshes/raw_trees_mesh.ply",
+        "original_tree_tables/raw_trees.txt", "originals_with_predictions/raw.las"]
+
+
 def test_originals_and_merged_products_get_one_extension(tmp_path):
     work = tmp_path / "work"
     originals = work / "original_with_predictions"
@@ -143,6 +171,7 @@ def test_originals_and_merged_products_get_one_extension(tmp_path):
     publish_collections(collections, {**original_collections(originals), **merged_product_collections(products)})
     assert tree(collections) == [
         "merged_copc/prod_merged_10cm.laz", "merged_laz/prod_merged_10cm.laz", "merged_ply/merged.ply",
+        "original_tree_tables/plot_B_trees.txt",
         "originals_with_predictions/plot_A.laz", "originals_with_predictions/plot_B.las"]
     assert (collections / "merged_copc/prod_merged_10cm.laz").read_bytes() == b"prod_merged_10cm.copc.laz"
 

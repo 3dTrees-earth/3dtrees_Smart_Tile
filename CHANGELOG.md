@@ -28,6 +28,7 @@
 - The full-resolution product includes COPC-only sources like the subsampled products, and its COPC accepts scalarized vector ExtraBytes (it failed on every vector input).
 - A staged COPC is reused only when the staging manifest records its source; a header match could reuse old predictions.
 - Remap and merge refuse COPC-only originals instead of skipping them with exit 0.
+- Remap takes a merge's RayCloudTools tables and meshes from folders of their own (`--tree-tables-folder`, `--tree-info-folder`, `--tree-meshes-folder`, as merge does), so a Galaxy remap that receives them as separate collections no longer fails with `Missing RayCloudTools tree or treeinfo file`. `--collection-dir` publishes the per-original tables and meshes as `original_tree_tables`, `original_tree_info_tables` and `original_tree_meshes`.
 - Small-instance reassignment keeps tiles LAZ-compressed (it wrote uncompressed LAS into .laz files).
 - tile_bounds_tindex.json bounds are the union over every LAS tile output, not only the first (a coarse first output could hide 1 cm points from merge's overlap checks).
 - A failing product chunk cancels the remaining chunks.
