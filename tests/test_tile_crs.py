@@ -36,6 +36,8 @@ def cloud(path, crs=None, xyz=((2650174.7, 1249627.9, 0.0), (2650204.6, 1249657.
 
 LONLAT = ((7.90, 47.17, 500.0), (7.91, 47.18, 540.0))
 ECEF_3035 = ((4294967.296, 0.0, 0.0), (4295363.156, 183.287, 18.64))
+ECEF_FREIBURG = ((4235783.49, 584005.43, 4717099.27), (4235849.03, 584071.73, 4717203.40))
+STANDARDIZED_LOCAL = ((0.0, 0.0, 0.0), (50.0, 50.0, 20.0))
 
 
 class MetricCrsTests(unittest.TestCase):
@@ -66,13 +68,21 @@ class MetricCrsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "geographic"):
                 self.check(cloud(Path(tmp) / "a.las", "EPSG:4258+5783", LONLAT))
 
-    def test_geocentric_3035_layout_is_rejected(self):
+    def test_earth_centred_coordinates_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             for version in ("1.2", "1.4"):
                 with self.subTest(version=version):
-                    path = cloud(Path(tmp) / f"9451_{version}.las", "EPSG:4978", ECEF_3035, version)
+                    path = cloud(Path(tmp) / f"ecef_{version}.las", "EPSG:4978", ECEF_FREIBURG, version)
                     with self.assertRaisesRegex(ValueError, r"EPSG:4978 .*geocentric"):
                         self.check(path)
+
+    def test_standardization_stand_in_is_local_metres(self):
+        """Standardization moves data without a usable CRS to 0,0,0 and labels it EPSG:4978."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, xyz in (("local", STANDARDIZED_LOCAL), ("9451", ECEF_3035)):
+                with self.subTest(layout=name):
+                    self.assertEqual(self.check(cloud(root / f"{name}.las", "EPSG:4978", xyz)).to_epsg(), 4978)
 
     def test_non_metre_linear_unit_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -114,7 +124,7 @@ class MetricCrsTests(unittest.TestCase):
 class TilePipelineTests(unittest.TestCase):
     def test_tile_task_fails_before_indexing(self):
         """The planned-tile limit must not be the first error (37,751,670 tiles for 2935)."""
-        for name, crs, xyz in (("2935", "EPSG:4326", LONLAT), ("3035", "EPSG:4978", ECEF_3035)):
+        for name, crs, xyz in (("2935", "EPSG:4326", LONLAT), ("ecef", "EPSG:4978", ECEF_FREIBURG)):
             with self.subTest(dataset=name), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 (root / "in").mkdir()

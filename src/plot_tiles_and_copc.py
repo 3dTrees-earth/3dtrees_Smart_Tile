@@ -13,7 +13,7 @@ try:
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
     from matplotlib.collections import PatchCollection
-    from pyproj import Transformer
+    from pyproj import CRS, Transformer
 except ImportError as e:
     print("ERROR: Required packages missing. Install with: pip install fiona matplotlib pyproj")
     print(f"Error: {e}")
@@ -101,6 +101,16 @@ def load_tile_extents(tile_bounds_json: Path):
     return tiles, data.get('proj_srs', 'EPSG:32632')
 
 
+def crs_label(srs: str) -> str:
+    """A short CRS name for the axis labels: a full WKT made the PNG about 30,000 px wide."""
+    try:
+        crs = CRS.from_user_input(srs)
+    except Exception:
+        return srs if len(srs) <= 60 else srs[:57] + "..."
+    authority = crs.to_authority()
+    return f"{authority[0]}:{authority[1]}" if authority else crs.name
+
+
 def plot_extents(tindex_path: Path, tile_bounds_json: Path, output_png: Path):
     """Create visualization of source files and tiles."""
     print("Loading tile extents...")
@@ -183,8 +193,8 @@ def plot_extents(tindex_path: Path, tile_bounds_json: Path, output_png: Path):
     ax.set_xlim(overall_xmin - x_padding, overall_xmax + x_padding)
     ax.set_ylim(overall_ymin - y_padding, overall_ymax + y_padding)
     ax.set_aspect('equal')
-    ax.set_xlabel(f'X (Projected CRS: {proj_srs})', fontsize=12)
-    ax.set_ylabel(f'Y (Projected CRS: {proj_srs})', fontsize=12)
+    ax.set_xlabel(f'X (CRS: {crs_label(proj_srs)})', fontsize=12)
+    ax.set_ylabel(f'Y (CRS: {crs_label(proj_srs)})', fontsize=12)
     ax.set_title('Source Files and Generated Tiles\n(Blue = source LAZ/LAS, Light red = Tiles)',
                  fontsize=14, weight='bold')
     ax.grid(True, alpha=0.3)
