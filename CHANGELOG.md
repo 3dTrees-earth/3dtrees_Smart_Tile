@@ -28,7 +28,7 @@
 - The full-resolution product includes COPC-only sources like the subsampled products, and its COPC accepts scalarized vector ExtraBytes (it failed on every vector input).
 - A staged COPC is reused only when the staging manifest records its source; a header match could reuse old predictions.
 - Remap and merge refuse COPC-only originals instead of skipping them with exit 0.
-- Remap unmaps its per-original scratch stores before removing them. On NFS job directories (Galaxy EU) a still-mapped file cannot be removed, so every remap failed with `[Errno 16] Device or resource busy: '.../.enrich-...'`.
+- Scratch folders are removed only after every file in them is closed. On NFS job directories (Galaxy EU) an open or mapped file cannot be removed, so every remap failed with `[Errno 16] Device or resource busy: '.../.enrich-...'` (enrichment kept its last prediction memmap and, with `--match-instances`, its label stores), and a merge that recovered orphaned trees could fail the same way (the recovery check left `orphan_claims.sqlite` open). The test suite now fails any test that removes a SmartTile scratch folder with a file still open.
 - Small-instance reassignment keeps tiles LAZ-compressed (it wrote uncompressed LAS into .laz files).
 - tile_bounds_tindex.json bounds are the union over every LAS tile output, not only the first (a coarse first output could hide 1 cm points from merge's overlap checks).
 - A failing product chunk cancels the remaining chunks.
