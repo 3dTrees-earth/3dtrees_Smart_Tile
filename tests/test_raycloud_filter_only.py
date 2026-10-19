@@ -534,6 +534,28 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                 strict_remap(collections=[output], originals=originals, output=root / "invalid")
             self.assertFalse((root / "invalid").exists())
 
+    def test_tile_without_trees_may_carry_the_tree_header_in_its_info_table(self):
+        # RayCloudTools cannot run treeinfo without trees and copies the tree table instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, layout = self._fixture(root)
+            write_cloud(source / "c01_r00_segmented.las", [10.5, 11, 9.5, 9.6], [0, 0, 0, 0],
+                        instance="PredInstance_RCT")
+            (source / "c00_r00_trees.txt").write_text("# RCT\ntree columns\ntree-1\ntree-2\n")
+            (source / "c00_r00_trees_info.txt").write_text("# RCT\ninfo columns\ninfo-1\ninfo-2\n")
+            for suffix in ("trees", "trees_info"):
+                (source / f"c01_r00_{suffix}.txt").write_text("# RCT\ntree columns\n")
+            originals = root / "originals"
+            originals.mkdir()
+            write_cloud(originals / "raw.las", [1, 11, 10.6])
+            merge_collections(collections=[source], target_dir=None, output_tiles=root / "output",
+                              tile_bounds_json=layout, ready=True, instance_dimension="PredInstance_RCT",
+                              originals=originals)
+            final = root / "original_with_predictions"
+            self.assertEqual(laspy.read(final / "raw.las").PredInstance_RCT.tolist(), [1, 0, 2])
+            self.assertEqual((final / "raw_trees_info.txt").read_text().splitlines()[1:],
+                             ["predinstance,info columns", "1,info-1", "2,info-2"])
+
     def test_unencoded_multiple_tiles_cannot_publish_ambiguous_originals(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

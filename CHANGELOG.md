@@ -28,6 +28,7 @@
 - The full-resolution product includes COPC-only sources like the subsampled products, and its COPC accepts scalarized vector ExtraBytes (it failed on every vector input).
 - A staged COPC is reused only when the staging manifest records its source; a header match could reuse old predictions.
 - Remap and merge refuse COPC-only originals instead of skipping them with exit 0.
+- A RayCloudTools tile without trees may carry the tree table header in its treeinfo table (RCT cannot run treeinfo without trees). Per-original tables take their columns from the tiles that have trees instead of failing with `incompatible RCT trees_info table columns`.
 - Small-instance reassignment keeps tiles LAZ-compressed (it wrote uncompressed LAS into .laz files).
 - tile_bounds_tindex.json bounds are the union over every LAS tile output, not only the first (a coarse first output could hide 1 cm points from merge's overlap checks).
 - A failing product chunk cancels the remaining chunks.

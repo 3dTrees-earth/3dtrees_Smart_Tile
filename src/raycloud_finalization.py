@@ -27,7 +27,7 @@ def remap_tree_sidecars(collection):
 def _catalogue_tables(db, predictions, sidecars):
     """Keep large QSM payloads on disk; validate both tables before rewriting."""
     db.execute("CREATE TABLE trees (kind TEXT, id INTEGER, payload TEXT, PRIMARY KEY(kind, id))")
-    headers, provenance = {}, {}
+    headers, fallback, provenance = {}, {}, {}
     for tile, files in pair_tree_sidecars(predictions, sidecars).items():
         namespace = read_tile_namespace(predictions[tile])
         table_ids = []
@@ -36,9 +36,7 @@ def _catalogue_tables(db, predictions, sidecars):
             with source.open(encoding="utf-8", newline="") as stream:
                 description, heading, explicit = read_tree_header(stream, source)
                 heading = (heading.split(",", 1)[1] if explicit else heading).rstrip("\r\n")
-                if kind in headers and heading != headers[kind][1]:
-                    raise ValueError(f"{source.name}: incompatible RCT {kind} table columns")
-                headers.setdefault(kind, (description, heading))
+                fallback.setdefault(kind, (description, heading))
                 ids = set()
                 for uid, payload in tree_rows(stream, source, explicit):
                     if namespace:
@@ -55,10 +53,16 @@ def _catalogue_tables(db, predictions, sidecars):
                             "source_local_id": uid % RCT_ID_STRIDE if namespace else uid,
                             "source_file": namespace["source_name"] if namespace else predictions[tile].name,
                         }
+                # A tile without trees has no columns to reconcile: RCT writes
+                # its treeinfo table with the tree table's header.
+                if ids:
+                    if kind in headers and heading != headers[kind][1]:
+                        raise ValueError(f"{source.name}: incompatible RCT {kind} table columns")
+                    headers.setdefault(kind, (description, heading))
                 table_ids.append(ids)
         if table_ids[0] != table_ids[1]:
             raise ValueError(f"{predictions[tile].name}: RCT tree and treeinfo instance IDs differ")
-    return headers, provenance
+    return {**fallback, **headers}, provenance
 
 
 def _open_tile_meshes(predictions, meshes):
