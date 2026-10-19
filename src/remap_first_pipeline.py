@@ -279,7 +279,11 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                         writer.write_points(out)
                         position += len(record)
                     write_retained_evlrs(writer, header)
-                del store, label_stores
+                # Unmap every scratch store before the directory goes: NFS job
+                # directories refuse to remove a file that is still mapped.
+                store.clear()
+                label_stores.clear()
+                data = batches = None
                 phases["write"] += time.monotonic() - tick
                 for dimension, ids in file_ids.items():
                     ids_by_dimension.setdefault(dimension, {})[file.name] = ids
