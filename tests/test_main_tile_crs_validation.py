@@ -22,6 +22,16 @@ _STANDARD_25833 = CRS.from_epsg(25833).to_wkt("WKT1_GDAL")
 _ORIGINAL_25833 = _STANDARD_25833.replace('"ETRS89 / UTM zone 33N"', '"ETRS89 / UTM zone 33N(Meter)"', 1)
 
 
+_COMPOUND_UNKNOWN_VERTICAL_31983 = (
+    'COMPD_CS["SIRGAS 2000 / UTM 23S",PROJCS["SIRGAS 2000 / UTM 23S",GEOGCS["SIRGAS 2000",'
+    'DATUM["unnamed",SPHEROID["unnamed",6378137,298.257222101004]],PRIMEM["Greenwich",0],'
+    'UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],'
+    'PARAMETER["central_meridian",-45],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],'
+    'PARAMETER["false_northing",10000000],UNIT["metre",1],AXIS["Easting",EAST],AXIS["Northing",NORTH]],'
+    'VERT_CS["",VERT_DATUM["unknown",2005],UNIT["metre",1],AXIS["Up",UP]]]'
+)
+
+
 class _FakeCrs:
     def __init__(self, authority=None, epsg=None, wkt="FAKE_WKT", equals_result=None):
         self.authority = authority
@@ -156,6 +166,32 @@ class CopcCrsValidationTests(unittest.TestCase):
             output = tmp_path / "output.las"
             _write_las(source, _STANDARD_25833.encode())
             _write_las(output, CRS.from_epsg(25832).to_wkt("WKT1_GDAL").encode())
+
+            ok, message = validate_single_crs_record(source, output)
+
+            self.assertFalse(ok)
+            self.assertIn("differs from source CRS", message)
+
+    def test_accepts_unknown_vertical_datum_dropped_or_added_by_the_writer(self):
+        """Dataset 1368: the COPC writer turns the 3D source into a compound CRS with an unknown vertical part."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source = tmp_path / "source.las"
+            output = tmp_path / "output.las"
+            _write_las(source, CRS.from_epsg(31983).to_3d().to_wkt().encode())
+            _write_las(output, _COMPOUND_UNKNOWN_VERTICAL_31983.encode())
+
+            ok, message = validate_single_crs_record(source, output)
+
+            self.assertTrue(ok, message)
+
+    def test_rejects_named_vertical_datum_change(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source = tmp_path / "source.las"
+            output = tmp_path / "output.las"
+            _write_las(source, CRS.from_epsg(31983).to_3d().to_wkt().encode())
+            _write_las(output, CRS("EPSG:31983+5714").to_wkt().encode())
 
             ok, message = validate_single_crs_record(source, output)
 
