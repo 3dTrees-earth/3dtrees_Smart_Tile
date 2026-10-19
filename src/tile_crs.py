@@ -9,6 +9,9 @@ every input header before indexing and fails with the file and CRS named.
 Files without readable CRS metadata are local coordinates and are accepted
 when no input declares a CRS; a mix of files with and without a CRS is
 rejected, because their coordinates need not share one frame.
+3Dtrees standardization moves data without a usable CRS to 0,0,0 and labels it
+EPSG:4978; a geocentric CRS whose points lie far inside the Earth is such a
+stand-in and is tiled as local metres.
 """
 from __future__ import annotations
 
@@ -23,6 +26,8 @@ REPROJECT_HINT = ("SmartTile tile size, buffer and subsampling resolutions are m
                   "reproject the point clouds to a projected CRS in metres (e.g. the local UTM zone) "
                   "and upload them again.")
 SHOWN_FILES = 5
+# Real Earth-centred coordinates lie about 6,350-6,390 km from the centre.
+MAX_STAND_IN_RADIUS = 6_000_000.0
 
 
 def _label(crs) -> str:
@@ -40,6 +45,15 @@ def horizontal_crs(crs):
     if crs.is_compound and crs.sub_crs_list:
         crs = _unbound(crs.sub_crs_list[0])
     return crs
+
+
+def is_local_stand_in(crs, header) -> bool:
+    """True for a geocentric CRS whose points cannot be Earth-centred (standardization's local EPSG:4978)."""
+    if not horizontal_crs(crs).is_geocentric:
+        return False
+    corners = [(x, y, z) for x in (header.mins[0], header.maxs[0])
+               for y in (header.mins[1], header.maxs[1]) for z in (header.mins[2], header.maxs[2])]
+    return max((x * x + y * y + z * z) ** 0.5 for x, y, z in corners) < MAX_STAND_IN_RADIUS
 
 
 def unit_problem(crs) -> Optional[str]:
@@ -69,12 +83,15 @@ def require_metric_tiling_crs(files: Iterable[Path]):
     declared: List[Tuple[Path, object]] = []
     undeclared: List[Path] = []
     unreadable: List[Path] = []
+    stand_ins: List[Path] = []
     for path in files:
         # LAS 1.4 may keep the WKT in an EVLR.
         with laspy.open(path) as reader:
             crs = parse_crs(reader.header)
             if crs is None and _has_projection_records(reader.header):
                 unreadable.append(Path(path))
+            if crs is not None and is_local_stand_in(crs, reader.header):
+                stand_ins.append(Path(path))
         if crs is not None:
             declared.append((Path(path), crs))
         else:
@@ -88,7 +105,12 @@ def require_metric_tiling_crs(files: Iterable[Path]):
         raise ValueError(f"{len(undeclared)} input file(s) have no CRS ({shown}{more}) while "
                          f"{declared[0][0].name} declares {_label(declared[0][1])}. All point clouds of one "
                          "dataset must share one projected CRS in metres; assign or reproject and upload again.")
-    problems = [(path, crs, why) for path, crs in declared if (why := unit_problem(crs))]
+    if stand_ins:
+        shown = ", ".join(path.name for path in stand_ins[:SHOWN_FILES])
+        print(f"Warning: {shown}: geocentric CRS with points far inside the Earth; "
+              "tiling as local metres (3Dtrees standardization stand-in).")
+    problems = [(path, crs, why) for path, crs in declared
+                if path not in stand_ins and (why := unit_problem(crs))]
     if problems:
         shown = "; ".join(f"{path.name}: {_label(crs)} {why}" for path, crs, why in problems[:SHOWN_FILES])
         more = f" (and {len(problems) - SHOWN_FILES} more files)" if len(problems) > SHOWN_FILES else ""
