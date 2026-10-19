@@ -106,6 +106,44 @@ def standardize_projection_records(header):
     return header
 
 
+UNNAMED_DATUMS = {"", "unknown", "unnamed"}
+
+
+def _split_crs(crs):
+    """Horizontal CRS and vertical datum names of ``crs`` (source of a bound CRS, parts of a compound CRS)."""
+    if getattr(crs, "is_bound", False) and crs.source_crs is not None:
+        crs = crs.source_crs
+    if not crs.is_compound:
+        return crs, []
+    parts = [sub.source_crs if getattr(sub, "is_bound", False) and sub.source_crs is not None else sub
+             for sub in crs.sub_crs_list]
+    return parts[0], [sub.datum.name if sub.datum else "" for sub in parts[1:]]
+
+
+def same_horizontal_crs_unknown_vertical(source_crs, output_crs) -> bool:
+    """True when two CRSs share the projection and neither names a vertical datum.
+
+    COPC writers turn a source whose GeoTIFF keys carry an unknown vertical
+    datum (dataset 1368: SIRGAS 2000 / UTM 23S) into a compound CRS with an
+    "unknown" vertical part and an "unnamed" horizontal datum; nothing about
+    the coordinates changed.
+    """
+    import warnings
+
+    source_horizontal, source_vertical = _split_crs(source_crs)
+    output_horizontal, output_vertical = _split_crs(output_crs)
+    if any(name.strip().lower() not in UNNAMED_DATUMS for name in [*source_vertical, *output_vertical]):
+        return False
+    if not (source_horizontal.is_projected and output_horizontal.is_projected):
+        return False
+    datums = {(crs.datum.name if crs.datum else "").strip().lower() for crs in (source_horizontal, output_horizontal)}
+    if len(datums - UNNAMED_DATUMS) > 1:
+        return False
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return source_horizontal.to_2d().to_proj4() == output_horizontal.to_2d().to_proj4()
+
+
 def validate_single_crs_record(source_file: Path, copc_file: Path) -> Tuple[bool, str]:
     """Validate that an output carries exactly one CRS record, equal to the source CRS.
 
@@ -148,7 +186,7 @@ def validate_single_crs_record(source_file: Path, copc_file: Path) -> Tuple[bool
     if version == "1.4" and len(records) != 1:
         found = ", ".join(f"{kind} {record_id}" for kind, record_id, _ in records)
         return (False, f"output carries {len(records)} CRS records ({found}); exactly one standardized WKT record is required")
-    if not crs_equivalent(source_crs, output_crs):
+    if not crs_equivalent(source_crs, output_crs) and not same_horizontal_crs_unknown_vertical(source_crs, output_crs):
         return (False, f"output CRS {output_crs.name!r} differs from source CRS {source_crs.name!r}")
     return (True, "single CRS record, equal to the source CRS")
 
