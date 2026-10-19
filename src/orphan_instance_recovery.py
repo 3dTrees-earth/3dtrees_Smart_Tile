@@ -7,6 +7,7 @@ disk, so selection does not grow with the number of dense points in memory.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from time import perf_counter
 
 import laspy
@@ -166,7 +167,7 @@ def validate_recovered_geometry(index, model, selected, claims_path, report, ori
     if not selected:
         return
     checked, missing, examples = 0, 0, []
-    with sqlite3.connect(claims_path) as db:
+    with closing(sqlite3.connect(claims_path)) as db:
         for tile, uid in selected:
             cursor = db.execute('SELECT loc FROM claims WHERE tile=? AND instance=?', (tile, uid))
             while rows := cursor.fetchmany(MAX_BATCH_POINTS):

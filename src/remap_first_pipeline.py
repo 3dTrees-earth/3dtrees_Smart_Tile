@@ -279,7 +279,11 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                         writer.write_points(out)
                         position += len(record)
                     write_retained_evlrs(writer, header)
-                del store, label_stores
+                # Unmap every scratch store before the directory goes: NFS job
+                # directories refuse to remove a file that is still mapped.
+                store.clear()
+                label_stores.clear()
+                data = batches = None
                 phases["write"] += time.monotonic() - tick
                 for dimension, ids in file_ids.items():
                     ids_by_dimension.setdefault(dimension, {})[file.name] = ids
@@ -702,8 +706,14 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
 
 def strict_remap(*, collections, originals, output, baseline_collections=None, target_dims=None,
                  instance_dimension="PredInstance", workers=1, resolution_1=None,
-                 remap_tolerance=None, match_instances=False, prediction_resolution_original=False):
+                 remap_tolerance=None, match_instances=False, prediction_resolution_original=False,
+                 rct_folders=None):
     """Final task gate: 100% final coverage, plus baseline coverage where geometry is known.
+
+    ``rct_folders`` ({"trees": dir, "trees_info": dir, "trees_mesh": dir or None})
+    supplies the filtered RayCloudTools tables and meshes of a merge from
+    folders of their own, as merge takes them; otherwise they are found beside
+    the tiles or through the merge manifest.
 
     With ``match_instances`` (instance tiles of originals that already carry
     each collection's instance dimension), every original point takes the
@@ -814,10 +824,14 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
             if rct_ids:
                 rct_collection = next(collection for collection, model in zip(collections, models)
                                       if model.instance == "PredInstance_RCT")
+                if rct_folders:
+                    sidecars = {kind: folder_files(rct_folders[kind]) for kind in TABLE_KINDS}
+                    meshes = folder_files(rct_folders.get("trees_mesh"))
+                else:
+                    sidecars, meshes = remap_tree_sidecars(rct_collection), remap_tree_meshes(rct_collection)
                 report["rct_finalization"] = finalize_rct_originals(
                     work / "originals", rct_ids, prediction_collection_files(rct_collection),
-                    remap_tree_sidecars(rct_collection),
-                    meshes=remap_tree_meshes(rct_collection))
+                    sidecars, meshes=meshes)
             report["instance_finalization"] = compact_originals(work / "originals", final_ids)
             stack.close()
             report["checksums"] = {f.name: digest(f) for f in sorted((work / "originals").iterdir())}
