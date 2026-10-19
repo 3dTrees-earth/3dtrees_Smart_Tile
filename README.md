@@ -140,7 +140,10 @@ own with `--tree-tables-folder`, `--tree-info-folder` and optionally
 e.g. `c00_r00.txt`; no `_trees` suffix needed), and pass
 `--instance-dimension PredInstance_RCT --skip-merged-file`. RCT trees are not
 reconciled or deduplicated; retained IDs become `tile_id * 100000 + local_id`,
-and the tables and meshes are filtered to the same IDs. See
+and the tables and meshes are filtered to the same IDs. Remap takes the
+merge's tables and meshes the same way (beside the tiles, or with the three
+folder options) and writes `<original>_trees.txt`, `_trees_info.txt` and
+`_trees_mesh.ply` for every original. See
 [docs/raycloud-filter-only.md](docs/raycloud-filter-only.md).
 
 ```
@@ -247,6 +250,9 @@ DIR/
 ├── tree_info_tables/              # merge, RCT: c00_r00_filtered_trees_info.txt
 ├── tree_meshes/                   # merge, RCT: c00_r00_filtered_trees_mesh.ply
 ├── originals_with_predictions/    # merge with originals, remap: <original>.laz / .las
+├── original_tree_tables/          # merge with originals, remap, RCT: <original>_trees.txt
+├── original_tree_info_tables/     # merge with originals, remap, RCT: <original>_trees_info.txt
+├── original_tree_meshes/          # merge with originals, remap, RCT: <original>_trees_mesh.ply
 ├── merged_laz/                    # prod_merged_10cm.laz, merged.laz
 ├── merged_copc/                   # prod_merged_10cm.laz, merged.laz (COPC content)
 └── merged_ply/                    # prod_merged_10cm.ply, merged.ply

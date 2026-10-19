@@ -67,8 +67,14 @@ def merged_tile_collections(output_tiles: Path, tree_files: Path) -> dict[str, l
 
 
 def original_collections(original_output: Path) -> dict[str, list[Path]]:
-    """Originals with predictions; per-original RCT tables stay in the task output."""
-    return {"originals_with_predictions": _files(original_output, (".laz", ".las"))}
+    """Originals with predictions, and their RayCloudTools tables and meshes by kind."""
+    collections = {"originals_with_predictions": _files(original_output, (".laz", ".las"))}
+    for path in _files(original_output, (".txt", ".ply")):
+        stem = file_stem(path)
+        collection = next((f"original_{TREE_FILES[suffix]}" for suffix in TREE_FILES if stem.endswith(suffix)), None)
+        if collection is not None:
+            collections.setdefault(collection, []).append(path)
+    return collections
 
 
 def merged_product_collections(products) -> dict[str, list[Path]]:
