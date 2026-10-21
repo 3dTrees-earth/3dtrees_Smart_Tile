@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.4.2 - 2026-10-21
+
+### RayCloudTools terrain (3DT-2469)
+- Merge and remap take the RCT terrain meshes, beside the tiles (`<tile>_mesh.ply`) or with `--terrain-meshes-folder` (at most one per tile; RCT writes none for a tile with fewer than 3 ground points). Merge keeps each tile's triangles whose XY centroid lies in its half-open core and publishes them as `terrain_meshes` (`c00_r00_filtered_terrain_mesh.ply`). Its report counts vertices welded and boundary edges left open along the shared core lines, so a seam where neighbouring tiles triangulated their buffer differently shows up.
+- Every original gets `<original>_terrain_mesh.ply` (`original_terrain_meshes`): the core-filtered triangles whose centroid lies in a 1 m cell holding one of its points, with identical vertices from different tiles welded. Originals covering the same ground get identical triangles. Geometry, colours and winding are unchanged; the header records `comment crs:` from the original. The cells are collected while enriching the originals, without another read.
+
+### Headers (3DT-2470)
+- LAZ VLRs 24003/24004 and the per-original tree mesh comments no longer name `rct_instance_mapping.json` or `instance_mapping.json`. The Galaxy tool does not publish those files, so the references pointed nowhere. The ID scope and version fields stay.
+
 ## v2.4.0 - 2026-10-15
 
 ### Galaxy-facing input and output

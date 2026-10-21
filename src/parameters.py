@@ -264,6 +264,14 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("tree-meshes-folder", "tree_meshes_folder"),
     )
 
+    terrain_meshes_folder: Optional[Path] = Field(
+        default=None,
+        description="Merge or remap of RayCloudTools tiles: optional folder with at most one terrain mesh "
+                    "(PLY) per tile, paired by tile name; requires the two table folders. Merge keeps each "
+                    "tile's triangles in its core; each original gets the triangles over its points.",
+        validation_alias=AliasChoices("terrain-meshes-folder", "terrain_meshes_folder"),
+    )
+
     tile_bounds_json: Optional[Path] = Field(
         default=None,
         description="Required for merge: tile_bounds_tindex.json from the same tile run (tile cores and buffers)",

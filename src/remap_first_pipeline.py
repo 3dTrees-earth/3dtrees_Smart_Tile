@@ -37,6 +37,8 @@ from orphan_instance_recovery import recover_orphaned_instances, validate_recove
 from raycloud_tree_files import TABLE_KINDS, filter_tree_sidecars, folder_files, tree_sidecars
 from raycloud_finalization import finalize_rct_originals, remap_tree_sidecars
 from raycloud_meshes import filter_tree_meshes, remap_tree_meshes, tree_meshes
+from raycloud_terrain import (cell_keys, filter_terrain_meshes, filtered_terrain_meshes, open_tile_terrain,
+                              remap_terrain_meshes, terrain_meshes, terrain_seams)
 from instance_finalization import compact_originals
 from raycloud_recovery import RayCloudRecoveryGate
 from raycloud_instance_ids import (
@@ -155,12 +157,13 @@ def original_files(originals):
 
 
 def enrich_originals(models, indices, baseline_indices, originals, output_dir, origin, report, *,
-                     target_dims=None, matches=None):
+                     target_dims=None, matches=None, footprints=None):
     """Stage all originals and measure every model independently before failing.
 
     ``matches[i]`` (an instance dimension the originals already carry) makes
     model i match only prediction points of the same instance; that dimension
-    is then not transferred.
+    is then not transferred. ``footprints`` (a dict) receives, per original
+    name, the sorted 1 m cell keys holding its points, for the terrain cut.
     """
     matches = list(matches or [None] * len(models))
     files = original_files(originals)
@@ -242,9 +245,13 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                 phases["spill"] += time.monotonic() - tick
                 tick = time.monotonic()
                 total = int(source_header.point_count)
-                store, assigned = {}, 0
+                store, assigned, cells = {}, 0, []
                 for index, xyz, results in queries.map(batches):
                     assigned += len(index)
+                    if footprints is not None:
+                        cells.append(np.unique(cell_keys(xyz[:, :2] + origin[:2])))
+                        if len(cells) > 64:
+                            cells = [np.unique(np.concatenate(cells))]
                     for i, (base_distances, distances, values) in enumerate(results):
                         if base_distances is not None:
                             _record_coverage(baseline_metrics[i], xyz, base_distances, origin)
@@ -267,6 +274,8 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                             file_ids[instance].update(int(uid) for uid in np.unique(values[instance]) if uid > 0)
                 if assigned != total:
                     raise ValueError(f"{file.name}: enrichment queried {assigned:,} of {total:,} points")
+                if footprints is not None:
+                    footprints[file.name] = np.unique(np.concatenate(cells)) if cells else np.empty(0, dtype=np.int64)
                 phases["query"] += time.monotonic() - tick
                 tick = time.monotonic()
                 with laspy.open(file) as reader, \
@@ -428,12 +437,15 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
             raise ValueError("RayCloudTools tree files require one prediction collection")
         sidecars_by_collection = [{kind: folder_files(rct_folders[kind]) for kind in TABLE_KINDS}]
         meshes_by_collection = [folder_files(rct_folders.get("trees_mesh"))]
+        terrain_by_collection = [folder_files(rct_folders.get("terrain_mesh"))]
     else:
         sidecars_by_collection = [tree_sidecars(collection) for collection in collections]
         meshes_by_collection = [tree_meshes(collection) for collection in collections]
+        terrain_by_collection = [terrain_meshes(collection) for collection in collections]
     tree_mode = any(sidecars_by_collection)
-    if any(m and not t for m, t in zip(meshes_by_collection, sidecars_by_collection)):
-        raise ValueError("RayCloudTools tree meshes require the matching _trees.txt and _trees_info.txt tables")
+    for kind, meshes in (("tree", meshes_by_collection), ("terrain", terrain_by_collection)):
+        if any(m and not t for m, t in zip(meshes, sidecars_by_collection)):
+            raise ValueError(f"RayCloudTools {kind} meshes require the matching _trees.txt and _trees_info.txt tables")
     if tree_mode and len(collections) != 1:
         raise ValueError("RayCloudTools tree files require one prediction collection")
     if tree_mode and merged_output:
@@ -560,6 +572,11 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                         model_report["tree_meshes"] = timed_stage(model_report, 'tree_mesh_filter', filter_tree_meshes,
                             pairs, source_meshes, model_report["tree_sidecars"], work / "tree_files",
                             id_mapping=mapping)
+                    if terrain_by_collection[i]:
+                        model_report["terrain_meshes"] = timed_stage(model_report, 'terrain_mesh_filter',
+                            filter_terrain_meshes, pairs, terrain_by_collection[i], regions, work / "tree_files")
+                        model_report["terrain_meshes"]["seams"] = terrain_seams(
+                            open_tile_terrain(filtered_terrain_meshes(work / "tree_files")), regions)
                     with (final_tile_dir / "instance_metadata.csv").open("w", newline="", encoding="utf-8") as stream:
                         writer = csv.writer(stream)
                         writer.writerow(["tile", "tile_id", "local_instance_id", model.instance, "has_added_clusters"])
@@ -663,13 +680,15 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
             if tree_mode:
                 products.append((work / "tree_files", tree_output))
             if originals:
+                terrain = filtered_terrain_meshes(work / "tree_files") if tree_mode else []
+                footprints = {} if terrain else None
                 final_ids = enrich_originals(models, indices, baselines, originals, work / "originals", origin, report,
-                                          target_dims=target_dims)
+                                          target_dims=target_dims, footprints=footprints)
                 rct_ids = final_ids.get("PredInstance_RCT", {})
                 if rct_ids:
                     report["rct_finalization"] = finalize_rct_originals(
                         work / "originals", rct_ids, final_files, tree_sidecars(work / "tree_files"),
-                        meshes=tree_meshes(work / "tree_files"))
+                        meshes=tree_meshes(work / "tree_files"), terrain=terrain, footprints=footprints)
                 report["instance_finalization"] = compact_originals(work / "originals", final_ids,
                                                                     aliases=reassignments)
                 products.append((work / "originals", original_output))
@@ -817,13 +836,19 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
                 baseline_index.flush()
                 baselines.append(baseline_index)
             report.setdefault("timings", {})["indexing_seconds"] = time.monotonic() - indexing_start
+            rct_collection = next((collection for collection, model in zip(collections, models)
+                                   if model.instance == "PredInstance_RCT"), None)
+            terrain = []
+            if rct_collection is not None:
+                terrain = (folder_files(rct_folders.get("terrain_mesh")) if rct_folders
+                           else remap_terrain_meshes(rct_collection))
+            footprints = {} if terrain else None
             final_ids = enrich_originals(models, indices, baselines, originals, work / "originals", origin, report,
                                       target_dims=target_dims,
-                                      matches=[m.instance for m in models] if match_instances else None)
+                                      matches=[m.instance for m in models] if match_instances else None,
+                                      footprints=footprints)
             rct_ids = final_ids.get("PredInstance_RCT", {})
             if rct_ids:
-                rct_collection = next(collection for collection, model in zip(collections, models)
-                                      if model.instance == "PredInstance_RCT")
                 if rct_folders:
                     sidecars = {kind: folder_files(rct_folders[kind]) for kind in TABLE_KINDS}
                     meshes = folder_files(rct_folders.get("trees_mesh"))
@@ -831,7 +856,7 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
                     sidecars, meshes = remap_tree_sidecars(rct_collection), remap_tree_meshes(rct_collection)
                 report["rct_finalization"] = finalize_rct_originals(
                     work / "originals", rct_ids, prediction_collection_files(rct_collection),
-                    sidecars, meshes=meshes)
+                    sidecars, meshes=meshes, terrain=terrain, footprints=footprints)
             report["instance_finalization"] = compact_originals(work / "originals", final_ids)
             stack.close()
             report["checksums"] = {f.name: digest(f) for f in sorted((work / "originals").iterdir())}

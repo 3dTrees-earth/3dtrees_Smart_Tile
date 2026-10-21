@@ -473,14 +473,16 @@ def run_merge_task(params: Parameters):
 
 def _rct_folders(params: Parameters):
     """RayCloudTools tables and meshes from folders of their own, or None."""
-    if not (params.tree_tables_folder or params.tree_info_folder or params.tree_meshes_folder):
+    if not (params.tree_tables_folder or params.tree_info_folder or params.tree_meshes_folder
+            or params.terrain_meshes_folder):
         return None
     if not (params.tree_tables_folder and params.tree_info_folder):
         print("Error: --tree-tables-folder and --tree-info-folder are required together "
-              "(and with --tree-meshes-folder)")
+              "(and with --tree-meshes-folder or --terrain-meshes-folder)")
         sys.exit(1)
     return {"trees": Path(params.tree_tables_folder), "trees_info": Path(params.tree_info_folder),
-            "trees_mesh": Path(params.tree_meshes_folder) if params.tree_meshes_folder else None}
+            "trees_mesh": Path(params.tree_meshes_folder) if params.tree_meshes_folder else None,
+            "terrain_mesh": Path(params.terrain_meshes_folder) if params.terrain_meshes_folder else None}
 
 
 def run_remap_task(params: Parameters):
@@ -719,6 +721,7 @@ def _print_cli_help() -> None:
                 "tree_tables_folder",
                 "tree_info_folder",
                 "tree_meshes_folder",
+                "terrain_meshes_folder",
                 "prediction_transfer_tolerance",
                 "original_raw_input_dir",
                 "original_raw_output_dir",
