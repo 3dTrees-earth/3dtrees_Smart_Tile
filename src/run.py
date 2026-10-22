@@ -20,7 +20,13 @@ import sys
 import argparse
 from pathlib import Path
 
-from worker_budget import spatial_query_worker_count
+from worker_budget import (allocated_cpu_count, limit_native_threads, requested_workers,
+                           spatial_query_worker_count)
+
+# Cap native thread pools before numpy, laspy or lazrs load. Spawned worker
+# processes re-run this module as __mp_main__ and get one thread each.
+limit_native_threads(spatial_query_worker_count(requested_workers(sys.argv[1:]) or allocated_cpu_count()),
+                     worker_process=__name__ != "__main__")
 
 # Add src directory to path for imports when run from project root
 _src_dir = Path(__file__).parent.resolve()
@@ -473,14 +479,16 @@ def run_merge_task(params: Parameters):
 
 def _rct_folders(params: Parameters):
     """RayCloudTools tables and meshes from folders of their own, or None."""
-    if not (params.tree_tables_folder or params.tree_info_folder or params.tree_meshes_folder):
+    if not (params.tree_tables_folder or params.tree_info_folder or params.tree_meshes_folder
+            or params.terrain_meshes_folder):
         return None
     if not (params.tree_tables_folder and params.tree_info_folder):
         print("Error: --tree-tables-folder and --tree-info-folder are required together "
-              "(and with --tree-meshes-folder)")
+              "(and with --tree-meshes-folder or --terrain-meshes-folder)")
         sys.exit(1)
     return {"trees": Path(params.tree_tables_folder), "trees_info": Path(params.tree_info_folder),
-            "trees_mesh": Path(params.tree_meshes_folder) if params.tree_meshes_folder else None}
+            "trees_mesh": Path(params.tree_meshes_folder) if params.tree_meshes_folder else None,
+            "terrain_mesh": Path(params.terrain_meshes_folder) if params.terrain_meshes_folder else None}
 
 
 def run_remap_task(params: Parameters):
@@ -719,6 +727,7 @@ def _print_cli_help() -> None:
                 "tree_tables_folder",
                 "tree_info_folder",
                 "tree_meshes_folder",
+                "terrain_meshes_folder",
                 "prediction_transfer_tolerance",
                 "original_raw_input_dir",
                 "original_raw_output_dir",

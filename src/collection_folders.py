@@ -16,7 +16,8 @@ from output_names import file_stem
 from output_publication import publish_files
 
 POINT_CLOUDS = (".laz", ".las", ".ply")
-TREE_FILES = {"_trees": "tree_tables", "_trees_info": "tree_info_tables", "_trees_mesh": "tree_meshes"}
+TREE_FILES = {"_trees": "tree_tables", "_trees_info": "tree_info_tables", "_trees_mesh": "tree_meshes",
+              "_terrain_mesh": "terrain_meshes"}
 
 
 def _files(folder: Path, extensions) -> list[Path]:

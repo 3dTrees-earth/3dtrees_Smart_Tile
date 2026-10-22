@@ -87,7 +87,9 @@ the trees present in its paired original. Empty originals have empty tables.
 Intermediate encoded tiles and their tables remain unchanged and reusable.
 
 `rct_instance_mapping.json` preserves source identity and per-original counts
-and filenames; final LAZ VLR 24003 declares dataset-wide compact IDs. Per-file
+and filenames; final LAZ VLR 24003 declares dataset-wide compact IDs. The
+mapping file stays in the output folder for command-line runs; no header names
+it and the Galaxy tool does not publish it. Per-file
 counts use distinct positive IDs, since global IDs can have gaps within a file.
 The finalization performs one additional bounded read/write pass over enriched
 clouds. The ID census is collected during remap, and QSM payloads are held in a
