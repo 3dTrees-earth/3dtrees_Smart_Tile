@@ -32,13 +32,12 @@ def _rewrite_cloud(file, mappings):
             header.vlrs.append(VLR(user_id="3DTrees", record_id=24004,
                 description="Compact instance IDs v1", record_data=json.dumps({
                     "version": 1, "scope": "dataset_per_model", "background": 0,
-                    "mapping": MAPPING_FILE, "dimensions": sorted(mappings),
+                    "dimensions": sorted(mappings),
                 }).encode()))
             if "PredInstance_RCT" in mappings:
                 header.vlrs.append(VLR(user_id="3DTrees", record_id=24003,
                     description="RCT compact IDs v1", record_data=json.dumps({
                         "version": 1, "scope": "dataset", "background": 0,
-                        "mapping": "rct_instance_mapping.json",
                     }).encode()))
             with laspy.open(temporary, mode="w", header=header) as writer:
                 for record in reader.chunk_iterator(MAX_BATCH_POINTS):
