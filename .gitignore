@@ -8,3 +8,5 @@ Location/
 .serena/
 run_*
 .pytest-deps/
+native/target/
+native/dist/

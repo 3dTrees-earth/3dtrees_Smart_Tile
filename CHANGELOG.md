@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Optional Rust voxel reducer (3DT-2613)
+- `SMARTTILE_REDUCER=native` reduces tiling voxel blocks with the Rust extension in `native/` (PyO3, MIT, no other dependency) instead of NumPy. Same exact decimal keys, key order, half-even rounding and nearest-point ties: tile outputs are byte-identical. NumPy stays the default, and the image does not ship the extension yet. On a saved 6.66 M-point spill block with one CPU, centre-of-mass reduction takes 4.38 -> 2.53 s and nearest-to-centroid 9.48 -> 2.11 s (peak RSS 1.6 -> 1.0 GiB). A whole 32 M-point tile run is unchanged at about 33 s, because reading and spilling dominate.
+
 ## v2.4.2 - 2026-10-22
 
 ### RayCloudTools terrain (3DT-2469)

@@ -313,6 +313,17 @@ value; the report's `parallelism` field records the effective budget.
   reduced to the cgroup memory limit; `0` disables it).
   `SMARTTILE_KEEP_FAILED_CHUNKS=1` keeps failed product chunks for diagnosis.
 
+## Native voxel reducer (optional)
+
+`SMARTTILE_REDUCER=native` makes tiling reduce each voxel block with the Rust
+extension in [`native/`](native/README.md) instead of NumPy (the default,
+`SMARTTILE_REDUCER=numpy`). It applies the same rules (exact decimal voxel
+keys, key order, half-even rounding, nearest-point ties) and the tile outputs
+are identical; only voxel reduction moves, everything else stays in Python.
+Encodings beyond its integer widths fall back to NumPy. Asking for `native`
+without the extension installed fails instead of silently using NumPy. The
+image does not include the extension yet.
+
 ## Metadata contract
 
 - Enriched originals keep their header, CRS records, scales, offsets, point

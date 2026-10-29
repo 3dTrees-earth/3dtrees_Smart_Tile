@@ -18,6 +18,17 @@ def _coefficients(scale, offset, resolution):
             origin.numerator * (denominator // origin.denominator), denominator)
 
 
+def voxel_coefficients(scales, offsets, resolution):
+    """Validated exact `(a, b, denominator)` per axis: key = (raw * a + b) // denominator."""
+    scales, offsets = tuple(map(float, scales)), tuple(map(float, offsets))
+    resolution = float(resolution)
+    if (not math.isfinite(resolution) or resolution <= 0 or
+            any(not math.isfinite(s) or s <= 0 for s in scales) or
+            any(not math.isfinite(o) for o in offsets)):
+        raise ValueError("Voxel resolution/scales must be finite and positive; offsets must be finite")
+    return [_coefficients(scale, offset, resolution) for scale, offset in zip(scales, offsets)]
+
+
 def voxel_keys(raw_xyz, scales, offsets, resolution):
     """Floor exact scaled LAS coordinates onto an absolute, half-open grid.
 
@@ -34,16 +45,12 @@ def voxel_keys(raw_xyz, scales, offsets, resolution):
         raise ValueError("Voxel coordinates must be a two-dimensional integer array")
     if len(scales) != raw.shape[1] or len(offsets) != raw.shape[1]:
         raise ValueError("Voxel scales and offsets must match the coordinate axes")
-    if (not math.isfinite(resolution) or resolution <= 0 or
-            any(not math.isfinite(s) or s <= 0 for s in scales) or
-            any(not math.isfinite(o) for o in offsets)):
-        raise ValueError("Voxel resolution/scales must be finite and positive; offsets must be finite")
+    coefficients = voxel_coefficients(scales, offsets, resolution)
     keys = np.empty(raw.shape, dtype=np.int64)
     if not len(raw):
         return keys
     lower, upper = -(2**63), 2**63 - 1
-    for axis, (scale, offset) in enumerate(zip(scales, offsets)):
-        a, b, denominator = _coefficients(scale, offset, resolution)
+    for axis, (a, b, denominator) in enumerate(coefficients):
         values = raw[:, axis]
         lo, hi = int(values.min()), int(values.max())
         key_lo, key_hi = (lo * a + b) // denominator, (hi * a + b) // denominator

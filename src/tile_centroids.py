@@ -34,7 +34,7 @@ import numpy as np
 
 from output_publication import publish_files, validate_output_paths
 from output_names import file_stem
-from voxel_grid import voxel_keys
+from voxel_grid import voxel_coefficients, voxel_keys
 
 # One spilled point: XYZ in its tile's LAS encoding plus a bit per resolution.
 RECORD = np.dtype([("X", "<i4"), ("Y", "<i4"), ("Z", "<i4"), ("m", "u1")])
@@ -290,28 +290,66 @@ def reduce_records(records, resolutions, scales, offsets, nearest=False, *, incl
         if resolution == 0:
             results.append((_coords(selected, scales, offsets), len(selected)))
             continue
-        keys = voxel_keys(_raw_xyz(selected), scales, offsets, resolution)
-        lo = keys.min(axis=0)
-        span = [int(v) for v in keys.max(axis=0) - lo + 1]
-        if span[0] * span[1] * span[2] < 2**62:
-            packed = ((keys[:, 0] - lo[0]) * span[1] + (keys[:, 1] - lo[1])) * span[2] + (keys[:, 2] - lo[2])
-            order = np.argsort(packed)
-            packed = packed[order]
-            starts = np.flatnonzero(np.r_[True, packed[1:] != packed[:-1]])
-        else:
-            order = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))
-            keys = keys[order]
-            starts = np.flatnonzero(np.r_[True, np.any(keys[1:] != keys[:-1], axis=1)])
-        counts = np.diff(np.r_[starts, len(order)]).astype(np.int64)
-        xyz = np.stack([selected[name][order] for name in ("X", "Y", "Z")], axis=1).astype(np.int64)
-        sums = np.add.reduceat(xyz, starts, axis=0)
-        if nearest:
-            points = xyz[_nearest_to_mean(xyz, starts, counts, sums, scales)]
-        else:
-            points = _round_half_even(sums, counts[:, None])
+        points = _native_points(selected, scales, offsets, resolution, nearest)
+        if points is None:
+            points = _numpy_points(selected, scales, offsets, resolution, nearest)
         centers = points * np.asarray(scales, dtype=float) + np.asarray(offsets, dtype=float)
         results.append((centers, len(selected)))
     return results
+
+
+def _native_reducer():
+    """The Rust reducer when SMARTTILE_REDUCER=native, else None (NumPy, the default)."""
+    choice = os.environ.get("SMARTTILE_REDUCER", "numpy")
+    if choice == "numpy":
+        return None
+    if choice != "native":
+        raise ValueError(f"SMARTTILE_REDUCER must be 'numpy' or 'native', not {choice!r}")
+    try:
+        import smarttile_native
+    except ImportError as error:
+        raise RuntimeError("SMARTTILE_REDUCER=native needs the smarttile_native extension (native/)") from error
+    return smarttile_native
+
+
+def _native_points(selected, scales, offsets, resolution, nearest):
+    """Voxel representatives from the Rust reducer, or None to use NumPy.
+
+    Same keys, order, rounding and ties as `_numpy_points`; the extension
+    declines (OverflowError) encodings beyond its integer widths.
+    """
+    native = _native_reducer()
+    if native is None:
+        return None
+    try:
+        x, y, z = (np.ascontiguousarray(selected[name]) for name in ("X", "Y", "Z"))
+        return native.reduce_voxels(x, y, z,
+                                    voxel_coefficients(scales, offsets, resolution),
+                                    tuple(map(float, scales)), bool(nearest))
+    except OverflowError:
+        return None
+
+
+def _numpy_points(selected, scales, offsets, resolution, nearest):
+    """Integer LAS coordinates of one representative per voxel, in voxel-key order."""
+    keys = voxel_keys(_raw_xyz(selected), scales, offsets, resolution)
+    lo = keys.min(axis=0)
+    span = [int(v) for v in keys.max(axis=0) - lo + 1]
+    if span[0] * span[1] * span[2] < 2**62:
+        packed = ((keys[:, 0] - lo[0]) * span[1] + (keys[:, 1] - lo[1])) * span[2] + (keys[:, 2] - lo[2])
+        order = np.argsort(packed)
+        packed = packed[order]
+        starts = np.flatnonzero(np.r_[True, packed[1:] != packed[:-1]])
+    else:
+        order = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))
+        keys = keys[order]
+        starts = np.flatnonzero(np.r_[True, np.any(keys[1:] != keys[:-1], axis=1)])
+    counts = np.diff(np.r_[starts, len(order)]).astype(np.int64)
+    xyz = np.stack([selected[name][order] for name in ("X", "Y", "Z")], axis=1).astype(np.int64)
+    sums = np.add.reduceat(xyz, starts, axis=0)
+    if nearest:
+        return xyz[_nearest_to_mean(xyz, starts, counts, sums, scales)]
+    return _round_half_even(sums, counts[:, None])
 
 
 def _block_files(block):

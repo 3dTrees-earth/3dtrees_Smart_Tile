@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "smarttile-native"
+version = "0.1.0"
+description = "Optional native voxel reducer for SmartTile tiling"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = ["numpy>=2"]
+
+[tool.maturin]
+features = ["python"]
