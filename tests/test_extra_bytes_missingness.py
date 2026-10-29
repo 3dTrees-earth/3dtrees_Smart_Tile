@@ -105,6 +105,7 @@ def write_field(path, field):
     (np.uint64, dict(no_data=[2**64-1]), np.uint64, {}, [2**64-1]),
     (np.float32, dict(no_data=[np.nan]), np.float64, {}, [np.nan]),
     (np.float32, dict(no_data=[-1]), np.float64, {}, [-1]),
+    (np.float64, dict(scales=[.01], offsets=[0.], no_data=[0.]), np.float64, {}, [0.]),
 ])
 def test_descriptor_repair_matches_output_encoding_without_moving_points(tmp_path, source_type, source_options,
                                                                         target_type, target_options, expected):
