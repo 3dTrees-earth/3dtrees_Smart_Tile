@@ -1,0 +1,26 @@
+[package]
+name = "smarttile"
+version = "2.5.0-dev"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "SmartTile v2.5: the SmartTile tasks in Rust, at output parity with Python SmartTile 2.4"
+
+[[bin]]
+name = "smarttile"
+path = "src/main.rs"
+
+[dependencies]
+las = { version = "0.11", features = ["laz"] }
+laz = { version = "0.13", features = ["parallel"] }
+libloading = "0.9"
+rayon = "1.12"
+regex = "1"
+resvg = { version = "0.48", default-features = false, features = ["text"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+smarttile-native = { path = "../native" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4

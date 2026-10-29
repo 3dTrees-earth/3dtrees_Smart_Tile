@@ -10,3 +10,4 @@ run_*
 .pytest-deps/
 native/target/
 native/dist/
+rust/target/

@@ -49,7 +49,8 @@ pub fn reduce(points: &[[i32; 3]], coefficients: &Coefficients, scales: [f64; 3]
     Ok(output)
 }
 
-fn voxel_keys(points: &[[i32; 3]], coefficients: &Coefficients) -> Result<Vec<[i64; 3]>, ReduceError> {
+/// Absolute voxel keys of LAS integer points (`voxel_grid.voxel_keys`).
+pub fn voxel_keys(points: &[[i32; 3]], coefficients: &Coefficients) -> Result<Vec<[i64; 3]>, ReduceError> {
     let mut keys = vec![[0i64; 3]; points.len()];
     for (axis, &(a, b, denominator)) in coefficients.iter().enumerate() {
         if a <= 0 || denominator <= 0 {
