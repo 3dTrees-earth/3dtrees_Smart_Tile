@@ -435,6 +435,32 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("merged-resolutions", "merged_resolutions"),
     )
 
+    visualization_copc: bool = Field(
+        False,
+        description=(
+            "create_merged_file: also write a viewer-optimised COPC per original into "
+            "OUTPUT/visualization_copc (Potree-like octree levels, every point and dimension kept, "
+            "plus coloring_id_* and its palette mapping for every PredInstance* dimension). "
+            "With several --original-with-predictions-dir collections each gets its own file "
+            "(<original>_<collection>.copc.laz) instead of one joined file. "
+            "Use --merged-resolutions none to write only these files."
+        ),
+        validation_alias=AliasChoices("visualization-copc", "visualization_copc"),
+    )
+
+    visualization_copc_grid: int = Field(
+        80, ge=8, le=512,
+        description="Visualization COPC: one point per voxel of this many cells per node edge on every level "
+                    "(untwine uses 128; 80 gives PotreeConverter-sized upper levels).",
+        validation_alias=AliasChoices("visualization-copc-grid", "visualization_copc_grid"),
+    )
+
+    visualization_copc_leaf_points: int = Field(
+        20_000, ge=100,
+        description="Visualization COPC: a node becomes a leaf once at most this many points remain in it.",
+        validation_alias=AliasChoices("visualization-copc-leaf-points", "visualization_copc_leaf_points"),
+    )
+
     merged_output_formats: str = Field(
         "copc.laz",
         description="Comma-separated prod-merged output formats: laz, copc.laz, or ply.",

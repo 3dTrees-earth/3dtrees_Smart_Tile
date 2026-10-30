@@ -596,6 +596,34 @@ def run_remap_task(params: Parameters):
             names.cleanup()
 
 
+def _create_visualization_copcs(input_dirs: list[Path], output_dir: Path, params: Parameters) -> list[Path]:
+    """One visualization COPC per original and collection; returns the COPCs and their mappings."""
+    import json
+    from main_create_merged_file import point_cloud_files, source_key
+    from visualization_copc import write_visualization_copc
+
+    target_dir = output_dir / "visualization_copc"
+    products = []
+    print()
+    print("=" * 60)
+    print("Creating Visualization COPC")
+    print("=" * 60)
+    for input_dir in input_dirs:
+        for source in point_cloud_files(input_dir):
+            name = source_key(source) if len(input_dirs) == 1 else f"{source_key(source)}_{input_dir.name}"
+            report = write_visualization_copc(
+                source, target_dir / f"{name}.copc.laz",
+                grid=params.visualization_copc_grid,
+                leaf_points=params.visualization_copc_leaf_points,
+                workers=params.workers,
+            )
+            print(f"  {source.name} -> {name}.copc.laz: {report['points']:,} points, "
+                  f"{report['nodes']} nodes, root {report['root_points']:,} points, {report['seconds']} s")
+            (target_dir / f"{name}.visualization.json").write_text(json.dumps(report, indent=2) + "\n")
+            products += [Path(report["output"]), *map(Path, report["coloring_mappings"])]
+    return products
+
+
 def run_create_merged_file_task(params: Parameters):
     """Create prod-merged files from Original-with-predictions files."""
     input_dir = params.original_with_predictions_dir or params.input_dir
@@ -615,7 +643,12 @@ def run_create_merged_file_task(params: Parameters):
         output_dir.mkdir(parents=True, exist_ok=True)
         names = StagedNames(input_dirs, output_dir)
         input_dirs = [names.folder(folder) for folder in input_dirs]
-        if len(input_dirs) > 1:
+        visualization = _create_visualization_copcs(input_dirs, output_dir, params) if params.visualization_copc else []
+        if params.merged_resolutions.strip().lower() == "none":
+            if not params.visualization_copc:
+                raise ValueError("--merged-resolutions none needs --visualization-copc")
+            products = []
+        elif len(input_dirs) > 1:
             from attribute_join import join_attribute_collections
             from scratch import remove_tree, scratch_directory
 
@@ -627,9 +660,13 @@ def run_create_merged_file_task(params: Parameters):
                 remove_tree(joined)
         else:
             products = _create_prod_merged_outputs(input_dirs[0], output_dir, params)
-        names.restore(output_dir, products=products)
+        names.restore(output_dir, products=[*products, *visualization])
         from collection_folders import merged_product_collections
-        _publish_collections(params, merged_product_collections(products))
+        collections = merged_product_collections(products)
+        for path in visualization:
+            key = "visualization_copc" if path.name.endswith(".copc.laz") else "visualization_coloring"
+            collections.setdefault(key, []).append(path)
+        _publish_collections(params, collections)
     except Exception as e:
         print(f"Error: {e}")
         import traceback
@@ -662,6 +699,7 @@ def preprocess_boolean_flags(args_list):
         '--qsm-manifest', '--qsm_manifest',
         '--original-point-index', '--original_point_index',
         '--transfer-original-dims-to-merged', '--transfer_original_dims_to_merged',
+        '--visualization-copc', '--visualization_copc',
     ]
 
     processed = []
