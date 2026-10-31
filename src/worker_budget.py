@@ -7,6 +7,55 @@ import os
 from pathlib import Path
 
 
+# BLAS/OpenMP pools that otherwise start one thread per host core on import.
+NATIVE_THREAD_VARIABLES = (
+    "OMP_NUM_THREADS",
+    "OMP_THREAD_LIMIT",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "NUMBA_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
+WORKERS_FLAGS = ("--workers", "--number-of-threads", "--number_of_threads")
+
+
+def requested_workers(argv) -> int | None:
+    """Read --workers from the command line before numpy or laspy load; None if absent or invalid."""
+    for index, arg in enumerate(argv):
+        name, _, value = arg.partition("=")
+        if name in WORKERS_FLAGS:
+            if not value and index + 1 < len(argv):
+                value = argv[index + 1]
+            try:
+                return int(value) if int(value) > 0 else None
+            except ValueError:
+                return None
+    return None
+
+
+def _cap(name: str, limit: int) -> None:
+    try:
+        configured = int(os.environ.get(name, limit))
+    except ValueError:
+        configured = limit
+    os.environ[name] = str(min(limit, configured) if configured > 0 else limit)
+
+
+def limit_native_threads(workers: int, *, worker_process: bool) -> None:
+    """Keep native thread pools within --workers; call before numpy, laspy or lazrs load.
+
+    SmartTile parallelises with processes, so BLAS/OpenMP pools get one thread in
+    every process: on dataset 2024 their per-process pools otherwise started
+    3,114 threads at --workers 16, 1,423 of them running at once. LAZ
+    compression (lazrs, rayon) may use ``workers`` threads in the main process and
+    one in each worker process. Smaller caps already set in the environment stay.
+    """
+    for name in NATIVE_THREAD_VARIABLES:
+        _cap(name, 1)
+    _cap("RAYON_NUM_THREADS", 1 if worker_process else max(1, int(workers)))
+
+
 def available_cpu_count() -> int:
     """Return the available CPU count, falling back to one."""
     return max(1, os.cpu_count() or 1)

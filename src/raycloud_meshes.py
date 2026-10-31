@@ -5,8 +5,8 @@ double XYZ + uchar RGBA vertices and triangle faces followed by
 ``property uint tree_id``, the native tile-local tree ID (1-based tree-table
 row). SmartTile applies the same ID mapping as the LAZ and tree tables, drops
 the faces of removed trees and unused vertices, and never changes retained
-geometry, colours, topology or winding. Terrain meshes carry no tree IDs and
-are not handled here.
+geometry, colours, topology or winding. Terrain meshes carry no tree IDs; see
+``raycloud_terrain``.
 """
 from __future__ import annotations
 

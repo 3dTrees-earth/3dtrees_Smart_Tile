@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.4.2 - 2026-10-31
+
+### ExtraBytes missingness (#15)
+- COPC conversions that keep extra dimensions accept float ExtraBytes with a scale below 1 and no_data 0, such as RIEGL Amplitude and Reflectance after 3Dtrees standardization (float64, scale 0.01, no_data 0). Untwine and PDAL write them as unscaled float64; the check tested no_data's raw neighbour (5e-324), which the 0.01 scale already reads as 0.0, and counted it as a new alias, so `create_merged_file` and `remap` failed with `no_data becomes indistinguishable from a valid source value`. A float neighbour that the source already reads as no_data no longer counts; integer sentinels keep the strict check. 84 production datasets have this encoding (3774 and the other 3D Fuels TLS uploads).
+
+### ExtraBytes names (#16)
+- Every ExtraBytes name comes through remap, merge and create_merged_file. PDAL's LAS reader, which untwine also uses, respelled PDAL's own dimension names (`height above ground` -> `HeightAboveGround`, `PointID` -> `PointId`), replaced punctuation with `_`, folded names of standard fields (`classification`, `Class`, `Withheld`) into those fields, wrote a float `Red` as the colour field, merged names that differ only in case and refused non-ASCII names, so 2.4 failed with `output dropped an ExtraBytes dimension` (1921, 2195, 382, 408, 3557). The tasks now probe the installed PDAL and untwine, give only the affected names placeholders in staged copies of the inputs (a patch of the 32-byte name fields, no point rewritten; one mapping for originals, prediction collections and `--remap-dims`) and write the names back into every output and report before publishing. A column named like a standard LAS field, or one PDAL folds into a field, is published as `<name>_extra` (`classification_extra`, `Class_extra`); `extra_bytes_names.json` lists these renames. All 212 ExtraBytes names in the 3Dtrees catalog come through with their values.
+
+### RayCloudTools terrain (3DT-2469)
+- Merge and remap take the RCT terrain meshes, beside the tiles (`<tile>_mesh.ply`) or with `--terrain-meshes-folder` (at most one per tile; RCT writes none for a tile with fewer than 3 ground points). Merge keeps each tile's triangles whose XY centroid lies in its half-open core and publishes them as `terrain_meshes` (`c00_r00_filtered_terrain_mesh.ply`). Its report counts vertices welded and boundary edges left open along the shared core lines, so a seam where neighbouring tiles triangulated their buffer differently shows up.
+- Every original gets `<original>_terrain_mesh.ply` (`original_terrain_meshes`): the core-filtered triangles whose centroid lies in a 1 m cell holding one of its points, with identical vertices from different tiles welded. Originals covering the same ground get identical triangles. Geometry, colours and winding are unchanged; the header records `comment crs:` from the original. The cells are collected while enriching the originals, without another read.
+
+### CPU threads (3DT-1896)
+- Every task keeps its threads within `--workers`. `run.py` sets the native thread caps before numpy, laspy or lazrs load: BLAS/OpenMP pools get one thread in every process, because SmartTile parallelises with processes, and LAZ compression (lazrs) gets `--workers` threads in the main process and one in each worker process. `import numpy` alone used to start one OpenBLAS thread per host core in every process. Dataset 2024 at `--workers 16` on a 128-core host: merge 3,114 -> 79 threads (at most 16 running, 214 -> 172 s), tiling 2,324 -> 55 threads (25 -> 14 s), outputs byte-identical. Smaller caps already set in the environment are kept.
+
+### Headers (3DT-2470)
+- LAZ VLRs 24003/24004 and the per-original tree mesh comments no longer name `rct_instance_mapping.json` or `instance_mapping.json`. The Galaxy tool does not publish those files, so the references pointed nowhere. The ID scope and version fields stay.
+
+## v2.4.1 - 2026-10-19
+
+### Galaxy EU fixes
+- Tiling accepts 3Dtrees standardization's stand-in CRS: data without a usable CRS is moved to 0,0,0 and labelled EPSG:4978, which the geocentric check rejected. A geocentric CRS whose points lie far inside the Earth is tiled as local metres with a warning; real Earth-centred coordinates are still rejected.
+- The tile overview names the CRS by its code or short name. A CRS without an EPSG code put its full WKT into the axis labels, the PNG grew to about 30,000 px and Galaxy rejected the tile job.
+- COPC outputs of sources whose CRS carries an unknown vertical datum pass the CRS check. The COPC writers turn such a source (dataset 1368, SIRGAS 2000 / UTM 23S) into a compound CRS with an "unknown" vertical part and an "unnamed" horizontal datum, which the check rejected; the same projection with no named vertical datum on either side now counts as the same CRS.
+
 ## v2.4.0 - 2026-10-15
 
 ### Galaxy-facing input and output
@@ -31,9 +56,6 @@
 - Scratch folders are removed only after every file in them is closed. On NFS job directories (Galaxy EU) an open or mapped file cannot be removed, so every remap failed with `[Errno 16] Device or resource busy: '.../.enrich-...'` (enrichment kept its last prediction memmap and, with `--match-instances`, its label stores), and a merge that recovered orphaned trees could fail the same way (the recovery check left `orphan_claims.sqlite` open). The test suite now fails any test that removes a SmartTile scratch folder with a file still open.
 - A RayCloudTools tile without trees may carry the tree table header in its treeinfo table (RCT cannot run treeinfo without trees). Per-original tables take their columns from the tiles that have trees instead of failing with `incompatible RCT trees_info table columns`.
 - Remap takes a merge's RayCloudTools tables and meshes from folders of their own (`--tree-tables-folder`, `--tree-info-folder`, `--tree-meshes-folder`, as merge does), so a Galaxy remap that receives them as separate collections no longer fails with `Missing RayCloudTools tree or treeinfo file`. `--collection-dir` publishes the per-original tables and meshes as `original_tree_tables`, `original_tree_info_tables` and `original_tree_meshes`.
-- Tiling accepts 3Dtrees standardization's stand-in CRS: data without a usable CRS is moved to 0,0,0 and labelled EPSG:4978, which the geocentric check rejected. A geocentric CRS whose points lie far inside the Earth is tiled as local metres with a warning; real Earth-centred coordinates are still rejected.
-- The tile overview names the CRS by its code or short name. A CRS without an EPSG code put its full WKT into the axis labels, the PNG grew to about 30,000 px and Galaxy rejected the tile job.
-- COPC outputs of sources whose CRS carries an unknown vertical datum pass the CRS check. The COPC writers turn such a source (dataset 1368, SIRGAS 2000 / UTM 23S) into a compound CRS with an "unknown" vertical part and an "unnamed" horizontal datum, which the check rejected; the same projection with no named vertical datum on either side now counts as the same CRS.
 - Small-instance reassignment keeps tiles LAZ-compressed (it wrote uncompressed LAS into .laz files).
 - tile_bounds_tindex.json bounds are the union over every LAS tile output, not only the first (a coarse first output could hide 1 cm points from merge's overlap checks).
 - A failing product chunk cancels the remaining chunks.

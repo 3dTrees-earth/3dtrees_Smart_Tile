@@ -146,6 +146,16 @@ folder options) and writes `<original>_trees.txt`, `_trees_info.txt` and
 `_trees_mesh.ply` for every original. See
 [docs/raycloud-filter-only.md](docs/raycloud-filter-only.md).
 
+RCT terrain meshes (`*_mesh.ply` beside the tiles, or `--terrain-meshes-folder`,
+at most one per tile) are optional. Merge keeps each tile's triangles whose XY
+centroid lies in that tile's core (`c00_r00_filtered_terrain_mesh.ply`) and
+reports whether the tiles join along their shared core lines. Every original
+then gets `<original>_terrain_mesh.ply`: the triangles whose centroid lies in a
+1 m cell holding one of its points, with vertices shared by two tiles welded.
+Originals that cover the same ground get the same triangles, as they get the
+same whole trees. Retained vertices, colours and winding are unchanged; the
+header records `comment crs:` from the original.
+
 ```
 work_root/                         # --output-folder / --output-dir, else parent of the input
 ├── output_tiles/                  # c00_r00.laz, …: every instance ID in exactly one tile
@@ -249,10 +259,12 @@ DIR/
 ├── tree_tables/                   # merge, RCT: c00_r00_filtered_trees.txt
 ├── tree_info_tables/              # merge, RCT: c00_r00_filtered_trees_info.txt
 ├── tree_meshes/                   # merge, RCT: c00_r00_filtered_trees_mesh.ply
+├── terrain_meshes/                # merge, RCT terrain: c00_r00_filtered_terrain_mesh.ply
 ├── originals_with_predictions/    # merge with originals, remap: <original>.laz / .las
 ├── original_tree_tables/          # merge with originals, remap, RCT: <original>_trees.txt
 ├── original_tree_info_tables/     # merge with originals, remap, RCT: <original>_trees_info.txt
 ├── original_tree_meshes/          # merge with originals, remap, RCT: <original>_trees_mesh.ply
+├── original_terrain_meshes/       # merge with originals, remap, RCT terrain: <original>_terrain_mesh.ply
 ├── merged_laz/                    # prod_merged_10cm.laz, merged.laz
 ├── merged_copc/                   # prod_merged_10cm.laz, merged.laz (COPC content)
 └── merged_ply/                    # prod_merged_10cm.ply, merged.ply

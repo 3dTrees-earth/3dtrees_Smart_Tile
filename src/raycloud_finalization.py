@@ -12,6 +12,7 @@ from output_names import file_stem
 from raycloud_tree_files import (TABLE_KINDS, pair_tree_sidecars, rct_sidecar_folder, read_tree_header,
                                  tree_rows, tree_sidecars)
 from raycloud_meshes import DATASET_SCOPE, TILE_SCOPE, TreeMesh, pair_tree_meshes, write_tree_mesh
+from raycloud_terrain import open_tile_terrain, write_original_terrain
 from ply_crs import crs_comment_from_file
 
 
@@ -77,14 +78,17 @@ def _open_tile_meshes(predictions, meshes):
     return opened
 
 
-def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, meshes=()):
+def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, meshes=(), terrain=(),
+                           footprints=None):
     """Finalize a private staging folder; callers publish it only on success.
 
     IDs are collected while remapping, avoiding a separate cloud census read.
     Intermediate tile namespaces and their sidecars remain reusable unchanged.
     With ``meshes``, each original also gets ``<stem>_trees_mesh.ply`` holding
     the complete retained QSM mesh of exactly its represented trees, with the
-    same compact IDs as its LAZ and tables.
+    same compact IDs as its LAZ and tables. With ``terrain`` (core-filtered tile
+    terrain meshes) and ``footprints`` (each original's 1 m cell keys), each
+    original also gets ``<stem>_terrain_mesh.ply`` covering its footprint.
     """
     output_dir = Path(output_dir)
     stems = [file_stem(name).casefold() for name in ids_by_file]
@@ -107,6 +111,9 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
             raise ValueError(f"RCT instance ID {min(missing)} has no tree row")
         metadata["instances"] = [dict(predinstance=mapping[uid], **provenance[uid]) for uid in all_ids]
         tile_meshes = _open_tile_meshes(predictions, list(meshes)) if meshes else []
+        tile_terrain = open_tile_terrain(terrain) if terrain else []
+        if tile_terrain and footprints is None:
+            raise ValueError("RayCloudTools terrain meshes require the originals' footprints")
         for name, ids in sorted(ids_by_file.items()):
             file = output_dir / name
             kept = sorted(uid for uid in ids if uid > 0)
@@ -127,15 +134,19 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
                 wanted = {uid: mapping[uid] for uid in kept}
                 vertices, faces, per_tree = write_tree_mesh(
                     mesh_file, [(mesh, wanted) for mesh in tile_meshes], scope=DATASET_SCOPE,
-                    tree_count=len(kept), comments=[f"rct_instance_mapping {MAPPING_FILE}"],
-                    crs=crs_comment_from_file(file), allowed_ids=provenance.keys())
+                    tree_count=len(kept), crs=crs_comment_from_file(file), allowed_ids=provenance.keys())
                 entry["sidecars"]["trees_mesh"] = mesh_file.name
                 entry["mesh"] = {"vertices": vertices, "faces": faces, "trees_with_faces": len(per_tree),
                                  "trees_without_faces": sorted(set(wanted.values()) - per_tree.keys())}
+            if tile_terrain:
+                terrain_file = file.with_name(f"{file_stem(file)}_terrain_mesh.ply")
+                entry["terrain"] = write_original_terrain(terrain_file, tile_terrain, footprints[name],
+                                                          crs=crs_comment_from_file(file))
+                entry["sidecars"]["terrain_mesh"] = terrain_file.name
             metadata["files"].append(entry)
         (output_dir / MAPPING_FILE).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     finally:
         db.close()
         database.unlink(missing_ok=True)
     return {"scope": "dataset", "tree_count": len(all_ids), "mapping": MAPPING_FILE,
-            "tree_meshes": bool(meshes), "files": metadata["files"]}
+            "tree_meshes": bool(meshes), "terrain_meshes": bool(terrain), "files": metadata["files"]}
