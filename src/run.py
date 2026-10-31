@@ -448,17 +448,21 @@ def run_merge_task(params: Parameters):
                 and Path(merged).name in {"merged.laz", "merged.copc.laz", "merged.ply"}):
             raise ValueError(f"{merged} would be overwritten by the full-resolution prod-merged product; "
                              "choose another --output-merged-laz name")
+        from extra_bytes_names import StagedNames
+        names = StagedNames([Path(originals)] if originals else [], output_tiles.parent,
+                            also=[*collections, Path(target) if target else None])
         report = merge_collections(
-            collections=collections, target_dir=Path(target) if target else None,
+            collections=[names.folder(c) for c in collections],
+            target_dir=names.folder(Path(target)) if target else None,
             output_tiles=output_tiles, tile_bounds_json=tile_bounds,
-            originals=Path(originals) if originals else None, original_output=original_output,
+            originals=names.folder(Path(originals)) if originals else None, original_output=original_output,
             merged_output=Path(merged) if merged else None,
             workers=params.workers,
             resolution_1=params.resolution_1, remap_tolerance=params.remap_tolerance,
             transfer_radius=params.prediction_transfer_tolerance,
             overlap_threshold=params.overlap_threshold, matching=not params.disable_matching,
             ready=ready, instance_dimension=params.instance_dimension, filter_anchor=params.filter_anchor,
-            target_dims=set(_parse_csv(params.remap_dims)) if params.remap_dims else None,
+            target_dims={names.name(d) for d in _parse_csv(params.remap_dims)} if params.remap_dims else None,
             small_instances=_small_instance_policy(params),
             keep_unfiltered=not params.skip_unfiltered_tiles,
             rct_folders=rct_folders,
@@ -466,6 +470,7 @@ def run_merge_task(params: Parameters):
         products = []
         if originals and params.transfer_original_dims_to_merged:
             products = _create_prod_merged_outputs(original_output, output_tiles.parent, params)
+        names.restore(output_tiles.parent, original_output)
         from collection_folders import merged_product_collections, merged_tile_collections, original_collections
         _publish_collections(params, {
             **merged_tile_collections(output_tiles, output_tiles.parent / "segmented_filtered"),
@@ -475,6 +480,9 @@ def run_merge_task(params: Parameters):
     except Exception as exc:
         print(f"Error: {exc}")
         sys.exit(1)
+    finally:
+        if "names" in locals():
+            names.cleanup()
 
 
 def _rct_folders(params: Parameters):
@@ -514,14 +522,17 @@ def run_remap_task(params: Parameters):
             _validate_copc_original_lane(Path(params.original_copc_input_dir))
             _validate_copc_laz_source_pairs(Path(params.original_copc_input_dir), original_dir)
         collections = comma_paths(params.segmented_folders) if params.segmented_folders else [Path(params.merged_laz)]
+        from extra_bytes_names import StagedNames
+        baselines = comma_paths(params.baseline_1cm_folders)
+        names = StagedNames([original_dir], output.parent, also=[*collections, *baselines])
         strict_remap(
-            collections=collections, originals=original_dir, output=output,
-            baseline_collections=comma_paths(params.baseline_1cm_folders) or None,
+            collections=[names.folder(c) for c in collections], originals=names.folder(original_dir), output=output,
+            baseline_collections=[names.folder(b) for b in baselines] or None,
             workers=params.workers,
             resolution_1=params.resolution_1 if "resolution_1" in params.model_fields_set else None,
             remap_tolerance=params.remap_tolerance,
             instance_dimension=params.instance_dimension,
-            target_dims=set(_parse_csv(params.remap_dims)) if params.remap_dims else None,
+            target_dims={names.name(d) for d in _parse_csv(params.remap_dims)} if params.remap_dims else None,
             match_instances=params.match_instances,
             prediction_resolution_original=params.prediction_resolution_original,
             rct_folders=rct_folders,
@@ -529,12 +540,16 @@ def run_remap_task(params: Parameters):
         products = []
         if params.transfer_original_dims_to_merged:
             products = _create_prod_merged_outputs(output, output.parent, params)
+        names.restore(output.parent)
         from collection_folders import merged_product_collections, original_collections
         _publish_collections(params, {**original_collections(output), **merged_product_collections(products)})
         print(f"Strict original remap complete: {output}")
     except Exception as exc:
         print(f"Error: {exc}")
         sys.exit(1)
+    finally:
+        if "names" in locals():
+            names.cleanup()
 
 
 def run_create_merged_file_task(params: Parameters):
@@ -549,8 +564,13 @@ def run_create_merged_file_task(params: Parameters):
         print(f"Error: Original-with-predictions directory not found: {', '.join(map(str, missing))}")
         sys.exit(1)
     output_dir = Path(params.output_dir) if params.output_dir is not None else input_dirs[0].parent
+    names = None
     try:
         _check_collection_dir(params, output_dir)
+        from extra_bytes_names import StagedNames
+        output_dir.mkdir(parents=True, exist_ok=True)
+        names = StagedNames(input_dirs, output_dir)
+        input_dirs = [names.folder(folder) for folder in input_dirs]
         if len(input_dirs) > 1:
             import shutil
             import tempfile
@@ -564,6 +584,7 @@ def run_create_merged_file_task(params: Parameters):
                 shutil.rmtree(joined)
         else:
             products = _create_prod_merged_outputs(input_dirs[0], output_dir, params)
+        names.restore(output_dir)
         from collection_folders import merged_product_collections
         _publish_collections(params, merged_product_collections(products))
     except Exception as e:
@@ -571,6 +592,9 @@ def run_create_merged_file_task(params: Parameters):
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        if names is not None:
+            names.cleanup()
     print()
     print("Create merged file complete.")
 
