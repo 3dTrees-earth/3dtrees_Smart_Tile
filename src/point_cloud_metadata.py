@@ -198,6 +198,10 @@ def _converted_no_data(source, target):
             neighbours = np.nextafter(raw, np.full(raw.shape, step * np.inf, dtype=source_base))
             eligible = ~np.isnan(raw) & (neighbours != raw)
         values = np.asarray(_physical_extra_values(neighbours, source), dtype=np.longdouble)
+        if source_base.kind == 'f':
+            # Scaling can underflow a float neighbour onto no_data in the
+            # source's own reading; that neighbour gains no new alias.
+            eligible &= values != np.asarray(physical, dtype=np.longdouble)
         if target.offsets is not None:
             values = values - np.asarray(target.offsets, dtype=np.longdouble)
         if target.scales is not None:
