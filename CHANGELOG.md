@@ -1,6 +1,9 @@
 # Changelog
 
-## v2.4.2 - 2026-10-22
+## v2.4.2 - 2026-10-31
+
+### ExtraBytes missingness (#15)
+- COPC conversions that keep extra dimensions accept float ExtraBytes with a scale below 1 and no_data 0, such as RIEGL Amplitude and Reflectance after 3Dtrees standardization (float64, scale 0.01, no_data 0). Untwine and PDAL write them as unscaled float64; the check tested no_data's raw neighbour (5e-324), which the 0.01 scale already reads as 0.0, and counted it as a new alias, so `create_merged_file` and `remap` failed with `no_data becomes indistinguishable from a valid source value`. A float neighbour that the source already reads as no_data no longer counts; integer sentinels keep the strict check. 84 production datasets have this encoding (3774 and the other 3D Fuels TLS uploads).
 
 ### RayCloudTools terrain (3DT-2469)
 - Merge and remap take the RCT terrain meshes, beside the tiles (`<tile>_mesh.ply`) or with `--terrain-meshes-folder` (at most one per tile; RCT writes none for a tile with fewer than 3 ground points). Merge keeps each tile's triangles whose XY centroid lies in its half-open core and publishes them as `terrain_meshes` (`c00_r00_filtered_terrain_mesh.ply`). Its report counts vertices welded and boundary edges left open along the shared core lines, so a seam where neighbouring tiles triangulated their buffer differently shows up.
