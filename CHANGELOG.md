@@ -5,7 +5,7 @@
 ### QSMs per segmentation (Linear: SmartTile v2.5)
 - RayCloudTools QSMs for every segmentation (SAT, ForestMamba, ...) at any size. The tile task's `--qsm-manifest` writes beside the instance tiles what a QSM merge needs without reading points: `qsm_manifest_<dimension>.json` (originals, tiles, every instance with its tile and the originals holding its points) and `qsm_footprints.npz`. The per-instance statistics read collects both; nothing else is read.
 - `--rct-terrain-folder` takes the per-original terrain meshes of an earlier RayCloudTools run, merges them once (identical vertices welded, shared triangles once) and writes per instance tile the triangles within 10 m (`<tiles>_terrain/<tile>.ply`) for RayCloudTools `--terrain-mesh`, so every segmentation's QSMs stand on the RCT ground.
-- New task `merge_qsm`: the RayCloudTools `--instance-dimension` outputs of all instance tiles per original (`_trees.txt`, `_trees_info.txt`, `_trees_mesh.ply`, `_terrain_mesh.ply`), with the instance IDs and table rows unchanged and a tree shared by originals in each, plus `<original>_qsm_octree/`, the results viewer's QSM octree (3DT-2626; the viewer's builder, unchanged). Point clouds are not merged.
+- `merge --instance-manifest` (a mode of merge; it takes no segmented point collections): the RayCloudTools `--instance-dimension` outputs of all instance tiles, from `--qsm-folder` or the per-kind folders of the RCT merge, per original (`_trees.txt`, `_trees_info.txt`, `_trees_mesh.ply`, `_terrain_mesh.ply`), with the instance IDs and table rows unchanged and a tree shared by originals in each, plus `<original>_qsm_octree/`, the results viewer's QSM octree (3DT-2626; the viewer's builder, unchanged). Point clouds are not merged.
 
 ## v2.4.3 - unreleased
 

@@ -1,6 +1,6 @@
 """The QSM octree the viewer reads beside RayCloudTools files per original: the
 only file the viewer adds to the original outputs (3DT-2626). SmartTile writes
-it with `merge_qsm` (QSMs for an existing segmentation); the code is the
+it in `merge --instance-manifest` (QSMs for an existing segmentation); the code is the
 results viewer's `scripts/results_view/qsm_octree.py`, unchanged, so both build
 identical octrees.
 

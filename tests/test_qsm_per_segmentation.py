@@ -180,3 +180,32 @@ def test_without_rct_terrain_each_original_gets_the_tiles_terrain_over_its_footp
     # Tiles overlap at x 8..12; each triangle comes once, from the tile whose core holds its centroid.
     assert len({tuple(np.round(c, 6)) for c in centroids}) == len(centroids)
     del both
+
+
+def test_merge_takes_the_qsms_from_folders_by_kind_as_galaxy_collections_arrive(tiled):
+    import subprocess
+    tmp_path, out, terrain = tiled
+    qsm = tmp_path / "qsm"
+    rct_outputs(qsm, "c00_r00", {7: (9.0, 5.0)})
+    rct_outputs(qsm, "c01_r00", {8: (16.0, 5.0)})
+    folders = {}
+    for suffix, option in (("_trees_info.txt", "--tree-info-folder"), ("_trees.txt", "--tree-tables-folder"),
+                           ("_trees_mesh.ply", "--tree-meshes-folder"), ("_mesh.ply", "--terrain-meshes-folder")):
+        folder = tmp_path / option.strip("-")
+        folder.mkdir()
+        for path in qsm.glob(f"*{suffix}"):
+            if path.name.endswith(suffix) and not (suffix == "_mesh.ply" and path.name.endswith("_trees_mesh.ply")) \
+                    and not (suffix == "_trees.txt" and path.name.endswith("_trees_info.txt")):
+                (folder / f"{path.name[:7]}{Path(suffix).suffix}").write_bytes(path.read_bytes())
+        folders[option] = folder
+    run = [sys.executable, str(Path(__file__).resolve().parents[1] / "src" / "run.py"), "--task", "merge",
+           "--instance-manifest", str(out / manifest_name(SAT)), "--rct-terrain-folder", str(terrain),
+           "--output-dir", str(tmp_path / "merged")]
+    for option, folder in folders.items():
+        run += [option, str(folder)]
+    result = subprocess.run(run, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert table_ids(tmp_path / "merged" / "b_trees.txt") == [7, 8]
+    refused = subprocess.run(run[:-2 * len(folders)] + ["--segmented-remapped-folder", str(qsm)] + run[-2 * len(folders):],
+                             capture_output=True, text=True)
+    assert refused.returncode != 0 and "takes no segmented point collections" in refused.stdout

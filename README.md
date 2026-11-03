@@ -92,7 +92,7 @@ later ones in `instance_dim2/subsampled_res*/`, …). `--instance-tile-dims` add
 attributes. Instance IDs must be unique across files
 (`--allow-reused-instance-ids` skips that check).
 
-**QSMs per segmentation.** `--qsm-manifest` adds what `merge_qsm` needs to put
+**QSMs per segmentation.** `--qsm-manifest` adds what `merge --instance-manifest` needs to put
 RayCloudTools QSMs of instance tiles back per original without reading points:
 `qsm_manifest_<dimension>.json` (originals, tiles with core and actual bounds,
 every instance with its tile and the originals holding its points) and
@@ -250,19 +250,23 @@ products/
 - `--staged-copc-dir` reuses COPCs only when the staging manifest records their
   source; `--standardization-json` checks that expected dimensions survive.
 
-### merge_qsm
+### merge of QSMs per segmentation (`--instance-manifest`)
 
 ```bash
-python src/run.py --task merge_qsm \
+python src/run.py --task merge \
     --instance-manifest /data/tiles/qsm_manifest_PredInstance_SAT.json \
     --qsm-folder /data/rct_sat --rct-terrain-folder /data/rct/original_terrain_meshes \
     --output-dir /data/qsm_sat
 ```
 
-QSMs of an existing segmentation (RayCloudTools `--instance-dimension` per
-instance tile), per original; no point cloud is read or merged. `--qsm-folder`
-holds every tile's `<tile>_trees.txt`, `<tile>_trees_info.txt`,
-`<tile>_trees_mesh.ply` and `<tile>_mesh.ply`. Per original:
+With `--instance-manifest`, merge puts the QSMs of an existing segmentation
+(RayCloudTools `--instance-dimension` per instance tile) per original instead;
+no point cloud is read or merged, and no segmented collection is taken.
+`--qsm-folder` holds every tile's `<tile>_trees.txt`, `<tile>_trees_info.txt`,
+`<tile>_trees_mesh.ply` and `<tile>_mesh.ply`; alternatively, as Galaxy
+collections arrive, `--tree-tables-folder`, `--tree-info-folder`,
+`--tree-meshes-folder` and `--terrain-meshes-folder` give one kind each, paired
+by tile name (`c00_r00.txt`). Per original:
 
 ```
 qsm_sat/

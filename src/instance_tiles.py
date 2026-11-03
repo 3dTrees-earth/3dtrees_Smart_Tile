@@ -435,7 +435,7 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
     ``core`` (xmin, ymin, xmax, ymax). Returns {dimension: {instance checks,
     "outputs": {resolution: {"directory", "tiles", "points"}}}}.
 
-    ``qsm_manifest`` also writes what ``merge_qsm`` needs (``qsm_tiles``): a
+    ``qsm_manifest`` also writes what ``merge --instance-manifest`` needs (``qsm_tiles``): a
     manifest per dimension and the originals' footprints; ``rct_terrain``, a
     folder of per-original RCT terrain meshes, adds a cropped terrain mesh per
     tile of the first resolution (and implies the manifest).

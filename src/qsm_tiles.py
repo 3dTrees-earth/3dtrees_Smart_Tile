@@ -1,7 +1,7 @@
 """What instance tiles need for QSMs per segmentation (SmartTile 2.5).
 
 RayCloudTools ``--instance-dimension`` builds one QSM per instance of a tile;
-``merge_qsm`` later writes them per original without reading any point. The
+``merge --instance-manifest`` later writes them per original without reading any point. The
 tile task, which reads every point anyway, leaves it what it needs:
 
 - ``qsm_manifest_<dimension>.json``: the originals, each tile's core and actual

@@ -1,4 +1,4 @@
-"""``merge_qsm``: QSMs of an existing segmentation, per original, without reading points (SmartTile 2.5).
+"""``merge --instance-manifest``: QSMs of an existing segmentation, per original, without reading points (2.5).
 
 RayCloudTools ``--instance-dimension`` writes per instance tile
 ``<tile>_trees.txt``, ``<tile>_trees_info.txt``, ``<tile>_trees_mesh.ply``
@@ -40,15 +40,25 @@ KINDS = {"_trees_info.txt": "info", "_trees.txt": "trees", "_trees_mesh.ply": "m
 REPORT = "qsm_merge_report.json"
 
 
-def tile_files(folder):
-    """{tile: {kind: path}} of the RayCloudTools instance outputs in ``folder``."""
+def tile_files(folder=None, kind_folders=None):
+    """{tile: {kind: path}} of the RayCloudTools instance outputs.
+
+    Either one ``folder`` holding them under RCT's names, or ``kind_folders``
+    ({kind: folder}, as Galaxy collections arrive): the folder says what a file
+    is, its name which tile (``c00_r00.txt``).
+    """
+    from raycloud_tree_files import folder_files
+
+    found = []
+    if folder is not None:
+        for path in folder_files(folder):
+            kind = next((k for suffix, k in KINDS.items() if path.name.endswith(suffix)), None)
+            if kind is not None:
+                found.append((kind, path))
+    for kind, kind_folder in (kind_folders or {}).items():
+        found += [(kind, path) for path in folder_files(kind_folder)]
     files = {}
-    for path in sorted(Path(folder).iterdir(), key=lambda p: p.name.lower()):
-        if not path.is_file() or path.name.startswith("."):
-            continue
-        kind = next((k for suffix, k in KINDS.items() if path.name.endswith(suffix)), None)
-        if kind is None:
-            continue
+    for kind, path in found:
         tile = _tile_key(path)
         if kind in files.setdefault(tile, {}):
             raise ValueError(f"Two RayCloudTools {kind} files for tile {tile}: {files[tile][kind].name}, {path.name}")
@@ -118,7 +128,7 @@ def _terrain_from_tiles(output, tile_meshes, cores, footprint, crs):
 
 
 def merge_qsm(manifest_path, qsm_folder, output_dir, *, dimension=None, rct_terrain_folder=None,
-              footprints_path=None, octree=True):
+              footprints_path=None, octree=True, kind_folders=None):
     """Write the QSMs of one instance dimension per original; returns the report."""
     from qsm_octree import build as build_octree
 
@@ -131,7 +141,9 @@ def merge_qsm(manifest_path, qsm_folder, output_dir, *, dimension=None, rct_terr
     ids = np.asarray(manifest["instances"]["ids"], dtype=np.int64)
     owner_tile = dict(zip(ids.tolist(), manifest["instances"]["tile"]))
     holders = dict(zip(ids.tolist(), manifest["instances"]["originals"]))
-    files = tile_files(qsm_folder)
+    files = tile_files(qsm_folder, kind_folders)
+    if not files:
+        raise ValueError("No RayCloudTools instance outputs given (--qsm-folder or the tree table, info and mesh folders)")
     unknown = sorted(set(files) - set(labels))
     if unknown:
         raise ValueError(f"RayCloudTools outputs for tiles the manifest does not list: {', '.join(unknown)}")
