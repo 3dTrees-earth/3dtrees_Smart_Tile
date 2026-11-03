@@ -318,17 +318,21 @@ fn validate_copc_twins(copc_dir: &Path, raw_dir: &Path) -> Result<(), String> {
 }
 
 fn run_remap(args: &BTreeMap<String, String>) -> Result<(), String> {
-    let known = ["task", "segmented-folders", "original-laz-input-dir", "original-input-dir", "original-laz-output-dir", "output-dir",
+    let known = ["task", "segmented-folders", "merged-laz", "original-laz-input-dir", "original-input-dir", "original-laz-output-dir", "output-dir",
                  "workers", "number-of-threads", "remap-dims", "instance-dimension", "collection-dir",
                  "transfer-original-dims-to-merged", "no-transfer-original-dims-to-merged", "original-copc-input-dir"];
     let unknown: Vec<&String> = args.keys().filter(|k| !known.contains(&k.as_str()) && !PRODUCT_FLAGS.contains(&k.as_str())).collect();
     if !unknown.is_empty() {
         return Err(format!("Unknown or not yet ported remap argument(s): {}", unknown.iter().map(|k| format!("--{k}")).collect::<Vec<_>>().join(" ")));
     }
-    let originals = args.get("original-laz-input-dir").or(args.get("original-input-dir")).map(PathBuf::from)
-        .ok_or("remap requires raw originals and --segmented-folders (--merged-laz is not ported yet)")?;
-    let collections: Vec<PathBuf> = args.get("segmented-folders").ok_or("--segmented-folders is required")?
-        .split(',').map(str::trim).filter(|s| !s.is_empty()).map(PathBuf::from).collect();
+    let originals = args.get("original-laz-input-dir").or(args.get("original-input-dir")).map(PathBuf::from);
+    let (Some(originals), true) = (originals, args.contains_key("segmented-folders") != args.contains_key("merged-laz")) else {
+        return Err("remap requires raw originals and exactly one of --segmented-folders or --merged-laz".into());
+    };
+    let collections: Vec<PathBuf> = match args.get("segmented-folders") {
+        Some(folders) => folders.split(',').map(str::trim).filter(|s| !s.is_empty()).map(PathBuf::from).collect(),
+        None => vec![PathBuf::from(&args["merged-laz"])],
+    };
     let output = args.get("original-laz-output-dir").or(args.get("output-dir")).map(PathBuf::from)
         .unwrap_or_else(|| originals.parent().unwrap().join("original_with_predictions"));
     let workers = number(args, "workers")?.or(number(args, "number-of-threads")?).map(|w| w as usize).unwrap_or_else(allocated_cpus);

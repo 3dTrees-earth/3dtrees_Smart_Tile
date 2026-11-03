@@ -50,7 +50,13 @@ fn chunks(path: &Path, size: u64) -> Res<impl Iterator<Item = Res<las::PointData
 pub struct Collection { pub name: String, pub instance: Option<String>, pub dimensions: Vec<ExtraBytes>, pub set: PointSet, pub values: Vec<u8>, pub width: usize, pub maximum: u64 }
 
 pub fn load_collection(path: &Path, origin: &[f64; 3], radius: f64, instance_dimension: &str) -> Res<Collection> {
-    let files = crate::tile::point_cloud_files(path)?;
+    // `prediction_collection_files`: a collection folder, or one LAS/LAZ file (`--merged-laz`).
+    let files = if path.is_file() {
+        let name = path.file_name().unwrap().to_string_lossy().to_lowercase();
+        if name.ends_with(".las") || name.ends_with(".laz") { vec![path.to_path_buf()] } else { Vec::new() }
+    } else {
+        crate::tile::point_cloud_files(path)?
+    };
     if files.is_empty() {
         return Err(format!("No prediction files in {}", path.display()));
     }
