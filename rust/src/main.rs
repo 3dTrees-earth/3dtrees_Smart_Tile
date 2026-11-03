@@ -193,7 +193,8 @@ fn run() -> Result<(), String> {
 
 fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
     let known = ["task", "subsampled-segmented-folder", "subsampled-10cm-folder", "segmented-folders", "segmented-remapped-folder",
-                 "original-tiles-dir", "remap-tolerance", "subsampled-target-folder", "tile-bounds-json",
+                 "original-tiles-dir", "remap-tolerance", "output-tiles-folder", "output-merged-laz", "disable-matching", "no-disable-matching",
+                 "filter-anchor", "skip-unfiltered-tiles", "no-skip-unfiltered-tiles", "remap-dims", "original-copc-input-dir", "subsampled-target-folder", "tile-bounds-json",
                  "output-folder", "output-dir", "workers", "number-of-threads", "prediction-transfer-tolerance", "instance-dimension", "stop-after", "overlap-threshold",
                  "original-laz-input-dir", "original-input-dir", "original-laz-output-dir", "collection-dir",
                  "transfer-original-dims-to-merged", "no-transfer-original-dims-to-merged",
@@ -217,7 +218,10 @@ fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
     let ready = remapped.is_some() || (args.contains_key("segmented-folders") && target.is_none());
     let workers = number(args, "workers")?.or(number(args, "number-of-threads")?).map(|w| w as usize).unwrap_or_else(allocated_cpus);
     let params = merge::MergeParams {
-        work: args.get("output-folder").or(args.get("output-dir")).map(PathBuf::from).unwrap_or_else(|| segmented.parent().unwrap().to_path_buf()),
+        work: args.get("output-folder").or(args.get("output-dir")).map(PathBuf::from)
+            .or_else(|| args.get("output-tiles-folder").map(|p| Path::new(p).parent().unwrap_or(Path::new(".")).to_path_buf()))
+            .or_else(|| args.get("output-merged-laz").map(|p| Path::new(p).parent().unwrap_or(Path::new(".")).to_path_buf()))
+            .unwrap_or_else(|| segmented.parent().unwrap().to_path_buf()),
         collections,
         target: if ready { None } else { target },
         resolution_1: number(args, "resolution-1")?.unwrap_or(0.01),
@@ -232,6 +236,12 @@ fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
         originals: args.get("original-laz-input-dir").or(args.get("original-input-dir")).map(PathBuf::from),
         original_output: args.get("original-laz-output-dir").map(PathBuf::from),
         skip_merged_file: flag(args, "skip-merged-file"),
+        output_tiles: PathBuf::new(),
+        output_merged_laz: args.get("output-merged-laz").map(PathBuf::from),
+        matching: !flag(args, "disable-matching"),
+        anchor: merge::Anchor::parse(args.get("filter-anchor").map(String::as_str).unwrap_or("centroid"))?,
+        keep_unfiltered: !flag(args, "skip-unfiltered-tiles"),
+        target_dims: args.get("remap-dims").map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()),
         small_instances: if flag(args, "reassign-small-instances") {
             let size = number(args, "max-cluster-size")?.unwrap_or(3000.0);
             let volume = number(args, "max-volume-for-merge")?.unwrap_or(4.0);
@@ -247,6 +257,12 @@ fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
             return Err("--original-laz-output-dir/--output-dir must differ from --original-laz-input-dir.".into());
         }
     }
+    let mut params = params;
+    params.output_tiles = args.get("output-tiles-folder").map(PathBuf::from).unwrap_or_else(|| params.work.join("output_tiles"));
+    if let Some(copc) = args.get("original-copc-input-dir") {
+        let raw = params.originals.as_ref().ok_or("--original-laz-input-dir is required with --original-copc-input-dir")?;
+        validate_copc_twins(Path::new(copc), raw)?;
+    }
     if !(params.resolution_1.is_finite() && params.resolution_1 > 0.0) {
         return Err("First subsampling resolution must be finite and positive".into());
     }
@@ -254,13 +270,14 @@ fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
         return Err("Original remap tolerance must be finite and positive".into());
     }
     let collection_dir = args.get("collection-dir").map(PathBuf::from);
-    if let Some(dir) = &collection_dir { collections::check(dir, &params.work)?; }
+    if let Some(dir) = &collection_dir { collections::check(dir, params.output_tiles.parent().unwrap_or(Path::new(".")))?; }
     if flag(args, "transfer-original-dims-to-merged") { product_settings(args)?; }
     merge::run(&params)?;
-    let original_output = params.original_output.clone().unwrap_or_else(|| params.work.join("original_with_predictions"));
-    let made = if params.originals.is_some() { prod_merged_after(args, &original_output, &params.work, params.workers)? } else { Vec::new() };
+    let root = params.output_tiles.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let original_output = params.original_output.clone().unwrap_or_else(|| root.join("original_with_predictions"));
+    let made = if params.originals.is_some() { prod_merged_after(args, &original_output, &root, params.workers)? } else { Vec::new() };
     if let Some(dir) = &collection_dir {
-        let mut published = vec![("merged_tiles".to_string(), collections::files(&params.work.join("output_tiles"), &[".laz"]))];
+        let mut published = vec![("merged_tiles".to_string(), collections::files(&params.output_tiles, &[".laz"]))];
         if params.originals.is_some() {
             published.push(("originals_with_predictions".to_string(), collections::files(&original_output, &[".laz", ".las"])));
         }
@@ -270,10 +287,40 @@ fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
     Ok(())
 }
 
+/// `_validate_copc_original_lane` + `_validate_copc_laz_source_pairs`: every raw original has a
+/// COPC twin with the same point count and bounds (within 2 cm).
+fn validate_copc_twins(copc_dir: &Path, raw_dir: &Path) -> Result<(), String> {
+    if !copc_dir.exists() { return Err(format!("COPC original input directory not found: {}", copc_dir.display())); }
+    let list = |dir: &Path, copc: bool| -> Result<BTreeMap<String, PathBuf>, String> {
+        Ok(fs::read_dir(dir).map_err(|e| e.to_string())?.filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| { let n = p.file_name().unwrap().to_string_lossy().to_lowercase(); p.is_file() && (n.ends_with(".laz") || n.ends_with(".las")) && n.ends_with(".copc.laz") == copc })
+            .map(|p| (collections::file_stem(&p).to_lowercase(), p)).collect())
+    };
+    let copcs = list(copc_dir, true)?;
+    if copcs.is_empty() { return Err(format!("No COPC LAZ files found in original COPC input dir: {}", copc_dir.display())); }
+    let raws = list(raw_dir, false)?;
+    if raws.is_empty() { return Err(format!("No raw LAZ/LAS files found in original input dir: {}", raw_dir.display())); }
+    let missing: Vec<&String> = raws.keys().filter(|k| !copcs.contains_key(*k)).collect();
+    if !missing.is_empty() {
+        return Err(format!("COPC original input dir is missing COPC twins for raw originals: {}", missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+    }
+    for (key, raw) in &raws {
+        let (r, c) = (lasio::read_header(raw)?, lasio::read_header(&copcs[key])?);
+        if r.point_count != c.point_count {
+            return Err(format!("COPC/raw source pair point-count mismatch for {key}: {} has {}, {} has {}",
+                copcs[key].file_name().unwrap().to_string_lossy(), pyfmt::thousands(c.point_count), raw.file_name().unwrap().to_string_lossy(), pyfmt::thousands(r.point_count)));
+        }
+        if (0..3).any(|a| (r.mins[a] - c.mins[a]).abs() > 0.02 || (r.maxs[a] - c.maxs[a]).abs() > 0.02) {
+            return Err(format!("COPC/raw source pair bounds mismatch for {key}"));
+        }
+    }
+    Ok(())
+}
+
 fn run_remap(args: &BTreeMap<String, String>) -> Result<(), String> {
     let known = ["task", "segmented-folders", "original-laz-input-dir", "original-input-dir", "original-laz-output-dir", "output-dir",
                  "workers", "number-of-threads", "remap-dims", "instance-dimension", "collection-dir",
-                 "transfer-original-dims-to-merged", "no-transfer-original-dims-to-merged"];
+                 "transfer-original-dims-to-merged", "no-transfer-original-dims-to-merged", "original-copc-input-dir"];
     let unknown: Vec<&String> = args.keys().filter(|k| !known.contains(&k.as_str()) && !PRODUCT_FLAGS.contains(&k.as_str())).collect();
     if !unknown.is_empty() {
         return Err(format!("Unknown or not yet ported remap argument(s): {}", unknown.iter().map(|k| format!("--{k}")).collect::<Vec<_>>().join(" ")));
@@ -288,6 +335,7 @@ fn run_remap(args: &BTreeMap<String, String>) -> Result<(), String> {
     let root = output.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     let collection_dir = args.get("collection-dir").map(PathBuf::from);
     if let Some(dir) = &collection_dir { collections::check(dir, &root)?; }
+    if let Some(copc) = args.get("original-copc-input-dir") { validate_copc_twins(Path::new(copc), &originals)?; }
     if flag(args, "transfer-original-dims-to-merged") { product_settings(args)?; }
     if number(args, "resolution-1")?.is_some_and(|r| r != 0.01) {
         return Err("remap with --resolution-1 other than 0.01 is not ported yet".into());

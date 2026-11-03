@@ -41,6 +41,14 @@ pub struct MergeParams {
     pub original_output: Option<PathBuf>,
     /// `--skip-merged-file`: no `merged_tiles.laz` (never written for several collections).
     pub skip_merged_file: bool,
+    /// `--output-tiles-folder` (default `<work>/output_tiles`) and `--output-merged-laz`.
+    pub output_tiles: PathBuf,
+    pub output_merged_laz: Option<PathBuf>,
+    /// `--disable-matching`, `--filter-anchor`, `--skip-unfiltered-tiles`, `--remap-dims`.
+    pub matching: bool,
+    pub anchor: Anchor,
+    pub keep_unfiltered: bool,
+    pub target_dims: Option<std::collections::BTreeSet<String>>,
     /// `--reassign-small-instances`: (max cluster size, max bounding-box volume in m³).
     pub small_instances: Option<(u64, f64)>,
     /// Development: stop after this stage (only "dense" is ported).
@@ -512,6 +520,24 @@ fn chunks(path: &Path) -> Res<impl Iterator<Item = Res<las::PointData>>> {
     }))
 }
 
+/// `--filter-anchor`: the point that decides which tile owns an instance.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Anchor { Centroid, Highest, Lowest }
+
+impl Anchor {
+    pub fn parse(value: &str) -> Res<Anchor> {
+        match value {
+            "centroid" => Ok(Anchor::Centroid),
+            "highest_point" => Ok(Anchor::Highest),
+            "lowest_point" => Ok(Anchor::Lowest),
+            other => Err(format!("Unknown filter anchor: {other}")),
+        }
+    }
+    fn name(self) -> &'static str {
+        match self { Anchor::Centroid => "centroid", Anchor::Highest => "highest_point", Anchor::Lowest => "lowest_point" }
+    }
+}
+
 pub struct Ownership { pub removed: Vec<u64>, pub counts: BTreeMap<u64, u64>, pub sizes: BTreeMap<u64, u64>, pub background_input: u64, pub background_removed: u64,
                        pub input: u64, pub surviving: u64, pub decisions: Vec<Decision> }
 
@@ -519,7 +545,7 @@ pub struct Ownership { pub removed: Vec<u64>, pub counts: BTreeMap<u64, u64>, pu
 pub struct Decision { pub instance: u64, pub points: u64, pub anchor: [f64; 3], pub lower: [f64; 3], pub upper: [f64; 3], pub kept: bool }
 
 /// `_filter_tile` (centroid anchor): keep owned instances and core-owned background.
-fn filter_tile(model: &Model, file: &Path, region: &Region, output: &Path, origin: &[f64; 3]) -> Res<Ownership> {
+fn filter_tile(model: &Model, file: &Path, region: &Region, output: &Path, origin: &[f64; 3], anchor: Anchor) -> Res<Ownership> {
     let header = lasio::read_header(file)?;
     let layout = PointLayout::of(&header)?;
     let (label_field, _) = layout.find(&model.instance).unwrap();
@@ -535,15 +561,25 @@ fn filter_tile(model: &Model, file: &Path, region: &Region, output: &Path, origi
             if label == 0 { continue; }
             let p = local(r, &header, origin);
             let e = batch.entry(label).or_insert((0, [0.0; 3], [f64::INFINITY; 3], [f64::NEG_INFINITY; 3]));
+            // Centroid: the sum; highest/lowest: the first extreme point in record order.
+            match anchor {
+                Anchor::Centroid => for a in 0..3 { e.1[a] += p[a]; },
+                Anchor::Highest => if e.0 == 0 || p[2] > e.1[2] { e.1 = p; },
+                Anchor::Lowest => if e.0 == 0 || p[2] < e.1[2] { e.1 = p; },
+            }
             e.0 += 1;
-            for a in 0..3 { e.1[a] += p[a]; e.2[a] = e.2[a].min(p[a]); e.3[a] = e.3[a].max(p[a]); }
+            for a in 0..3 { e.2[a] = e.2[a].min(p[a]); e.3[a] = e.3[a].max(p[a]); }
         }
-        for (label, (n, sum, lo, hi)) in batch {
+        for (label, (n, value, lo, hi)) in batch {
             let e = aggregates.entry(label).or_insert((0, [0.0; 3], [f64::INFINITY; 3], [f64::NEG_INFINITY; 3]));
             let first = e.0 == 0;
             e.0 += n;
+            match anchor {
+                Anchor::Centroid => for a in 0..3 { e.1[a] = if first { value[a] } else { e.1[a] + value[a] }; },
+                Anchor::Highest => if first || value[2] > e.1[2] { e.1 = value; },
+                Anchor::Lowest => if first || value[2] < e.1[2] { e.1 = value; },
+            }
             for a in 0..3 {
-                e.1[a] = if first { sum[a] } else { e.1[a] + sum[a] };
                 e.2[a] = e.2[a].min(lo[a]);
                 e.3[a] = e.3[a].max(hi[a]);
             }
@@ -552,7 +588,7 @@ fn filter_tile(model: &Model, file: &Path, region: &Region, output: &Path, origi
     let mut out = Ownership { removed: Vec::new(), counts: BTreeMap::new(), sizes: aggregates.iter().map(|(k, v)| (*k, v.0)).collect(),
                               background_input: 0, background_removed: 0, input: 0, surviving: 0, decisions: Vec::new() };
     for (&label, &(n, sum, lo, hi)) in &aggregates {
-        let point: [f64; 3] = std::array::from_fn(|a| sum[a] / n as f64 + origin[a]);
+        let point: [f64; 3] = std::array::from_fn(|a| if anchor == Anchor::Centroid { sum[a] / n as f64 } else { sum[a] } + origin[a]);
         let kept = owned_anchor(point[0], point[1], region);
         if kept {
             out.counts.insert(label, n);
@@ -824,12 +860,12 @@ pub struct ReconcileReport { pub accepted: Vec<(usize, u64, usize, u64, u64)>, p
 #[allow(clippy::too_many_arguments)]
 fn reconcile(model: &Model, files: &[PathBuf], index: &TileIndex, origin: &[f64; 3], counts: &BTreeMap<(usize, u64), u64>,
              overlap_threshold: f64, radius: f64, overlaps: &Overlaps, normal_keys: Option<&std::collections::BTreeSet<(usize, u64)>>,
-             pool: &rayon::ThreadPool, report: &mut ReconcileReport) -> Res<BTreeMap<(usize, u64), u64>> {
+             pool: &rayon::ThreadPool, report: &mut ReconcileReport, enabled: bool) -> Res<BTreeMap<(usize, u64), u64>> {
     // `_count_instance_pairs` per tile, against every earlier overlapping tile.
     // Per tile: pair counters and (files_read, points_read, query_points, skipped_query_points).
     type TileCounts = (BTreeMap<usize, BTreeMap<(u64, u64), u64>>, [u64; 4]);
     let per_tile: Vec<Res<TileCounts>> = pool.install(|| files.par_iter().enumerate().map(|(tile, file)| {
-        let neighbors: Vec<usize> = (0..tile).filter(|o| overlaps[tile].contains_key(o)).collect();
+        let neighbors: Vec<usize> = if enabled { (0..tile).filter(|o| overlaps[tile].contains_key(o)).collect() } else { Vec::new() };
         let mut counters: BTreeMap<usize, BTreeMap<(u64, u64), u64>> = neighbors.iter().map(|o| (*o, BTreeMap::new())).collect();
         let mut metrics = [0u64; 4];
         if neighbors.is_empty() { return Ok((counters, metrics)); }
@@ -1589,7 +1625,7 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     set_parallelism(report, "core_filter_processes", serde_json::json!(qw.min(n)));
     let ownership = timed("core_filter_and_index", &model, report, || {
         let results: Vec<Res<Ownership>> = pool.install(|| (0..pairs.len()).into_par_iter()
-            .map(|n| filter_tile(&model, &dense_files[n], &regions[n], &owned_files[n], &origin)).collect());
+            .map(|n| filter_tile(&model, &dense_files[n], &regions[n], &owned_files[n], &origin, params.anchor)).collect());
         results.into_iter().collect::<Res<Vec<_>>>()
     })?;
     // `instance_ownership`: provisional decisions per tile; recovery revises them below.
@@ -1646,7 +1682,7 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
         m["removed_instances"] = serde_json::json!(m["removed_instances"].as_u64().unwrap() - ids.len() as u64);
         m.insert("recovered_instances".into(), serde_json::json!(ids));
     }
-    report.insert("instance_ownership".into(), serde_json::json!({"anchor": "centroid", "geometry": "remapped_1cm",
+    report.insert("instance_ownership".into(), serde_json::json!({"anchor": params.anchor.name(), "geometry": "remapped_1cm",
         "background": "spatial core owner; half-open east/north edges", "semantics": "preserve per-point values from owning tile",
         "boundary": "inclusive core; outer edges retained", "tiles": tiles_json}));
     let mut orphan_json = serde_json::json!({
@@ -1663,12 +1699,12 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     let normal_keys: std::collections::BTreeSet<(usize, u64)> = counts.keys().copied().collect();
     for (tile, id) in &admitted { counts.insert((*tile, *id), ownership[*tile].sizes[id]); }
     report.insert("reconciliation".into(), Value::Null);
-    set_parallelism(report, "reconciliation_processes", serde_json::json!(qw.min(n)));
+    if params.matching { set_parallelism(report, "reconciliation_processes", serde_json::json!(qw.min(n))); }
     let mut reconciliation = ReconcileReport::default();
     let mapping = timed("reconciliation", &model, report, || {
         let index = build_index(&current, &model, &origin, 0.05)?;
         reconcile(&model, &current, &index, &origin, &counts, params.overlap_threshold, 0.05, &overlaps,
-                  (!admitted.is_empty()).then_some(&normal_keys), &pool, &mut reconciliation)
+                  (!admitted.is_empty()).then_some(&normal_keys), &pool, &mut reconciliation, params.matching)
     })?;
     let ids: std::collections::BTreeSet<u64> = mapping.values().copied().collect();
     let pair = |e: &(usize, u64, usize, u64, u64)| serde_json::json!({"tiles": [e.0, e.2], "instances": [e.1, e.3], "matches": e.4});
@@ -1778,8 +1814,11 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     manifest.insert("contract".into(), Value::String("3DT-2183/v8-group-geometry".into()));
     manifest.insert("model".into(), Value::String(model.name.clone()));
     manifest.insert("resolution_1_m".into(), crate::pyfmt::float(params.resolution_1));
-    let baseline = if suffix.is_empty() { "../output_tiles_unfiltered_1cm".to_string() } else { format!("../../output_tiles_unfiltered_1cm/{suffix}") };
-    manifest.insert("baseline".into(), Value::String(baseline));
+    if params.keep_unfiltered {
+        let name = format!("{}_unfiltered_1cm", params.output_tiles.file_name().unwrap().to_string_lossy());
+        let baseline = if suffix.is_empty() { format!("../{name}") } else { format!("../../{name}/{suffix}") };
+        manifest.insert("baseline".into(), Value::String(baseline));
+    }
     manifest.insert("instance_summary".into(), Value::String(summary_name));
     manifest.insert("tile_bounds_json".into(), Value::String("tile_bounds.json".into()));
     manifest.insert("tile_bounds_sha256".into(), Value::String(crate::sha256::file_hex(&final_dir.join("tile_bounds.json"))?));
@@ -1794,14 +1833,23 @@ struct ModelOutcome { model: Model, labels: Vec<String>, final_dir: PathBuf, den
 pub fn run(params: &MergeParams) -> Res<()> {
     let started = std::time::Instant::now();
     let layout: Value = serde_json::from_str(&fs::read_to_string(&params.tile_bounds_json).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let output_tiles = params.work.join("output_tiles");
-    let baseline_output = params.work.join("output_tiles_unfiltered_1cm");
+    let output_tiles = params.output_tiles.clone();
+    let root = output_tiles.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let baseline_output = output_tiles.with_file_name(format!("{}_unfiltered_1cm", output_tiles.file_name().unwrap().to_string_lossy()));
     let single = params.collections.len() == 1;
-    let merged_output = (single && !params.skip_merged_file).then(|| params.work.join("merged_tiles.laz"));
-    let merged_metadata = params.work.join("merged_tiles_instance_metadata.csv");
-    for path in [Some(&output_tiles), Some(&baseline_output), merged_output.as_ref()].into_iter().flatten() {
-        available_destination(path)?;
+    if params.output_merged_laz.as_ref().is_some_and(|m| m.file_name().unwrap().to_string_lossy().to_lowercase().ends_with(".copc.laz")) {
+        return Err("Processed merge writes regular LAZ; use create_merged_file for COPC products".into());
     }
+    if params.output_merged_laz.is_some() && !params.skip_merged_file && !single {
+        return Err("A single --output-merged-laz cannot combine model geometry; use --skip-merged-file for multiple collections".into());
+    }
+    let merged_output = if params.skip_merged_file { None } else { params.output_merged_laz.clone().or_else(|| single.then(|| params.work.join("merged_tiles.laz"))) };
+    let merged_metadata = merged_output.as_ref().map(|m| m.with_file_name(format!("{}_instance_metadata.csv", crate::collections::file_stem(m))))
+        .unwrap_or_else(|| params.work.join("merged_tiles_instance_metadata.csv"));
+    let mut destinations: Vec<&PathBuf> = vec![&output_tiles];
+    if params.keep_unfiltered { destinations.push(&baseline_output); }
+    destinations.extend(merged_output.as_ref());
+    for path in &destinations { available_destination(path)?; }
     let first = crate::tile::point_cloud_files(&params.collections[0])?;
     if first.is_empty() {
         return Err(format!("No predictions in {}", params.collections[0].display()));
@@ -1811,7 +1859,7 @@ pub fn run(params: &MergeParams) -> Res<()> {
     let f = crate::pyfmt::float;
     let scratch = params.work.join(format!(".remap-first-{}", std::process::id()));
     let mut checksums = Map::new();
-    let original_output = params.originals.as_ref().map(|_| params.original_output.clone().unwrap_or_else(|| params.work.join("original_with_predictions")));
+    let original_output = params.originals.as_ref().map(|_| params.original_output.clone().unwrap_or_else(|| root.join("original_with_predictions")));
     if let Some(destination) = &original_output { available_destination(destination)?; }
     let resolution = params.resolution_1;
     let original_radius = params.remap_tolerance.unwrap_or(3f64.sqrt() * resolution);
@@ -1855,7 +1903,7 @@ pub fn run(params: &MergeParams) -> Res<()> {
                     set: std::mem::replace(&mut o.survivors, PointSet::new(0.01)), values: std::mem::take(&mut o.survivor_values), width, maximum: o.groups });
                 baselines.push(Some(crate::remap::load_collection(&o.dense, &origin, radius, &o.model.instance)?.set));
             }
-            let (selected, used) = crate::remap::select_dimensions(&collections, None)?;
+            let (selected, used) = crate::remap::select_dimensions(&collections, params.target_dims.as_ref())?;
             let files = crate::remap::original_files(originals)?;
             let stage = scratch.join("originals");
             fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
@@ -1882,7 +1930,8 @@ pub fn run(params: &MergeParams) -> Res<()> {
         // `checksums`: every LAS/LAZ product (and the metadata file) at its published path.
         let final_root = scratch.join("final");
         let dense_root = scratch.join("dense");
-        let mut sources: Vec<(PathBuf, PathBuf)> = vec![(final_root.clone(), output_tiles.clone()), (dense_root.clone(), baseline_output.clone())];
+        let mut sources: Vec<(PathBuf, PathBuf)> = vec![(final_root.clone(), output_tiles.clone())];
+        if params.keep_unfiltered { sources.push((dense_root.clone(), baseline_output.clone())); }
         if let (Some(stage), Some(destination)) = (&originals_stage, &original_output) { sources.push((stage.clone(), destination.clone())); }
         for (source, destination) in &sources {
             for path in laz_files_recursive(source)? {
@@ -1916,9 +1965,9 @@ pub fn run(params: &MergeParams) -> Res<()> {
     if let Err(e) = &result { full.insert("error".into(), Value::String(e.clone())); }
     full.insert("wall_seconds".into(), f(started.elapsed().as_secs_f64()));
     full.insert("cpu_seconds".into(), f(process_cpu_seconds()));
-    write_json(&params.work.join("remap_first_report.json"), &Value::Object(full))?;
+    write_json(&root.join("remap_first_report.json"), &Value::Object(full))?;
     result?;
-    println!("Merge complete: {state}; report: {}", params.work.join("remap_first_report.json").display());
+    println!("Merge complete: {state}; report: {}", root.join("remap_first_report.json").display());
     Ok(())
 }
 
