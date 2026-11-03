@@ -1410,8 +1410,12 @@ fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Pat
     let mut counts: BTreeMap<u64, BTreeMap<usize, u64>> = BTreeMap::new();
     let mut sums: BTreeMap<u64, [f64; 2]> = BTreeMap::new();
     let mut scratch = [0u8; 8];
-    for (tile, file) in files.iter().enumerate() {
+    // Per tile (read in parallel), per chunk: the instance batches; summed below in tile and chunk order.
+    type Batches = Vec<BTreeMap<u64, (u64, f64, f64)>>;
+    let per_tile: Vec<Res<Batches>> = pool.install(|| files.par_iter().map(|file| {
         let (header, field) = instance_reader(file, instance)?;
+        let mut scratch = [0u8; 8];
+        let mut out = Vec::new();
         for chunk in chunks(file)? {
             let chunk = chunk?;
             let mut batch: BTreeMap<u64, (u64, f64, f64)> = BTreeMap::new();
@@ -1423,6 +1427,12 @@ fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Pat
                 let e = batch.entry(id).or_insert((0, 0.0, 0.0));
                 e.0 += 1; e.1 += x; e.2 += y;
             }
+            out.push(batch);
+        }
+        Ok(out)
+    }).collect());
+    for (tile, batches) in per_tile.into_iter().enumerate() {
+        for batch in batches? {
             for (id, (n, x, y)) in batch {
                 *counts.entry(id).or_default().entry(tile).or_default() += n;
                 let t = sums.entry(id).or_insert([0.0, 0.0]);
@@ -1450,13 +1460,17 @@ fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Pat
     let headers: Vec<SourceHeader> = files.iter().map(|f| lasio::read_header(f)).collect::<Res<_>>()?;
     let mut incoming: BTreeMap<usize, Vec<Vec<u8>>> = BTreeMap::new();
     let mut moved = 0u64;
-    // Pass 1: each tile without its departing points; departing points in the owner's encoding.
-    for (tile, file) in files.iter().enumerate() {
+    // Pass 1 (tiles in parallel): each tile without its departing points; departing points in the
+    // owner's encoding, per chunk in owner order.
+    type Departures = Vec<(usize, Vec<u8>, u64)>;
+    let pass1: Vec<Res<(Departures, u64)>> = pool.install(|| files.par_iter().enumerate().map(|(tile, file)| {
         let moving: std::collections::BTreeSet<u64> = owners.iter().filter(|(id, o)| **o != tile && counts[*id].contains_key(&tile)).map(|(id, _)| *id).collect();
-        if moving.is_empty() { continue; }
+        if moving.is_empty() { return Ok((Vec::new(), 0)); }
         let (header, field) = instance_reader(file, instance)?;
         let target = TileHeader::copy_of(&header)?;
-        let mut departing: Vec<(usize, Vec<u8>)> = Vec::new();
+        let mut scratch = [0u8; 8];
+        let mut departing: Departures = Vec::new();
+        let mut moved = 0u64;
         let mut batches = Vec::new();
         for chunk in chunks(file)? {
             let chunk = chunk?;
@@ -1472,7 +1486,7 @@ fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Pat
                     let world = header.scales[a] * f64::from(i32::from_le_bytes(r[a * 4..a * 4 + 4].try_into().unwrap())) + header.offsets[a];
                     let encoded = ((world - h.offsets[a]) / h.scales[a]).round_ties_even();
                     if encoded < i32::MIN as f64 || encoded > i32::MAX as f64 {
-                        return Err("Moved instance points exceed the LAS int32 range of their owner tile".into());
+                        return Err("Moved instance points exceed the LAS int32 range of their owner tile".to_string());
                     }
                     moved_record[a * 4..a * 4 + 4].copy_from_slice(&(encoded as i32).to_le_bytes());
                 }
@@ -1481,19 +1495,27 @@ fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Pat
             }
             for (owner, bytes) in parts {
                 let n = (bytes.len() / chunk.record_len()) as u64;
-                let key = files[owner].file_name().unwrap().to_string_lossy().into_owned();
-                match per_owner.iter_mut().find(|(k, _)| *k == key) { Some(e) => e.1 += n, None => per_owner.push((key, n)) }
-                departing.push((owner, bytes));
+                departing.push((owner, bytes, n));
             }
             batches.push(Ok(kept));
         }
         let temporary = file.with_extension("consolidating.laz");
-        lasio::write_records(&temporary, &target, batches, true, Some(pool))?;
+        lasio::write_records(&temporary, &target, batches, true, None)?;
         fs::rename(&temporary, file).map_err(|e| e.to_string())?;
-        for (owner, bytes) in departing { incoming.entry(owner).or_default().push(bytes); }
+        Ok((departing, moved))
+    }).collect());
+    for result in pass1 {
+        let (departing, n) = result?;
+        moved += n;
+        for (owner, bytes, count) in departing {
+            let key = files[owner].file_name().unwrap().to_string_lossy().into_owned();
+            match per_owner.iter_mut().find(|(k, _)| *k == key) { Some(e) => e.1 += count, None => per_owner.push((key, count)) }
+            incoming.entry(owner).or_default().push(bytes);
+        }
     }
-    // Pass 2: each owner's own points, then its incoming points (read back in 32,768-point chunks).
-    for (owner, parts) in incoming {
+    let _ = &mut scratch;
+    // Pass 2 (owners in parallel): each owner's own points, then its incoming points (32,768-point chunks).
+    let pass2: Vec<Res<()>> = pool.install(|| incoming.into_par_iter().map(|(owner, parts)| {
         let file = &files[owner];
         let target = TileHeader::copy_of(&headers[owner])?;
         let record_len = target.record_length();
@@ -1502,9 +1524,10 @@ fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Pat
         let all: Vec<u8> = parts.concat();
         for chunk in all.chunks(MAX_BATCH_POINTS as usize * record_len) { batches.push(Ok(chunk.to_vec())); }
         let temporary = file.with_extension("consolidating.laz");
-        lasio::write_records(&temporary, &target, batches, true, Some(pool))?;
-        fs::rename(&temporary, file).map_err(|e| e.to_string())?;
-    }
+        lasio::write_records(&temporary, &target, batches, true, None)?;
+        fs::rename(&temporary, file).map_err(|e| e.to_string())
+    }).collect());
+    pass2.into_iter().collect::<Res<Vec<()>>>()?;
     let _ = work;
     Ok((owners.len(), moved, per_owner))
 }
