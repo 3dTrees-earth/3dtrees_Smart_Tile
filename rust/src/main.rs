@@ -192,7 +192,8 @@ fn run() -> Result<(), String> {
 }
 
 fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
-    let known = ["task", "subsampled-segmented-folder", "subsampled-10cm-folder", "segmented-folders", "subsampled-target-folder", "tile-bounds-json",
+    let known = ["task", "subsampled-segmented-folder", "subsampled-10cm-folder", "segmented-folders", "segmented-remapped-folder",
+                 "original-tiles-dir", "remap-tolerance", "subsampled-target-folder", "tile-bounds-json",
                  "output-folder", "output-dir", "workers", "number-of-threads", "prediction-transfer-tolerance", "instance-dimension", "stop-after", "overlap-threshold",
                  "original-laz-input-dir", "original-input-dir", "original-laz-output-dir", "collection-dir",
                  "transfer-original-dims-to-merged", "no-transfer-original-dims-to-merged",
@@ -201,21 +202,26 @@ fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
     if !unknown.is_empty() {
         return Err(format!("Unknown or not yet ported merge argument(s): {}", unknown.iter().map(|k| format!("--{k}")).collect::<Vec<_>>().join(" ")));
     }
-    let collections: Vec<PathBuf> = match (args.get("subsampled-segmented-folder").or(args.get("subsampled-10cm-folder")), args.get("segmented-folders")) {
-        (Some(one), None) => vec![PathBuf::from(one)],
-        (None, Some(many)) => many.split(',').map(str::trim).filter(|s| !s.is_empty()).map(PathBuf::from).collect(),
+    let tenth = args.get("subsampled-segmented-folder").or(args.get("subsampled-10cm-folder"));
+    let remapped = args.get("segmented-remapped-folder");
+    let collections: Vec<PathBuf> = match (tenth, args.get("segmented-folders"), remapped) {
+        (Some(one), None, None) | (None, None, Some(one)) => vec![PathBuf::from(one)],
+        (None, Some(many), None) => many.split(',').map(str::trim).filter(|s| !s.is_empty()).map(PathBuf::from).collect(),
         _ => return Err("provide exactly one segmented input mode".into()),
     };
     let segmented = collections[0].clone();
-    if args.get("segmented-folders").is_some() && !args.contains_key("subsampled-target-folder") {
-        return Err("merge of ready predictions (--segmented-folders without --subsampled-target-folder) is not ported yet".into());
+    let mut target = args.get("subsampled-target-folder").or(args.get("original-tiles-dir")).map(PathBuf::from);
+    if target.is_none() && tenth.is_some() {
+        target = Some(segmented.parent().unwrap().join("subsampled_res1"));
     }
-    let target = args.get("subsampled-target-folder").map(PathBuf::from).unwrap_or_else(|| segmented.parent().unwrap().join("subsampled_res1"));
+    let ready = remapped.is_some() || (args.contains_key("segmented-folders") && target.is_none());
     let workers = number(args, "workers")?.or(number(args, "number-of-threads")?).map(|w| w as usize).unwrap_or_else(allocated_cpus);
     let params = merge::MergeParams {
         work: args.get("output-folder").or(args.get("output-dir")).map(PathBuf::from).unwrap_or_else(|| segmented.parent().unwrap().to_path_buf()),
         collections,
-        target,
+        target: if ready { None } else { target },
+        resolution_1: number(args, "resolution-1")?.unwrap_or(0.01),
+        remap_tolerance: number(args, "remap-tolerance")?,
         tile_bounds_json: args.get("tile-bounds-json").map(PathBuf::from).ok_or("--tile-bounds-json is required")?,
         workers: workers.min(allocated_cpus()),
         requested_workers: workers,
@@ -241,8 +247,11 @@ fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
             return Err("--original-laz-output-dir/--output-dir must differ from --original-laz-input-dir.".into());
         }
     }
-    if number(args, "resolution-1")?.is_some_and(|r| r != 0.01) {
-        return Err("merge with --resolution-1 other than 0.01 is not ported yet".into());
+    if !(params.resolution_1.is_finite() && params.resolution_1 > 0.0) {
+        return Err("First subsampling resolution must be finite and positive".into());
+    }
+    if params.remap_tolerance.is_some_and(|r| !(r.is_finite() && r > 0.0)) {
+        return Err("Original remap tolerance must be finite and positive".into());
     }
     let collection_dir = args.get("collection-dir").map(PathBuf::from);
     if let Some(dir) = &collection_dir { collections::check(dir, &params.work)?; }

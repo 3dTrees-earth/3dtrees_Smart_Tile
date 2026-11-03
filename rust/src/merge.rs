@@ -23,7 +23,11 @@ pub const MAX_BATCH_POINTS: u64 = 32_768;
 pub struct MergeParams {
     /// One or more prediction collections (`--segmented-folders` or the single segmented folder).
     pub collections: Vec<PathBuf>,
-    pub target: PathBuf,
+    /// The 1 cm targets; None for ready predictions (`--segmented-remapped-folder`, or `--segmented-folders` alone).
+    pub target: Option<PathBuf>,
+    /// `--resolution-1` (first-stage resolution) and `--remap-tolerance` (original radius override).
+    pub resolution_1: f64,
+    pub remap_tolerance: Option<f64>,
     pub tile_bounds_json: PathBuf,
     pub work: PathBuf,
     pub workers: usize,
@@ -220,6 +224,78 @@ fn pairs(segmented: &Path, target: &Path, layout: &Value) -> Res<(Vec<Pair>, Vec
         labels.push(format!("c{:02}_r{:02}", t["col"].as_i64().unwrap(), t["row"].as_i64().unwrap()));
     }
     Ok((out, labels))
+}
+
+/// Ready predictions: each tile is its own target (`(p, p, stem)`), sorted by path, on its layout tile.
+fn ready_pairs(segmented: &Path, layout: &Value) -> Res<(Vec<Pair>, Vec<String>)> {
+    let mut sources = crate::tile::point_cloud_files(segmented)?;
+    sources.sort();
+    let tiles = layout["tiles"].as_array().cloned().unwrap_or_default();
+    let json_bounds: Vec<[f64; 4]> = tiles.iter().map(|t| [t["bounds"][0][0].as_f64().unwrap(), t["bounds"][0][1].as_f64().unwrap(),
+                                                         t["bounds"][1][0].as_f64().unwrap(), t["bounds"][1][1].as_f64().unwrap()]).collect();
+    let centers: Vec<[f64; 2]> = json_bounds.iter().map(|b| [(b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5]).collect();
+    let bounds: Vec<(String, [f64; 4])> = sources.iter().map(|f| Ok((f.display().to_string(), file_bounds(&lasio::read_header(f)?)))).collect::<Res<_>>()?;
+    let map = match_to_layout(&bounds, &json_bounds, &centers)?;
+    let mut out = Vec::new();
+    let mut labels = Vec::new();
+    for f in sources {
+        let index = map[&f.display().to_string()];
+        let t = &tiles[index];
+        labels.push(format!("c{:02}_r{:02}", t["col"].as_i64().unwrap(), t["row"].as_i64().unwrap()));
+        out.push(Pair { prediction: f.clone(), target: f, layout_tile: Some(index) });
+    }
+    Ok((out, labels))
+}
+
+/// `prepare_dense` with ready predictions: validate the labels and copy each tile with the model
+/// dimensions re-declared at the end (`target_header(ready=True)`); every point is assigned.
+fn ready_tile(model: &Model, n: usize, pair: &Pair, output: &Path) -> Res<(u64, u64)> {
+    let header = lasio::read_header(&pair.prediction)?;
+    let layout = PointLayout::of(&header)?;
+    let mut target = TileHeader::copy_of(&header)?;
+    let names: Vec<&str> = model.dimensions.iter().map(|d| d.name.as_str()).collect();
+    target.extra.retain(|e| !names.contains(&e.source.name.as_str()));
+    let kept: Vec<(usize, usize)> = layout.extra.iter().filter(|(e, _)| !names.contains(&e.name.as_str())).map(|(e, o)| (*o, e.size())).collect();
+    target.extra.extend(model.dimensions.iter().map(OutputExtra::new));
+    target.sync_extra_bytes();
+    let fields: Vec<(usize, usize)> = model.dimensions.iter().map(|d| { let (_, o) = layout.extra.iter().find(|(e, _)| e.name == d.name).unwrap(); (*o, d.size()) }).collect();
+    let labels: Vec<(Layout, Option<[u8; 24]>)> = std::iter::once(&model.instance).chain(model.semantic.as_ref())
+        .map(|name| { let (l, e) = layout.find(name).unwrap(); (l, e.filter(|e| e.has_no_data()).map(|e| e.no_data)) }).collect();
+    let base = crate::points::base_record_length(header.point_format);
+    let file = pair.prediction.file_name().unwrap().to_string_lossy().into_owned();
+    let mut total = 0u64;
+    let mut scratch = [0u8; 8];
+    let mut batches = Vec::new();
+    for chunk in chunks(&pair.prediction)? {
+        let chunk = chunk?;
+        let mut out = Vec::with_capacity(chunk.len() * target.record_length());
+        for r in chunk.raw_bytes().chunks_exact(chunk.record_len()) {
+            for (k, (field, no_data)) in labels.iter().enumerate() {
+                let raw = field.get(r, &mut scratch);
+                let value = match field.scalar() {
+                    crate::points::Scalar::F32 => f32::from_le_bytes(raw[..4].try_into().unwrap()) as f64,
+                    crate::points::Scalar::F64 => f64::from_le_bytes(raw[..8].try_into().unwrap()),
+                    s => s.read_int(raw) as f64,
+                };
+                let name = if k == 0 { &model.instance } else { model.semantic.as_ref().unwrap() };
+                if !value.is_finite() || value < 0.0 || value != value.floor() {
+                    return Err(format!("{}/{file}: invalid or missing {name} labels", model.name));
+                }
+                if k == 0 && value > u32::MAX as f64 {
+                    return Err(format!("{}/{file}: instance IDs exceed uint32", model.name));
+                }
+                if no_data.is_some_and(|nd| nd[..raw.len()] == *raw) {
+                    return Err(format!("{}/{file}: missing {name} prediction (no-data sentinel)", model.name));
+                }
+            }
+            out.extend_from_slice(&r[..base]);
+            for (o, size) in kept.iter().chain(&fields) { out.extend_from_slice(&r[*o..o + size]); }
+            total += 1;
+        }
+        batches.push(Ok(out));
+    }
+    lasio::write_records(&output.join(format!("tile_{n:05}.laz")), &target, batches, true, None)?;
+    Ok((total, total))
 }
 
 /// One prediction tile in memory: local coordinates, raw prediction values, and its spatial hash.
@@ -1469,7 +1545,10 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     }
     let headers = files.iter().map(|f| lasio::read_header(f)).collect::<Res<Vec<_>>>()?;
     let model = describe_model(&files, &headers, collection, &params.instance_dimension)?;
-    let (pairs, labels) = pairs(collection, &params.target, layout)?;
+    let (pairs, labels) = match &params.target {
+        Some(target) => pairs(collection, target, layout)?,
+        None => ready_pairs(collection, layout)?,
+    };
     let qw = params.workers.max(1);
     let n = pairs.len();
     let f = crate::pyfmt::float;
@@ -1482,7 +1561,7 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     // `query_process_shares`: query processes per tile in proportion to its 1 cm points.
     let sizes: Vec<u64> = pairs.iter().map(|p| lasio::read_header(&p.target).map(|h| h.point_count)).collect::<Res<_>>()?;
     let total: u64 = sizes.iter().sum::<u64>().max(1);
-    let shares: Vec<u64> = sizes.iter().map(|s| if qw == 1 { 1 } else { 1u64.max(py_round(qw as f64 * *s as f64 / total as f64) as u64) }).collect();
+    let shares: Vec<u64> = sizes.iter().map(|s| if qw == 1 || params.target.is_none() { 1 } else { 1u64.max(py_round(qw as f64 * *s as f64 / total as f64) as u64) }).collect();
     let mut parallelism = Map::new();
     parallelism.insert("dense_transfer_processes".into(), serde_json::json!(qw.min(n)));
     parallelism.insert("dense_query_processes".into(), serde_json::json!(shares));
@@ -1493,12 +1572,14 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     let dense_files: Vec<PathBuf> = (0..pairs.len()).map(|n| dense.join(format!("tile_{n:05}.laz"))).collect();
     let transferred = timed("dense_transfer_and_index", &model, report, || {
         let results: Vec<Res<(u64, u64)>> = pool.install(|| pairs.par_iter().enumerate()
-            .map(|(n, p)| transfer_tile(&model, n, p, &dense, &origin, params.transfer_radius, &pool)).collect());
+            .map(|(n, p)| if params.target.is_none() { ready_tile(&model, n, p, &dense) }
+                          else { transfer_tile(&model, n, p, &dense, &origin, params.transfer_radius, pool) }).collect());
         results.into_iter().collect::<Res<Vec<_>>>()
     })?;
     report.insert("transfer".into(), Value::Array(pairs.iter().zip(&transferred).enumerate().map(|(n, (p, (total, matched)))| serde_json::json!({
         "source": p.prediction.display().to_string(), "target": p.target.display().to_string(), "tile": n,
-        "total": total, "matched": matched, "missing_examples": [], "radius_m": f(params.transfer_radius)})).collect()));
+        "total": total, "matched": matched, "missing_examples": [],
+            "radius_m": if params.target.is_none() { Value::Null } else { f(params.transfer_radius) }})).collect()));
     let regions = regions(&pairs, layout);
     let overlaps = tile_overlaps(&pairs, layout, &origin);
     let owned = scratch.join("owned").join(suffix);
@@ -1691,12 +1772,12 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
         .chain(final_ids.iter().map(|id| format!("{id},{}\r\n", u8::from(added.contains(id))))).collect();
     fs::write(final_dir.join("instance_metadata.csv"), &csv).map_err(|e| e.to_string())?;
     let summary_name = format!("{}_summary.json", model.instance);
-    write_json(&final_dir.join(&summary_name), &summary_document(&model, &statistics, &origin, 0.01, &reassigned, params.small_instances.is_some()))?;
+    write_json(&final_dir.join(&summary_name), &summary_document(&model, &statistics, &origin, params.resolution_1, &reassigned, params.small_instances.is_some()))?;
     write_json(&final_dir.join("tile_bounds.json"), layout)?;
     let mut manifest = Map::new();
     manifest.insert("contract".into(), Value::String("3DT-2183/v8-group-geometry".into()));
     manifest.insert("model".into(), Value::String(model.name.clone()));
-    manifest.insert("resolution_1_m".into(), crate::pyfmt::float(0.01));
+    manifest.insert("resolution_1_m".into(), crate::pyfmt::float(params.resolution_1));
     let baseline = if suffix.is_empty() { "../output_tiles_unfiltered_1cm".to_string() } else { format!("../../output_tiles_unfiltered_1cm/{suffix}") };
     manifest.insert("baseline".into(), Value::String(baseline));
     manifest.insert("instance_summary".into(), Value::String(summary_name));
@@ -1732,10 +1813,11 @@ pub fn run(params: &MergeParams) -> Res<()> {
     let mut checksums = Map::new();
     let original_output = params.originals.as_ref().map(|_| params.original_output.clone().unwrap_or_else(|| params.work.join("original_with_predictions")));
     if let Some(destination) = &original_output { available_destination(destination)?; }
-    let resolution = 0.01f64;
+    let resolution = params.resolution_1;
+    let original_radius = params.remap_tolerance.unwrap_or(3f64.sqrt() * resolution);
     let mut top_report = serde_json::json!({
         "contract": "3DT-2183/v8-group-geometry", "state": "running", "models": [], "duplicate_radius_m": f(0.01),
-        "resolution_1_m": f(resolution), "original_radius_m": f(3f64.sqrt() * resolution), "required_match_fraction": f(1.0),
+        "resolution_1_m": f(resolution), "original_radius_m": f(original_radius), "required_match_fraction": f(1.0),
         "batch_point_limit": MAX_BATCH_POINTS, "distance_boundary": "inclusive Euclidean XYZ; 8 float64 ULP guard in local coordinates",
         "survivor_order": "source tile filename, then original point order",
         "nearest_ties": "within 8 local-coordinate float64 ULPs of the minimum distance; stable tile/point order",
@@ -1758,7 +1840,7 @@ pub fn run(params: &MergeParams) -> Res<()> {
         // `enrich_originals` on every model's final survivors, measured against its dense baseline.
         let mut originals_stage = None;
         if let Some(originals) = &params.originals {
-            let radius = 3f64.sqrt() * 0.01;
+            let radius = original_radius;
             let mut collections = Vec::new();
             let mut baselines = Vec::new();
             for o in outcomes.iter_mut() {
