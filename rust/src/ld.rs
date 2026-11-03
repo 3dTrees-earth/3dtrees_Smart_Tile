@@ -138,3 +138,15 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod bench {
+    #[test]
+    #[ignore]
+    fn local_coordinate_speed() {
+        let t = std::time::Instant::now();
+        let mut acc = 0.0;
+        for i in 0..30_000_000i32 { acc += super::local_coordinate(i * 7 - 100_000_000, 0.001, 437600.0, 437600.0); }
+        eprintln!("30M local_coordinate: {:.2} s ({acc})", t.elapsed().as_secs_f64());
+    }
+}

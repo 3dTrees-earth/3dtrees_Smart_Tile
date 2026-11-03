@@ -56,6 +56,9 @@ pub fn spatial_batches(xyz: &[[f64; 3]]) -> Vec<Vec<usize>> {
     groups
 }
 
+/// The dense column table of a `PointSet`.
+struct Grid { x0: i64, y0: i64, nx: i64, ny: i64, column_start: Vec<u32>, runs: Vec<(i64, u32, u32)> }
+
 /// Points of one or more tiles, bucketed in cubic cells of the query radius.
 /// Push every point, then `build` once before querying.
 pub struct PointSet {
@@ -63,7 +66,9 @@ pub struct PointSet {
     pub tile: Vec<u32>,
     pub index: Vec<i64>,
     cell: f64,
-    cells: FxMap<(i64, i64, i64), (u32, u32)>, // cell -> (start, len) in `order`
+    cells: FxMap<(i64, i64, i64), (u32, u32)>, // cell -> (start, len) in `order` (large extents)
+    /// Small extents: a dense (x, y) column table over `runs` (z, start, len), sorted by z per column.
+    grid: Option<Grid>,
     order: Vec<u32>,
 }
 
@@ -71,7 +76,7 @@ impl PointSet {
     /// `radius`: the query radius. Cells are slightly more than twice as large, so a query
     /// within the radius (plus the 8-ULP guard) touches only the 2×2×2 cells around it.
     pub fn new(radius: f64) -> PointSet {
-        PointSet { xyz: Vec::new(), tile: Vec::new(), index: Vec::new(), cell: radius * 2.004, cells: FxMap::default(), order: Vec::new() }
+        PointSet { xyz: Vec::new(), tile: Vec::new(), index: Vec::new(), cell: radius * 2.004, cells: FxMap::default(), order: Vec::new(), grid: None }
     }
 
     fn key(&self, p: &[f64; 3]) -> (i64, i64, i64) {
@@ -87,25 +92,53 @@ impl PointSet {
     /// Bucket the points (ids in insertion order within a cell).
     pub fn build(&mut self) {
         use rayon::prelude::*;
-        let keys: Vec<(i64, i64, i64)> = self.xyz.par_iter().map(|p| self.key(p)).collect();
-        let mut order: Vec<u32> = (0..self.xyz.len() as u32).collect();
-        order.par_sort_by_key(|&i| (keys[i as usize], i));
-        let mut cells = FxMap::default();
+        // (cell, id) pairs sorted in place: ids ascend within a cell.
+        let mut keyed: Vec<((i64, i64, i64), u32)> = self.xyz.par_iter().enumerate().map(|(i, p)| (self.key(p), i as u32)).collect();
+        keyed.par_sort_unstable();
+        // Runs of equal cells, in (x, y, z) order.
+        let mut runs: Vec<((i64, i64, i64), u32, u32)> = Vec::new();
         let mut start = 0;
-        while start < order.len() {
-            let key = keys[order[start] as usize];
+        while start < keyed.len() {
+            let key = keyed[start].0;
             let mut end = start + 1;
-            while end < order.len() && keys[order[end] as usize] == key { end += 1; }
-            cells.insert(key, (start as u32, (end - start) as u32));
+            while end < keyed.len() && keyed[end].0 == key { end += 1; }
+            runs.push((key, start as u32, (end - start) as u32));
             start = end;
         }
-        self.cells = cells;
-        self.order = order;
+        self.order = keyed.into_iter().map(|(_, i)| i).collect();
+        self.cells = FxMap::default();
+        self.grid = None;
+        if runs.is_empty() { return; }
+        let (x0, x1) = (runs[0].0 .0, runs[runs.len() - 1].0 .0);
+        let (y0, y1) = runs.iter().fold((i64::MAX, i64::MIN), |(a, b), r| (a.min(r.0 .1), b.max(r.0 .1)));
+        let (nx, ny) = (x1 - x0 + 1, y1 - y0 + 1);
+        if nx.checked_mul(ny).is_some_and(|n| n <= 1 << 26) {
+            let mut column_start = vec![0u32; (nx * ny) as usize + 1];
+            for r in &runs { column_start[((r.0 .0 - x0) * ny + (r.0 .1 - y0)) as usize + 1] += 1; }
+            for i in 1..column_start.len() { column_start[i] += column_start[i - 1]; }
+            let runs = runs.into_iter().map(|(k, s, l)| (k.2, s, l)).collect();
+            self.grid = Some(Grid { x0, y0, nx, ny, column_start, runs });
+        } else {
+            let mut cells = FxMap::default();
+            cells.reserve(runs.len());
+            for (k, s, l) in runs { cells.insert(k, (s, l)); }
+            self.cells = cells;
+        }
     }
 
     pub fn len(&self) -> usize { self.xyz.len() }
 
     fn ids(&self, key: &(i64, i64, i64)) -> &[u32] {
+        if let Some(g) = &self.grid {
+            let (dx, dy) = (key.0 - g.x0, key.1 - g.y0);
+            if dx < 0 || dy < 0 || dx >= g.nx || dy >= g.ny { return &[]; }
+            let column = (dx * g.ny + dy) as usize;
+            let runs = &g.runs[g.column_start[column] as usize..g.column_start[column + 1] as usize];
+            return match runs.binary_search_by_key(&key.2, |r| r.0) {
+                Ok(i) => &self.order[runs[i].1 as usize..(runs[i].1 + runs[i].2) as usize],
+                Err(_) => &[],
+            };
+        }
         match self.cells.get(key) {
             Some(&(start, len)) => &self.order[start as usize..(start + len) as usize],
             None => &[],

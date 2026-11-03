@@ -556,6 +556,7 @@ fn tile_overlaps(pairs: &[Pair], layout: &Value, origin: &[f64; 3]) -> Overlaps 
 pub struct TileIndex { pub set: PointSet, pub labels: Vec<u64> }
 
 fn build_index(files: &[PathBuf], model: &Model, origin: &[f64; 3], radius: f64) -> Res<TileIndex> {
+    let started = std::time::Instant::now();
     // Tiles decode in parallel, then join in tile order.
     let parts: Vec<Res<(Vec<[f64; 3]>, Vec<u64>)>> = files.par_iter().map(|file| {
         let header = lasio::read_header(file)?;
@@ -572,6 +573,7 @@ fn build_index(files: &[PathBuf], model: &Model, origin: &[f64; 3], radius: f64)
         }
         Ok((xyz, labels))
     }).collect();
+    let t_read = started.elapsed().as_secs_f64();
     let mut index = TileIndex { set: PointSet::new(radius), labels: Vec::new() };
     for (tile, part) in parts.into_iter().enumerate() {
         let (xyz, labels) = part?;
@@ -580,7 +582,11 @@ fn build_index(files: &[PathBuf], model: &Model, origin: &[f64; 3], radius: f64)
         }
         index.labels.extend(labels);
     }
+    let t_push = started.elapsed().as_secs_f64();
     index.set.build();
+    if std::env::var_os("SMARTTILE_TIMINGS").is_some() {
+        eprintln!("    index: read {t_read:.1} s, push {:.1} s, build {:.1} s", t_push - t_read, started.elapsed().as_secs_f64() - t_push);
+    }
     Ok(index)
 }
 
@@ -777,6 +783,7 @@ fn orphan_recovery(model: &Model, dense: &[PathBuf], ownership: &[Ownership], ow
         let bits: [u64; 3] = std::array::from_fn(|a| u64::from_le_bytes(loc[a * 8..a * 8 + 8].try_into().unwrap()));
         locations[&bits]
     };
+    let t_gathered = std::time::Instant::now();
     report.candidates = claims.len();
     report.uncovered = xyz_of.len();
     let mut claimants: Vec<Vec<(usize, u64)>> = vec![Vec::new(); xyz_of.len()];
@@ -835,6 +842,7 @@ fn orphan_recovery(model: &Model, dense: &[PathBuf], ownership: &[Ownership], ow
         selected.push(key);
         report.admitted.push((key.0, key.1, score));
     }
+    if std::env::var_os("SMARTTILE_TIMINGS").is_some() { eprintln!("    orphan: selection {:.1} s", t_gathered.elapsed().as_secs_f64()); }
     Ok(selected)
 }
 
@@ -1667,15 +1675,16 @@ fn relabel_tiles(files: &[PathBuf], instance: &str, mapping: &BTreeMap<u64, u64>
 }
 
 /// `merge_file`: the final tiles concatenated in tile order, in the first tile's encoding.
-fn merge_file(files: &[PathBuf], output: &Path) -> Res<()> {
+fn merge_file(files: &[PathBuf], output: &Path, pool: &rayon::ThreadPool) -> Res<()> {
     let first = lasio::read_header(&files[0])?;
     let target = TileHeader::copy_of(&first)?;
-    let mut batches: Vec<Res<Vec<u8>>> = Vec::new();
-    for file in files {
+    // Tiles decode in parallel; their 32,768-point batches are written in tile order.
+    let per_file: Vec<Res<Vec<Vec<u8>>>> = pool.install(|| files.par_iter().map(|file| {
         let h = lasio::read_header(file)?;
         if h.point_format != first.point_format || h.record_length != first.record_length {
             return Err(format!("Cannot concatenate incompatible target schemas: {}", file.display()));
         }
+        let mut out = Vec::new();
         for chunk in chunks(file)? {
             let chunk = chunk?;
             let mut bytes = chunk.raw_bytes().to_vec();
@@ -1687,10 +1696,13 @@ fn merge_file(files: &[PathBuf], output: &Path) -> Res<()> {
                     r[a * 4..a * 4 + 4].copy_from_slice(&encoded.to_le_bytes());
                 }
             }
-            batches.push(Ok(bytes));
+            out.push(bytes);
         }
-    }
-    lasio::write_records(output, &target, batches, true, None)?;
+        Ok(out)
+    }).collect());
+    let mut batches: Vec<Res<Vec<u8>>> = Vec::new();
+    for part in per_file { batches.extend(part?.into_iter().map(Ok)); }
+    lasio::write_records(output, &target, batches, true, Some(pool))?;
     Ok(())
 }
 
@@ -1782,6 +1794,7 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     let (admitted, current, revised) = timed("orphan_recovery", &model, report, || {
         let started = std::time::Instant::now();
         let owned_index = build_index(&owned_files, &model, &origin, 0.01)?;
+        let t_index = started.elapsed().as_secs_f64();
         let admitted = orphan_recovery(&model, &dense_files, &ownership, &owned_index, &regions, &overlaps, &origin, &mut orphan)?;
         fs::create_dir_all(&recovered).map_err(|e| e.to_string())?;
         let mut by_tile: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
@@ -1792,7 +1805,7 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
             revised.insert(*tile, rewrite_recovered(&model, &dense_files[*tile], &rejected, &regions[*tile], &recovered.join(format!("tile_{tile:05}.laz")), &origin)?);
         }
         let current: Vec<PathBuf> = (0..pairs.len()).map(|n| if by_tile.contains_key(&n) { recovered.join(format!("tile_{n:05}.laz")) } else { owned_files[n].clone() }).collect();
-        let _ = started;
+        if std::env::var_os("SMARTTILE_TIMINGS").is_some() { eprintln!("    orphan: owned index {t_index:.1} s, total {:.1} s", started.elapsed().as_secs_f64()); }
         Ok((admitted, current, revised))
     })?;
     for (tile, id) in &admitted {
@@ -2066,7 +2079,7 @@ pub fn run(params: &MergeParams) -> Res<()> {
         let merged = scratch.join("merged.laz");
         let metadata = scratch.join("merged_instance_metadata.csv");
         if merged_output.is_some() {
-            merge_file(&outcomes[0].final_files, &merged)?;
+            merge_file(&outcomes[0].final_files, &merged, &pool)?;
             fs::write(&metadata, &outcomes[0].csv).map_err(|e| e.to_string())?;
         }
         // Name the tiles after the layout, then publish.
@@ -2084,11 +2097,16 @@ pub fn run(params: &MergeParams) -> Res<()> {
         let mut sources: Vec<(PathBuf, PathBuf)> = vec![(final_root.clone(), output_tiles.clone())];
         if params.keep_unfiltered { sources.push((dense_root.clone(), baseline_output.clone())); }
         if let (Some(stage), Some(destination)) = (&originals_stage, &original_output) { sources.push((stage.clone(), destination.clone())); }
+        let mut listed: Vec<(String, PathBuf)> = Vec::new();
         for (source, destination) in &sources {
             for path in laz_files_recursive(source)? {
-                let relative = path.strip_prefix(source).unwrap();
-                checksums.insert(destination.join(relative).display().to_string(), Value::String(crate::sha256::file_hex(&path)?));
+                let relative = path.strip_prefix(source).unwrap().to_path_buf();
+                listed.push((destination.join(relative).display().to_string(), path));
             }
+        }
+        let digests: Vec<Res<String>> = pool.install(|| listed.par_iter().map(|(_, path)| crate::sha256::file_hex(path)).collect());
+        for ((key, _), digest) in listed.into_iter().zip(digests) {
+            checksums.insert(key, Value::String(digest?));
         }
         if let Some(out) = &merged_output {
             checksums.insert(out.display().to_string(), Value::String(crate::sha256::file_hex(&merged)?));
