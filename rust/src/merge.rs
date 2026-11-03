@@ -693,7 +693,7 @@ fn filter_tile(model: &Model, file: &Path, region: &Region, output: &Path, origi
         }
         kept
     }));
-    out.surviving = lasio::write_records(output, &target, batches, true, None)?;
+    out.surviving = lasio::write_records(output, &target, batches, false, None)?;
     out.input = header.point_count;
     out.background_input = background.0;
     out.background_removed = background.1;
@@ -859,7 +859,7 @@ fn rewrite_recovered(model: &Model, dense: &Path, rejected: &std::collections::B
         }
         kept
     }));
-    lasio::write_records(output, &target, batches, true, None)
+    lasio::write_records(output, &target, batches, false, None)
 }
 
 fn build_index_with_semantic(files: &[PathBuf], model: &Model, origin: &[f64; 3], radius: f64) -> Res<(TileIndex, Vec<u64>)> {
@@ -1172,7 +1172,7 @@ fn assign_shared_points(model: &Model, files: &[PathBuf], index: &TileIndex, reg
             }
             kept
         }));
-        lasio::write_records(&output, &target, batches, true, None)?;
+        lasio::write_records(&output, &target, batches, false, None)?;
         Ok((output, metric))
     }).collect());
     results.into_iter().collect()
@@ -1209,11 +1209,15 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
                overlaps: &Overlaps, statistics: &mut Statistics, regions: &[Region], stage_index: &TileIndex,
                stage_semantics: &[u64], pool: &rayon::ThreadPool, metrics: &mut Vec<DedupTile>, survivor_values: &mut Vec<u8>)
                -> Res<(Vec<PathBuf>, PointSet, Vec<(u64, u64)>)> {
+    let mut timing = [0f64; 4]; // nearest, conflict, write, survivor index
     const RADIUS: f64 = 0.01;
     fs::create_dir_all(output_dir).map_err(|e| e.to_string())?;
     let groups = mapping.values().collect::<std::collections::BTreeSet<_>>().len() as u64;
     let instance_type = instance_scalar(groups);
     let mut survivors = PointSet::new(RADIUS);
+    // Each finished tile's survivors, indexed once (`survivors` gathers them all for later stages).
+    let mut tile_sets: Vec<PointSet> = Vec::new();
+    let mut tile_offsets: Vec<u32> = Vec::new();
     let mut survivor_labels: Vec<(u64, u64)> = Vec::new();
     let mut outputs = Vec::new();
     for (tile, file) in files.iter().enumerate() {
@@ -1263,17 +1267,26 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
                 (if l == 0 { 0 } else { mapping[&(tile, l)] }, s)
             }).collect();
             // `survivors.nearest(before_tile=tile, overlaps=overlaps[tile])`
-            let allowed = |id: u32, q: &[f64; 3]| {
-                let t = survivors.tile[id as usize] as usize;
-                t < tile && bounds.get(&t).is_some_and(|b| inside_xy(&survivors.xyz[id as usize], b) && inside_xy(q, b))
+            // Only earlier tiles overlapping this one can hold a duplicate.
+            let earlier: Vec<usize> = (0..tile).filter(|t| bounds.contains_key(t)).collect();
+            let sets: Vec<&PointSet> = earlier.iter().map(|&t| &tile_sets[t]).collect();
+            let set_offsets: Vec<u32> = earlier.iter().map(|&t| tile_offsets[t]).collect();
+            let allowed = |s: usize, id: u32, q: &[f64; 3]| {
+                let b = &bounds[&earlier[s]];
+                inside_xy(&sets[s].xyz[id as usize], b) && inside_xy(q, b)
             };
+            let t_found = std::time::Instant::now();
             let found = pool.install(|| {
                 use rayon::prelude::*;
                 let groups = crate::spatial::spatial_batches(&xyz);
                 let results: Vec<Vec<(usize, Option<(u32, f64)>)>> = groups.par_iter().map(|g| {
+                    // A group with no point inside an earlier overlap has no candidates.
+                    if !g.iter().any(|&i| earlier.iter().any(|t| inside_xy(&xyz[i], &bounds[t]))) {
+                        return g.iter().map(|&i| (i, None)).collect();
+                    }
                     let pts: Vec<[f64; 3]> = g.iter().map(|&i| xyz[i]).collect();
-                    let near = survivors.nearest_for(&pts, RADIUS, &allowed);
-                    g.iter().copied().zip(near).collect()
+                    let near = crate::spatial::nearest_across(&sets, &pts, RADIUS, &allowed);
+                    g.iter().copied().zip(near.into_iter().map(|n| n.map(|(s, id, d)| (set_offsets[s] + id, d)))).collect()
                 }).collect();
                 let mut found = vec![None; xyz.len()];
                 for r in results.into_iter().flatten() { found[r.0] = r.1; }
@@ -1281,6 +1294,8 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
             });
             // `conflicting_match`: no earlier tile's record within 1 cm may carry other labels,
             // except background semantics and two trees each owning its own location.
+            timing[0] += t_found.elapsed().as_secs_f64();
+            let t_conflict = std::time::Instant::now();
             let conflict = pool.install(|| {
                 use rayon::prelude::*;
                 crate::spatial::spatial_batches(&xyz).par_iter().find_map_any(|g| {
@@ -1315,6 +1330,7 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
                     None
                 })
             });
+            timing[1] += t_conflict.elapsed().as_secs_f64();
             if let Some(conflict) = conflict {
                 return Err(conflict);
             }
@@ -1354,15 +1370,27 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
             batches.push(Ok(out));
         }
         let output = output_dir.join(file.file_name().unwrap());
+        let t_write = std::time::Instant::now();
         lasio::write_records(&output, &target, batches, true, Some(pool))?;
+        timing[2] += t_write.elapsed().as_secs_f64();
+        let t_build = std::time::Instant::now();
+        let mut set = PointSet::new(RADIUS);
+        tile_offsets.push(survivors.len() as u32);
         for (p, index, labels) in new_points {
             survivors.push(p, tile as u32, index);
+            set.push(p, tile as u32, index);
             survivor_labels.push(labels);
         }
         survivor_values.extend_from_slice(&new_values);
-        survivors.build();
+        set.build();
+        tile_sets.push(set);
+        timing[3] += t_build.elapsed().as_secs_f64();
         outputs.push(output);
         metrics.push(metric);
+    }
+    survivors.build();
+    if std::env::var_os("SMARTTILE_TIMINGS").is_some() {
+        eprintln!("    dedup: nearest {:.1} s, conflict {:.1} s, write {:.1} s, survivor index {:.1} s", timing[0], timing[1], timing[2], timing[3]);
     }
     Ok((outputs, survivors, survivor_labels))
 }
@@ -1377,7 +1405,7 @@ fn instance_reader(file: &Path, name: &str) -> Res<(SourceHeader, Layout)> {
 
 /// `consolidate_instances`: each positive instance moves whole into one owner tile
 /// (core holding its XY centroid, else most points; ties: lowest tile). Files are rewritten in place.
-fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Path) -> Res<(usize, u64, Vec<(String, u64)>)> {
+fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Path, pool: &rayon::ThreadPool) -> Res<(usize, u64, Vec<(String, u64)>)> {
     // `instance_tiles`: points per tile and world XY sums per instance.
     let mut counts: BTreeMap<u64, BTreeMap<usize, u64>> = BTreeMap::new();
     let mut sums: BTreeMap<u64, [f64; 2]> = BTreeMap::new();
@@ -1460,7 +1488,7 @@ fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Pat
             batches.push(Ok(kept));
         }
         let temporary = file.with_extension("consolidating.laz");
-        lasio::write_records(&temporary, &target, batches, true, None)?;
+        lasio::write_records(&temporary, &target, batches, true, Some(pool))?;
         fs::rename(&temporary, file).map_err(|e| e.to_string())?;
         for (owner, bytes) in departing { incoming.entry(owner).or_default().push(bytes); }
     }
@@ -1474,7 +1502,7 @@ fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Pat
         let all: Vec<u8> = parts.concat();
         for chunk in all.chunks(MAX_BATCH_POINTS as usize * record_len) { batches.push(Ok(chunk.to_vec())); }
         let temporary = file.with_extension("consolidating.laz");
-        lasio::write_records(&temporary, &target, batches, true, None)?;
+        lasio::write_records(&temporary, &target, batches, true, Some(pool))?;
         fs::rename(&temporary, file).map_err(|e| e.to_string())?;
     }
     let _ = work;
@@ -1841,7 +1869,9 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     let mut dedup = Vec::new();
     let mut survivor_values = Vec::new();
     let (final_files, survivors, survivor_labels) = timed("deduplication", &model, report, || {
+        let t_index = std::time::Instant::now();
         let (stage_index, semantics) = build_index_with_semantic(&files, &model, &origin, 0.01)?;
+        if std::env::var_os("SMARTTILE_TIMINGS").is_some() { eprintln!("    dedup: stage index {:.1} s", t_index.elapsed().as_secs_f64()); }
         deduplicate(&model, &files, &mapping, &final_dir, &origin, &overlaps, &mut statistics, &regions, &stage_index, &semantics, &pool,
                     &mut dedup, &mut survivor_values)
     })?;
@@ -1878,7 +1908,7 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     let final_ids: std::collections::BTreeSet<u64> = ids.iter().map(|i| *reassigned.get(i).unwrap_or(i)).collect();
     let added: std::collections::BTreeSet<u64> = reassigned.values().copied().collect();
     report.insert("instance_consolidation".into(), Value::Null);
-    let (split, moved, per_owner) = timed("instance_consolidation", &model, report, || consolidate(&final_files, &model.instance, &regions, &scratch.join("consolidation").join(suffix)))?;
+    let (split, moved, per_owner) = timed("instance_consolidation", &model, report, || consolidate(&final_files, &model.instance, &regions, &scratch.join("consolidation").join(suffix), pool))?;
     report.insert("instance_consolidation".into(), serde_json::json!({
         "policy": "each positive instance in exactly one tile: owner core holds its XY centroid, else most points (ties: lowest tile); points are moved, never dropped",
         "split_instances": split, "moved_points": moved,

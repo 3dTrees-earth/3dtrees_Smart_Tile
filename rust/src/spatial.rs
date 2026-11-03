@@ -203,6 +203,30 @@ impl PointSet {
     }
 }
 
+/// `nearest_for` over several point sets queried together (e.g. one per tile): candidates from every
+/// set compete under the same rule. Returns (set, local id, distance).
+pub fn nearest_across(sets: &[&PointSet], queries: &[[f64; 3]], radius: f64, allowed: &dyn Fn(usize, u32, &[f64; 3]) -> bool)
+                      -> Vec<Option<(usize, u32, f64)>> {
+    let mut out = vec![None; queries.len()];
+    for group in spatial_batches(queries) {
+        let points: Vec<[f64; 3]> = group.iter().map(|&i| queries[i]).collect();
+        let roundoff = distance_roundoff(&points);
+        let limit = radius + roundoff;
+        for &qi in &group {
+            let q = &queries[qi];
+            let mut candidates: Vec<(usize, u32, f64)> = Vec::new();
+            for (s, set) in sets.iter().enumerate() {
+                set.within(q, limit, |id, d| if allowed(s, id, q) { candidates.push((s, id, d)) });
+            }
+            let Some(minimum) = candidates.iter().map(|c| c.2).reduce(f64::min) else { continue };
+            let ceiling = limit.min(minimum + roundoff);
+            out[qi] = candidates.into_iter().filter(|c| c.2 <= ceiling)
+                .min_by_key(|c| (sets[c.0].tile[c.1 as usize], sets[c.0].index[c.1 as usize]));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
