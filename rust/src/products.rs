@@ -91,7 +91,7 @@ fn source_key(path: &Path) -> String { crate::collections::file_stem(path).to_lo
 
 /// `merged_header` + records: every input record in order, OriginalPointIndex first.
 /// `ply`: `_ply_header`, the index as uint32 and no 64-bit integer attributes.
-fn write_full(inputs: &[PathBuf], output: &Path, compress: bool, original_point_index: bool, ply: bool) -> Res<u64> {
+fn write_full(inputs: &[PathBuf], output: &Path, compress: bool, original_point_index: bool, ply: bool, pool: &rayon::ThreadPool) -> Res<u64> {
     let headers = inputs.iter().map(|p| lasio::read_header(p)).collect::<Res<Vec<_>>>()?;
     let first = &headers[0];
     let first_layout = PointLayout::of(first)?;
@@ -193,7 +193,7 @@ fn write_full(inputs: &[PathBuf], output: &Path, compress: bool, original_point_
         }
         return Some(Ok(out));
     });
-    let written = lasio::write_records(output, &header, batches, compress, None)?;
+    let written = lasio::write_records(output, &header, batches, compress, compress.then_some(pool))?;
     if written != expected {
         return Err(format!("Full-resolution merge wrote {written} of {expected} points"));
     }
@@ -427,6 +427,7 @@ fn stage_copcs(raw: &[PathBuf], copc_inputs: &[PathBuf], output_dir: &Path, stag
             if expected.contains(&key) { selected.entry(key).or_insert(path); }
         }
     }
+    let mut convert: Vec<(&PathBuf, String, PathBuf)> = Vec::new();
     for input in raw {
         let key = source_key(input);
         if let Some(found) = selected.get(&key) {
@@ -435,7 +436,19 @@ fn stage_copcs(raw: &[PathBuf], copc_inputs: &[PathBuf], output_dir: &Path, stag
         }
         let target = copc_dir.join(format!("{key}.copc.laz"));
         println!("    Converting {} -> {}", input.file_name().unwrap().to_string_lossy(), target.file_name().unwrap().to_string_lossy());
-        crate::tile::copc_conversion(input, &target, lasio::read_header(input)?.point_count, true)?;
+        convert.push((input, key, target));
+    }
+    // Conversions run four at a time (Untwine threads itself); the manifest is written in input order.
+    for group in convert.chunks(4) {
+        let results: Vec<Res<()>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = group.iter().map(|(input, _, target)| scope.spawn(move || {
+                crate::tile::copc_conversion(input, target, lasio::read_header(input)?.point_count, true)
+            })).collect();
+            handles.into_iter().map(|h| h.join().expect("COPC conversion thread panicked")).collect()
+        });
+        results.into_iter().collect::<Res<Vec<()>>>()?;
+    }
+    for (input, key, target) in convert {
         write_manifest_entry(input, &target)?;
         selected.insert(key, target);
     }
@@ -739,6 +752,7 @@ fn product_chunk(copcs: &[PathBuf], work: &Path, index: usize, bounds: &str, lo:
 /// Returns the published products: full resolution first, each resolution in every format.
 pub fn run(params: &ProductParams) -> Res<Vec<PathBuf>> {
     let started = std::time::Instant::now();
+    let write_pool = rayon::ThreadPoolBuilder::new().num_threads(params.workers.max(1)).build().map_err(|e| e.to_string())?;
     let (raw, copc_inputs) = listed_files(&params.input)?;
     // A colocated COPC is another encoding of its raw twin; one without a twin is a source of its own.
     let raw_keys: Vec<String> = raw.iter().map(|p| source_key(p)).collect();
@@ -760,17 +774,17 @@ pub fn run(params: &ProductParams) -> Res<Vec<PathBuf>> {
                 println!("  Creating {} at full resolution from {} file(s) in record order{}", target.file_name().unwrap().to_string_lossy(), sources.len(),
                          if params.original_point_index { " with OriginalPointIndex" } else { "" });
                 match format.as_str() {
-                    "laz" => { write_full(&sources, &target, true, params.original_point_index, false)?; }
+                    "laz" => { write_full(&sources, &target, true, params.original_point_index, false, &write_pool)?; }
                     "copc.laz" => {
                         let las = scratch.join("full-merge.las");
-                        write_full(&sources, &las, false, params.original_point_index, false)?;
+                        write_full(&sources, &las, false, params.original_point_index, false, &write_pool)?;
                         let count = lasio::read_header(&las)?.point_count;
                         crate::tile::copc_conversion(&las, &target, count, true)?;
                         let _ = fs::remove_file(&las);
                     }
                     _ => {
                         let las = scratch.join("full-merge.las");
-                        write_full(&sources, &las, false, params.original_point_index, true)?;
+                        write_full(&sources, &las, false, params.original_point_index, true, &write_pool)?;
                         // LAS 1.2/1.3 can carry ExtraBytes VLRs, which PDAL ignores by default.
                         let result = Command::new("pdal").arg("translate").arg(&las).arg(&target)
                             .args(["--readers.las.use_eb_vlr=true", "--writers.ply.storage_mode=little endian"])

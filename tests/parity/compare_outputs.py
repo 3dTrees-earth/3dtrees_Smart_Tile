@@ -49,6 +49,8 @@ def compare_las(reference, candidate, copc):
     with laspy.open(reference) as a, laspy.open(candidate) as b:
         ha, hb = a.header, b.header
         for field in HEADER_FIELDS:
+            if copc and field == "creation_date":
+                continue  # Untwine stamps the day of the run.
             va, vb = getattr(ha, field), getattr(hb, field)
             same = np.array_equal(va, vb) if isinstance(va, np.ndarray) else va == vb
             if not same:
