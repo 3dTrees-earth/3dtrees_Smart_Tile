@@ -562,14 +562,15 @@ fn build_index(files: &[PathBuf], model: &Model, origin: &[f64; 3], radius: f64)
         let header = lasio::read_header(file)?;
         let layout = PointLayout::of(&header)?;
         let (field, _) = layout.find(&model.instance).unwrap();
-        let mut scratch = [0u8; 8];
-        let (mut xyz, mut labels) = (Vec::new(), Vec::new());
-        for chunk in chunks(file)? {
-            let chunk = chunk?;
-            for r in chunk.raw_bytes().chunks_exact(chunk.record_len()) {
-                xyz.push(local(r, &header, origin));
-                labels.push(field.scalar().read_int(field.get(r, &mut scratch)) as u64);
-            }
+        let (mut xyz, mut labels) = (Vec::with_capacity(header.point_count as usize), Vec::with_capacity(header.point_count as usize));
+        let record_len = header.record_length as usize;
+        for block in blocks(file)? {
+            let block = block?;
+            let parts: Vec<(Vec<[f64; 3]>, Vec<u64>)> = block.raw_bytes().par_chunks(MAX_BATCH_POINTS as usize * record_len).map(|chunk| {
+                let mut scratch = [0u8; 8];
+                chunk.chunks_exact(record_len).map(|r| (local(r, &header, origin), field.scalar().read_int(field.get(r, &mut scratch)) as u64)).unzip()
+            }).collect();
+            for (x, l) in parts { xyz.extend(x); labels.extend(l); }
         }
         Ok((xyz, labels))
     }).collect();
@@ -775,16 +776,17 @@ fn orphan_recovery(model: &Model, dense: &[PathBuf], ownership: &[Ownership], ow
         let header = lasio::read_header(file)?;
         let layout = PointLayout::of(&header)?;
         let (field, _) = layout.find(&model.instance).unwrap();
-        let mut scratch = [0u8; 8];
         // `_core_union_mask`: the tile's own core or that of a tile overlapping it.
         let cores: Vec<[f64; 4]> = regions.iter().enumerate()
             .filter(|(other, _)| *other == tile || overlaps[tile.max(*other)].contains_key(&tile.min(*other)))
             .map(|(_, r)| [r.core[0][0] - origin[0], r.core[0][1] - origin[0], r.core[1][0] - origin[1], r.core[1][1] - origin[1]]).collect();
-        for chunk in chunks(file)? {
-            let chunk = chunk?;
+        let record_len = header.record_length as usize;
+        // Each 32,768-point batch is one query (its eligible points); batches run in parallel.
+        let claim = |chunk: &[u8]| -> Vec<(u64, [f64; 3])> {
+            let mut scratch = [0u8; 8];
             let mut labels = Vec::new();
             let mut xyz = Vec::new();
-            for r in chunk.raw_bytes().chunks_exact(chunk.record_len()) {
+            for r in chunk.chunks_exact(record_len) {
                 let label = field.scalar().read_int(field.get(r, &mut scratch)) as u64;
                 if !rejected.contains(&label) { continue; }
                 let p = local(r, &header, origin);
@@ -793,9 +795,14 @@ fn orphan_recovery(model: &Model, dense: &[PathBuf], ownership: &[Ownership], ow
                     xyz.push(p);
                 }
             }
-            if xyz.is_empty() { continue; }
+            if xyz.is_empty() { return Vec::new(); }
             let covered = owned_index.set.covered(&xyz, RADIUS, &positive);
-            out.extend((0..xyz.len()).filter(|&k| !covered[k]).map(|k| (labels[k], xyz[k])));
+            (0..xyz.len()).filter(|&k| !covered[k]).map(|k| (labels[k], xyz[k])).collect()
+        };
+        for block in blocks(file)? {
+            let block = block?;
+            let parts: Vec<Vec<(u64, [f64; 3])>> = block.raw_bytes().par_chunks(MAX_BATCH_POINTS as usize * record_len).map(claim).collect();
+            for part in parts { out.extend(part); }
         }
         Ok(out)
     }).collect();
@@ -881,10 +888,11 @@ fn rewrite_recovered(model: &Model, dense: &Path, rejected: &std::collections::B
     let layout = PointLayout::of(&header)?;
     let (field, _) = layout.find(&model.instance).unwrap();
     let target = TileHeader::copy_of(&header)?;
-    let batches = chunks(dense)?.map(|chunk| chunk.map(|chunk| {
+    let record_len = header.record_length as usize;
+    let keep = |chunk: &[u8]| -> Vec<u8> {
         let mut kept = Vec::new();
         let mut scratch = [0u8; 8];
-        for r in chunk.raw_bytes().chunks_exact(chunk.record_len()) {
+        for r in chunk.chunks_exact(record_len) {
             let label = field.scalar().read_int(field.get(r, &mut scratch)) as u64;
             let keep = if label == 0 {
                 let p = local(r, &header, origin);
@@ -895,7 +903,13 @@ fn rewrite_recovered(model: &Model, dense: &Path, rejected: &std::collections::B
             if keep { kept.extend_from_slice(r); }
         }
         kept
-    }));
+    };
+    let mut batches: Vec<Res<Vec<u8>>> = Vec::new();
+    for block in blocks(dense)? {
+        let block = block?;
+        let parts: Vec<Vec<u8>> = block.raw_bytes().par_chunks(MAX_BATCH_POINTS as usize * record_len).map(keep).collect();
+        batches.extend(parts.into_iter().map(Ok));
+    }
     lasio::write_records(output, &target, batches, false, None)
 }
 
@@ -985,24 +999,28 @@ fn reconcile(model: &Model, files: &[PathBuf], index: &TileIndex, origin: &[f64;
         let layout = PointLayout::of(&header)?;
         let (field, _) = layout.find(&model.instance).unwrap();
         let mut scratch = [0u8; 8];
-        for chunk in chunks(file)? {
-            let chunk = chunk?;
-            let records: Vec<&[u8]> = chunk.raw_bytes().chunks_exact(chunk.record_len()).collect();
+        let record_len = header.record_length as usize;
+        // Per 32,768-point batch (in parallel): pair counts per earlier neighbour and the counters; summed below.
+        let count = |chunk: &[u8]| -> (BTreeMap<usize, BTreeMap<(u64, u64), u64>>, [u64; 4]) {
+            let mut scratch = [0u8; 8];
+            let mut part: BTreeMap<usize, BTreeMap<(u64, u64), u64>> = BTreeMap::new();
+            let mut m = [0u64; 4];
+            let records: Vec<&[u8]> = chunk.chunks_exact(record_len).collect();
             let xyz: Vec<[f64; 3]> = records.iter().map(|r| local(r, &header, origin)).collect();
             let left: Vec<u64> = records.iter().map(|r| field.scalar().read_int(field.get(r, &mut scratch)) as u64).collect();
             let groups = crate::spatial::spatial_batches(&xyz);
-            metrics[1] += records.len() as u64;
+            m[1] += records.len() as u64;
             for &other in &neighbors {
                 let bounds = &overlaps[tile][&other];
                 let positions: Vec<usize> = groups.iter().filter(|g| g.iter().any(|&i| left[i] > 0 && inside_xy(&xyz[i], bounds)))
                     .flat_map(|g| g.iter().copied()).collect();
-                metrics[2] += positions.len() as u64;
-                metrics[3] += (records.len() - positions.len()) as u64;
+                m[2] += positions.len() as u64;
+                m[3] += (records.len() - positions.len()) as u64;
                 if positions.is_empty() { continue; }
                 let queries: Vec<[f64; 3]> = positions.iter().map(|&i| xyz[i]).collect();
                 let allowed = |id: u32| index.set.tile[id as usize] as usize == other && inside_xy(&index.set.xyz[id as usize], bounds);
                 let found = index.set.nearest(&queries, radius, &allowed);
-                let counter = counters.get_mut(&other).unwrap();
+                let counter = part.entry(other).or_default();
                 for (k, &i) in positions.iter().enumerate() {
                     if !inside_xy(&xyz[i], bounds) { continue; }
                     if let Some((id, _)) = found[k] {
@@ -1013,7 +1031,20 @@ fn reconcile(model: &Model, files: &[PathBuf], index: &TileIndex, origin: &[f64;
                     }
                 }
             }
+            (part, m)
+        };
+        for block in blocks(file)? {
+            let block = block?;
+            let parts: Vec<_> = block.raw_bytes().par_chunks(MAX_BATCH_POINTS as usize * record_len).map(count).collect();
+            for (part, m) in parts {
+                for k in 1..4 { metrics[k] += m[k]; }
+                for (other, pairs) in part {
+                    let counter = counters.get_mut(&other).unwrap();
+                    for (pair, n) in pairs { *counter.entry(pair).or_default() += n; }
+                }
+            }
         }
+        let _ = &mut scratch;
         Ok((counters, metrics))
     }).collect());
     let mut edges: Vec<(usize, u64, usize, u64, u64)> = Vec::new();
@@ -1831,11 +1862,11 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
         fs::create_dir_all(&recovered).map_err(|e| e.to_string())?;
         let mut by_tile: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
         for (tile, id) in &admitted { by_tile.entry(*tile).or_default().push(*id); }
-        let mut revised = BTreeMap::new();
-        for (tile, ids) in &by_tile {
+        let rewritten: Vec<Res<(usize, u64)>> = pool.install(|| by_tile.par_iter().map(|(tile, ids)| {
             let rejected: std::collections::BTreeSet<u64> = ownership[*tile].removed.iter().copied().filter(|r| !ids.contains(r)).collect();
-            revised.insert(*tile, rewrite_recovered(&model, &dense_files[*tile], &rejected, &regions[*tile], &recovered.join(format!("tile_{tile:05}.laz")), &origin)?);
-        }
+            Ok((*tile, rewrite_recovered(&model, &dense_files[*tile], &rejected, &regions[*tile], &recovered.join(format!("tile_{tile:05}.laz")), &origin)?))
+        }).collect());
+        let revised: BTreeMap<usize, u64> = rewritten.into_iter().collect::<Res<_>>()?;
         let current: Vec<PathBuf> = (0..pairs.len()).map(|n| if by_tile.contains_key(&n) { recovered.join(format!("tile_{n:05}.laz")) } else { owned_files[n].clone() }).collect();
         if std::env::var_os("SMARTTILE_TIMINGS").is_some() { eprintln!("    orphan: owned index {t_index:.1} s, total {:.1} s", started.elapsed().as_secs_f64()); }
         Ok((admitted, current, revised))
