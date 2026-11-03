@@ -141,13 +141,15 @@ fn file_bounds(h: &SourceHeader) -> [f64; 4] {
     [h.mins[0], h.maxs[0], h.mins[1], h.maxs[1]]
 }
 
-struct Pair { prediction: PathBuf, target: PathBuf, layout_tile: Option<usize> }
+struct Pair { prediction: PathBuf, target: PathBuf, layout_tile: Option<usize>, single: Option<Region> }
 
 /// `ownership_regions`: the declared core and the declared neighbours of a tile.
 #[derive(Clone, Debug)]
 pub struct Region { pub core: [[f64; 2]; 2], pub west: bool, pub east: bool, pub south: bool, pub north: bool,
                     /// Layout tile index and neighbouring layout tiles (east, west, north, south), as reported.
-                    pub layout_tile: usize, pub neighbors: [Option<usize>; 4] }
+                    pub layout_tile: Option<usize>, pub neighbors: [Option<usize>; 4],
+                    /// `layout_recovery` of a legacy single-cloud layout.
+                    pub recovery: Option<Value> }
 
 impl Region {
     /// `dict(region)`: layout_tile, core and neighbors, in the report's key order.
@@ -159,21 +161,81 @@ impl Region {
         m.insert("core".into(), serde_json::json!([[f(self.core[0][0]), f(self.core[0][1])], [f(self.core[1][0]), f(self.core[1][1])]]));
         m.insert("neighbors".into(), serde_json::json!({"east": n(self.neighbors[0]), "west": n(self.neighbors[1]),
                                                          "north": n(self.neighbors[2]), "south": n(self.neighbors[3])}));
+        if let Some(recovery) = &self.recovery { m.insert("layout_recovery".into(), recovery.clone()); }
         m
     }
 }
 
-fn regions(pairs: &[Pair], layout: &Value) -> Vec<Region> {
-    let tiles = layout["tiles"].as_array().unwrap();
-    let at: BTreeMap<(i64, i64), usize> = tiles.iter().enumerate().map(|(i, t)| ((t["col"].as_i64().unwrap(), t["row"].as_i64().unwrap()), i)).collect();
+/// `is_legacy_single_cloud_layout`: an unused historical grid around one verified whole cloud.
+fn is_legacy_single_cloud(layout: &Value, b: [f64; 4]) -> bool {
+    let Some(tiles) = layout["tiles"].as_array() else { return false };
+    if tiles.len() < 2 || layout.get("tiling_skipped") == Some(&Value::Bool(false)) { return false; }
+    let tolerance = 0.01 + 1e-9;
+    let e = &layout["proj_extent"];
+    let Some(expected) = ["minx", "maxx", "miny", "maxy"].iter().map(|k| e[*k].as_f64()).collect::<Option<Vec<f64>>>() else { return false };
+    if !b.iter().chain(&expected).all(|v| v.is_finite()) || b.iter().zip(&expected).any(|(a, x)| (a - x).abs() > tolerance) { return false; }
+    let [x0, x1, y0, y1] = b;
+    if x0 >= x1 || y0 >= y1 { return false; }
+    tiles.iter().all(|t| {
+        if t.get("bounds").is_none() || t["bounds"] != t["planned_bounds"] { return false; }
+        let v = |i: usize, j: usize| t["bounds"][i][j].as_f64().unwrap_or(f64::NAN);
+        let (a0, a1, b0, b1) = (v(0, 0), v(0, 1), v(1, 0), v(1, 1));
+        [a0, a1, b0, b1].iter().all(|v| v.is_finite()) && a0 < a1 && b0 < b1
+            && !(x0 >= a0 - tolerance && x1 <= a1 + tolerance && y0 >= b0 - tolerance && y1 <= b1 + tolerance)
+    })
+}
+
+/// `ownership_regions` for one cloud without a grid tile: a legacy single-cloud layout, or a
+/// layout without tiles (the single-file bypass). None when the cloud belongs to a grid tile.
+fn single_cloud_region(target: &Path, layout: &Value) -> Res<Option<Region>> {
+    let [x0, x1, y0, y1] = file_bounds(&lasio::read_header(target)?);
+    let tiles = layout["tiles"].as_array().map(Vec::len).unwrap_or(0);
+    let recovery = if is_legacy_single_cloud(layout, [x0, x1, y0, y1]) {
+        println!("Recovered legacy single-cloud layout for {}: full projected extent verified; ignoring {tiles} unused planned tiles",
+                 target.file_name().unwrap().to_string_lossy());
+        Some(serde_json::json!({"reason": "legacy_single_cloud_bypass", "planned_tile_count": tiles, "extent_tolerance_m": 0.01}))
+    } else if tiles == 0 {
+        None
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(Region { core: [[x0, x1], [y0, y1]], west: false, east: false, south: false, north: false, layout_tile: None,
+                     neighbors: [None; 4], recovery }))
+}
+
+fn regions(pairs: &[Pair], layout: &Value) -> Res<Vec<Region>> {
+    let empty = Vec::new();
+    let tiles = layout["tiles"].as_array().unwrap_or(&empty);
+    let at: BTreeMap<(i64, i64), usize> = tiles.iter().enumerate()
+        .filter_map(|(i, t)| Some(((t["col"].as_i64()?, t["row"].as_i64()?), i))).collect();
     pairs.iter().map(|p| {
-        let t = &tiles[p.layout_tile.unwrap()];
-        let (c, r) = (t["col"].as_i64().unwrap(), t["row"].as_i64().unwrap());
-        let f = |v: &Value| v.as_f64().unwrap();
+        if let Some(region) = &p.single { return Ok(region.clone()); }
+        let index = p.layout_tile.ok_or("pair without a layout tile")?;
+        let t = &tiles[index];
+        let (Some(c), Some(r)) = (t["col"].as_i64(), t["row"].as_i64()) else {
+            return Err("layouts without tile col/row are not ported to Rust yet".to_string());
+        };
+        let f = |v: &Value| v.as_f64().unwrap_or(f64::NAN);
         let neighbors = [at.get(&(c + 1, r)).copied(), at.get(&(c - 1, r)).copied(), at.get(&(c, r + 1)).copied(), at.get(&(c, r - 1)).copied()];
-        Region { core: [[f(&t["core"][0][0]), f(&t["core"][0][1])], [f(&t["core"][1][0]), f(&t["core"][1][1])]],
-                 west: neighbors[1].is_some(), east: neighbors[0].is_some(), south: neighbors[3].is_some(), north: neighbors[2].is_some(),
-                 layout_tile: p.layout_tile.unwrap(), neighbors }
+        let core = if t.get("core").is_some_and(|c| !c.is_null()) {
+            [[f(&t["core"][0][0]), f(&t["core"][0][1])], [f(&t["core"][1][0]), f(&t["core"][1][1])]]
+        } else {
+            // Older layouts carry a buffer width instead of explicit cores.
+            let buffer = match layout.get("tile_buffer").and_then(Value::as_f64) {
+                Some(b) => b,
+                None if neighbors.iter().any(Option::is_some) => return Err("Instance ownership requires core bounds or tile_buffer".into()),
+                None => 0.0,
+            };
+            if !buffer.is_finite() || buffer < 0.0 { return Err("Instance ownership requires a finite nonnegative tile_buffer".into()); }
+            let (x0, x1, y0, y1) = (f(&t["bounds"][0][0]), f(&t["bounds"][0][1]), f(&t["bounds"][1][0]), f(&t["bounds"][1][1]));
+            let pad = |n: Option<usize>| if n.is_some() { buffer } else { 0.0 };
+            [[x0 + pad(neighbors[1]), x1 - pad(neighbors[0])], [y0 + pad(neighbors[3]), y1 - pad(neighbors[2])]]
+        };
+        if core.iter().flatten().any(|v| !v.is_finite()) || core[0][0] > core[0][1] || core[1][0] > core[1][1] {
+            return Err(format!("Invalid core bounds for {}", p.target.file_name().unwrap().to_string_lossy()));
+        }
+        Ok(Region { core, west: neighbors[1].is_some(), east: neighbors[0].is_some(), south: neighbors[3].is_some(), north: neighbors[2].is_some(),
+                    layout_tile: Some(index), neighbors, recovery: None })
     }).collect()
 }
 
@@ -201,7 +263,7 @@ fn pairs(segmented: &Path, target: &Path, layout: &Value) -> Res<(Vec<Pair>, Vec
     let (source_bounds, target_bounds) = (bounds_of(&sources)?, bounds_of(&targets)?);
     let mut out = Vec::new();
     if sources.len() == 1 && targets.len() == 1 {
-        out.push(Pair { prediction: sources[0].clone(), target: targets[0].clone(), layout_tile: None });
+        out.push(Pair { prediction: sources[0].clone(), target: targets[0].clone(), layout_tile: None, single: None });
     } else {
         let s = match_to_layout(&source_bounds, &json_bounds, &centers)?;
         let t = match_to_layout(&target_bounds, &json_bounds, &centers)?;
@@ -212,7 +274,7 @@ fn pairs(segmented: &Path, target: &Path, layout: &Value) -> Res<(Vec<Pair>, Vec
                 (Some(stem), Some(tstem)) => {
                     let prediction = sources.iter().find(|f| crate::collections::file_stem(f) == **stem).unwrap().clone();
                     let target = targets.iter().find(|f| crate::collections::file_stem(f) == **tstem).unwrap().clone();
-                    out.push(Pair { prediction, target, layout_tile: None });
+                    out.push(Pair { prediction, target, layout_tile: None, single: None });
                 }
                 (Some(stem), None) => return Err(format!("Source file {stem} matched JSON tile index {j} but no target file matched that tile. Cannot remap.")),
                 _ => {}
@@ -224,6 +286,12 @@ fn pairs(segmented: &Path, target: &Path, layout: &Value) -> Res<(Vec<Pair>, Vec
     }
     out.sort_by(|a, b| a.prediction.cmp(&b.prediction));
     // `ownership_regions`: each target's layout tile, by its file bounds.
+    if out.len() == 1 {
+        if let Some(region) = single_cloud_region(&out[0].target, layout)? {
+            out[0].single = Some(region);
+            return Ok((out, vec!["c00_r00".into()]));
+        }
+    }
     let target_map = match_to_layout(&out.iter().map(|p| (p.target.display().to_string(), file_bounds(&lasio::read_header(&p.target).unwrap()))).collect::<Vec<_>>(), &json_bounds, &centers)?;
     let mut labels = Vec::new();
     for p in &mut out {
@@ -243,6 +311,11 @@ fn ready_pairs(segmented: &Path, layout: &Value) -> Res<(Vec<Pair>, Vec<String>)
                                                          t["bounds"][1][0].as_f64().unwrap(), t["bounds"][1][1].as_f64().unwrap()]).collect();
     let centers: Vec<[f64; 2]> = json_bounds.iter().map(|b| [(b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5]).collect();
     let bounds: Vec<(String, [f64; 4])> = sources.iter().map(|f| Ok((f.display().to_string(), file_bounds(&lasio::read_header(f)?)))).collect::<Res<_>>()?;
+    if sources.len() == 1 {
+        if let Some(region) = single_cloud_region(&sources[0], layout)? {
+            return Ok((vec![Pair { prediction: sources[0].clone(), target: sources[0].clone(), layout_tile: None, single: Some(region) }], vec!["c00_r00".into()]));
+        }
+    }
     let map = match_to_layout(&bounds, &json_bounds, &centers)?;
     let mut out = Vec::new();
     let mut labels = Vec::new();
@@ -250,7 +323,7 @@ fn ready_pairs(segmented: &Path, layout: &Value) -> Res<(Vec<Pair>, Vec<String>)
         let index = map[&f.display().to_string()];
         let t = &tiles[index];
         labels.push(format!("c{:02}_r{:02}", t["col"].as_i64().unwrap(), t["row"].as_i64().unwrap()));
-        out.push(Pair { prediction: f.clone(), target: f, layout_tile: Some(index) });
+        out.push(Pair { prediction: f.clone(), target: f, layout_tile: Some(index), single: None });
     }
     Ok((out, labels))
 }
@@ -1616,7 +1689,7 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
         "source": p.prediction.display().to_string(), "target": p.target.display().to_string(), "tile": n,
         "total": total, "matched": matched, "missing_examples": [],
             "radius_m": if params.target.is_none() { Value::Null } else { f(params.transfer_radius) }})).collect()));
-    let regions = regions(&pairs, layout);
+    let regions = regions(&pairs, layout)?;
     let overlaps = tile_overlaps(&pairs, layout, &origin);
     let owned = scratch.join("owned").join(suffix);
     fs::create_dir_all(&owned).map_err(|e| e.to_string())?;
@@ -1809,7 +1882,24 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     fs::write(final_dir.join("instance_metadata.csv"), &csv).map_err(|e| e.to_string())?;
     let summary_name = format!("{}_summary.json", model.instance);
     write_json(&final_dir.join(&summary_name), &summary_document(&model, &statistics, &origin, params.resolution_1, &reassigned, params.small_instances.is_some()))?;
-    write_json(&final_dir.join("tile_bounds.json"), layout)?;
+    // The layout used for ownership; a recovered legacy layout becomes the single-cloud layout.
+    let published = match regions.first().and_then(|r| r.recovery.clone().map(|rec| (r.core, rec))).filter(|_| regions.len() == 1) {
+        Some((core, recovery)) => {
+            let mut l = layout.as_object().cloned().unwrap_or_default();
+            let xy = serde_json::json!([[f(core[0][0]), f(core[0][1])], [f(core[1][0]), f(core[1][1])]]);
+            l.insert("tiling_skipped".into(), Value::Bool(true));
+            l.insert("tile_buffer".into(), f(0.0));
+            l.insert("proj_extent".into(), serde_json::json!({"minx": f(core[0][0]), "miny": f(core[1][0]), "maxx": f(core[0][1]), "maxy": f(core[1][1])}));
+            l.insert("grid_bounds".into(), serde_json::json!({"xmin": f(core[0][0]), "xmax": f(core[0][1]), "ymin": f(core[1][0]), "ymax": f(core[1][1])}));
+            l.insert("tiles".into(), serde_json::json!([{"col": 0, "row": 0, "bounds": xy, "core": xy, "planned_bounds": xy}]));
+            let mut recovery = recovery.as_object().cloned().unwrap_or_default();
+            recovery.insert("source_sha256".into(), Value::String(crate::sha256::file_hex(&params.tile_bounds_json)?));
+            l.insert("layout_recovery".into(), Value::Object(recovery));
+            Value::Object(l)
+        }
+        None => layout.clone(),
+    };
+    write_json(&final_dir.join("tile_bounds.json"), &published)?;
     let mut manifest = Map::new();
     manifest.insert("contract".into(), Value::String("3DT-2183/v8-group-geometry".into()));
     manifest.insert("model".into(), Value::String(model.name.clone()));
