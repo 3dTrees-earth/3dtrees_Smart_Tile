@@ -545,10 +545,13 @@ pub fn write_instance_tiles(sources: &[PathBuf], headers: &[SourceHeader], mut t
         }
         let staged = scratch.join("out").join(format!("dimension_{d:03}"));
         let mut outputs: Vec<(f64, PathBuf, usize, u64)> = resolutions.iter().enumerate().map(|(slot, r)| (*r, request.directories[&dim.name][slot].clone(), 0, 0)).collect();
-        for (index, tile) in tiles.iter().enumerate() {
+        // One tile's outputs: (slot, staged file, destination, kept points). Tiles run four at a time
+        // (each uses the pool for its blocks and compression; Untwine runs its own threads).
+        let process = |index: usize, tile: &Tile| -> Res<Vec<(usize, PathBuf, PathBuf, u64)>> {
+            let mut made = Vec::new();
             let tile_dir = spill_dir.join(format!("dimension_{d:03}")).join(&tile.label);
             if !tile_dir.exists() {
-                continue;
+                return Ok(made);
             }
             // `_output_header`: point format 0 with the source CRS, then the instance and non-standard attributes.
             let mut header = TileHeader::for_tile(&headers[0], tile.scales, tile.offsets)?;
@@ -613,11 +616,25 @@ pub fn write_instance_tiles(sources: &[PathBuf], headers: &[SourceHeader], mut t
                     }
                 };
                 let extension = match request.formats[slot] { InstanceFormat::Laz => "laz", InstanceFormat::Ply => "ply", InstanceFormat::Copc => "copc.laz" };
-                products.push((target, outputs[slot].1.join(format!("{}.{extension}", tile.label))));
-                outputs[slot].2 += 1;
-                outputs[slot].3 += kept[slot];
+                made.push((slot, target, outputs[slot].1.join(format!("{}.{extension}", tile.label)), kept[slot]));
             }
             let _ = fs::remove_dir_all(staged.join(&tile.label));
+            Ok(made)
+        };
+        let mut per_tile: Vec<Option<Res<Vec<(usize, PathBuf, PathBuf, u64)>>>> = (0..tiles.len()).map(|_| None).collect();
+        for pair in (0..tiles.len()).collect::<Vec<_>>().chunks(4) {
+            let done: Vec<(usize, Res<Vec<(usize, PathBuf, PathBuf, u64)>>)> = std::thread::scope(|scope| {
+                let handles: Vec<_> = pair.iter().map(|&i| { let process = &process; let tile = &tiles[i]; scope.spawn(move || (i, process(i, tile))) }).collect();
+                handles.into_iter().map(|h| h.join().expect("instance tile worker panicked")).collect()
+            });
+            for (i, r) in done { per_tile[i] = Some(r); }
+        }
+        for result in per_tile.into_iter().flatten() {
+            for (slot, target, destination, kept) in result? {
+                products.push((target, destination));
+                outputs[slot].2 += 1;
+                outputs[slot].3 += kept;
+            }
         }
         results.push(InstanceResult { dimension: dim.name.clone(), instances: instance_counts[d], outputs });
     }

@@ -469,7 +469,7 @@ fn write_tile_task(params: &TileParams, work: &Path, published: &Path) -> Res<Ve
         println!("  Tiles: {}; resolutions: {}", tiles.len(), labels.join(", "));
         let scratch = work.join(format!(".tile-centroids-{}", std::process::id()));
         fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
-        let converters = params.workers.clamp(1, 2);
+        let converters = (params.workers / 2).clamp(1, 4);
         let summary = scan::write_tile_centroids(&sources, &headers, &tiles, &outputs, params.workers, &scratch, converters,
                                                  params.nearest, true, &|i: &Path, o: &Path, n: u64| copc_conversion(i, o, n, false),
                                                  crate::crs::ply_comment(&headers[0]).as_deref());
