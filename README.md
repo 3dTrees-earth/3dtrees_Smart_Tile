@@ -92,6 +92,18 @@ later ones in `instance_dim2/subsampled_res*/`, …). `--instance-tile-dims` add
 attributes. Instance IDs must be unique across files
 (`--allow-reused-instance-ids` skips that check).
 
+**QSMs per segmentation.** `--qsm-manifest` adds what `merge_qsm` needs to put
+RayCloudTools QSMs of instance tiles back per original without reading points:
+`qsm_manifest_<dimension>.json` (originals, tiles with core and actual bounds,
+every instance with its tile and the originals holding its points) and
+`qsm_footprints.npz` (each original's 1 m cells). `--rct-terrain-folder DIR`
+(the `<original>_terrain_mesh.ply` of an earlier RayCloudTools run; implies the
+manifest) merges those terrains once (identical vertices welded, triangles that
+neighbouring originals share once) and writes per instance tile of the first
+resolution `<tiles>_terrain/<tile>.ply`: the triangles whose XY centroid lies
+within 10 m of the tile, for RayCloudTools `--terrain-mesh`. All QSMs of a
+dataset then stand on the RCT ground.
+
 ### merge
 
 Coarse predictions onto the dense tiles of the same tile run:
@@ -237,6 +249,39 @@ products/
   originals are joined by record order first (shared attributes must agree).
 - `--staged-copc-dir` reuses COPCs only when the staging manifest records their
   source; `--standardization-json` checks that expected dimensions survive.
+
+### merge_qsm
+
+```bash
+python src/run.py --task merge_qsm \
+    --instance-manifest /data/tiles/qsm_manifest_PredInstance_SAT.json \
+    --qsm-folder /data/rct_sat --rct-terrain-folder /data/rct/original_terrain_meshes \
+    --output-dir /data/qsm_sat
+```
+
+QSMs of an existing segmentation (RayCloudTools `--instance-dimension` per
+instance tile), per original; no point cloud is read or merged. `--qsm-folder`
+holds every tile's `<tile>_trees.txt`, `<tile>_trees_info.txt`,
+`<tile>_trees_mesh.ply` and `<tile>_mesh.ply`. Per original:
+
+```
+qsm_sat/
+├── 11505_trees.txt          # rows of every instance with points in the original, by ID, unchanged
+├── 11505_trees_info.txt
+├── 11505_trees_mesh.ply     # tree_id = the instance ID (scope instance-dimension)
+├── 11505_terrain_mesh.ply   # the RCT terrain, else the tiles' terrain over the original's footprint
+├── 11505_qsm_octree/        # octree.bin + hierarchy.json: the viewer's QSM octree (3DT-2626)
+└── qsm_merge_report.json    # QSMs per tile and original, instances without a QSM
+```
+
+Instance IDs are kept, so a QSM joins its points by the same ID; a tree with
+points in several originals goes to each. Without `--rct-terrain-folder` each
+terrain triangle comes from the tile whose core holds its centroid, over the
+original's footprint (`qsm_footprints.npz` beside the manifest). The task fails
+on an instance in two tiles or in a tile that does not own it, on a tile
+without its files, and on tables or meshes that disagree. `--collection-dir`
+publishes `original_tree_tables`, `original_tree_info_tables`,
+`original_tree_meshes` and `original_terrain_meshes`.
 
 ## Input names and collection folders
 

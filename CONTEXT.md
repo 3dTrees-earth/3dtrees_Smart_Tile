@@ -22,6 +22,13 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
   validates COPC twins; no enriched COPC original is written.
 - `create_merged_file`: builds `prod_merged_*` / `merged.*` products from
   Original-with-predictions (or plain source) files.
+- `merge_qsm`: RayCloudTools `--instance-dimension` QSMs of instance tiles per
+  original (`qsm_merge.py`), from the tile task's `--qsm-manifest`
+  (`qsm_tiles.py`); reads no points. IDs and table rows stay unchanged; a tree
+  in several originals goes to each; terrain is the RCT original's
+  (`--rct-terrain-folder`) or the core-owned tile triangles over the original's
+  footprint. Writes the viewer's QSM octree (`qsm_octree.py`, copied unchanged
+  from the results viewer). Never merge or rewrite point clouds here.
 
 ## Merge contract (3DT-2101)
 

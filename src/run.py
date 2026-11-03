@@ -323,6 +323,8 @@ def _write_tile_task(params: Parameters):
             instance_outputs = parse_tile_outputs(params.instance_outputs)
             if not instance_outputs:
                 raise ValueError("--instance-outputs lists no outputs")
+        if (params.qsm_manifest or params.rct_terrain_folder) and not instance_dimensions:
+            raise ValueError("--qsm-manifest and --rct-terrain-folder need --instance-tiles")
         if params.tile_outputs:
             tile_outputs = parse_tile_outputs(params.tile_outputs)
         elif instance_dimensions:
@@ -363,7 +365,8 @@ def _write_tile_task(params: Parameters):
                 wide=params.max_instance_extent,
                 attributes=_parse_csv(params.instance_tile_dims) if params.instance_tile_dims else [],
                 check_ids=not params.allow_reused_instance_ids, workers=spatial_query_worker_count(workers),
-                publish_occupancy=not tile_outputs, **instance_options)
+                publish_occupancy=not tile_outputs, qsm_manifest=params.qsm_manifest,
+                rct_terrain=params.rct_terrain_folder, **instance_options)
 
         # Step 7: Update tile_bounds_tindex.json with actual bounds from created tiles
         # (so remap/merge matching uses file extent instead of nominal grid)
@@ -394,6 +397,32 @@ def _write_tile_task(params: Parameters):
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+
+def run_merge_qsm_task(params: Parameters):
+    """RayCloudTools QSMs of instance tiles per original, published only after success."""
+    from output_publication import DirectoryTransaction
+    from qsm_merge import merge_qsm
+
+    if not params.instance_manifest or not params.qsm_folder or not params.output_dir:
+        print("Error: merge_qsm needs --instance-manifest, --qsm-folder and --output-dir")
+        sys.exit(1)
+    output_dir = Path(params.output_dir)
+    try:
+        _check_collection_dir(params, output_dir)
+        with DirectoryTransaction(output_dir, inputs=[params.qsm_folder]) as transaction:
+            report = merge_qsm(params.instance_manifest, params.qsm_folder, transaction.path,
+                               dimension=params.instance_dimension if "instance_dimension" in params.model_fields_set
+                               else None, rct_terrain_folder=params.rct_terrain_folder)
+            transaction.commit()
+        from collection_folders import original_collections
+        _publish_collections(params, original_collections(output_dir), {})
+    except Exception as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+    print(f"merge_qsm {report['instance_dimension']}: {report['qsms']} QSMs of {report['instances']} instances "
+          f"for {len(report['originals'])} originals ({report['instances_without_qsm']} instances without QSM); "
+          f"terrain from {report['terrain']}: {output_dir}")
 
 
 def _small_instance_policy(params: Parameters):
@@ -615,6 +644,7 @@ def preprocess_boolean_flags(args_list):
         '--match-instances', '--match_instances',
         '--prediction-resolution-original', '--prediction_resolution_original',
         '--allow-reused-instance-ids', '--allow_reused_instance_ids',
+        '--qsm-manifest', '--qsm_manifest',
         '--original-point-index', '--original_point_index',
         '--transfer-original-dims-to-merged', '--transfer_original_dims_to_merged',
     ]
@@ -732,6 +762,8 @@ def _print_cli_help() -> None:
                 "max_instance_extent",
                 "instance_tile_dims",
                 "allow_reused_instance_ids",
+                "qsm_manifest",
+                "rct_terrain_folder",
                 "resolution_1",
                 "resolution_2",
                 "output_copc_res1",
@@ -740,6 +772,7 @@ def _print_cli_help() -> None:
                 "tiling_threshold",
             ],
         ),
+        ("QSM merge (merge_qsm)", ["instance_manifest", "qsm_folder", "rct_terrain_folder"]),
         (
             "Merge",
             [
@@ -899,9 +932,11 @@ def main():
         run_remap_task(params)
     elif params.task == "create_merged_file":
         run_create_merged_file_task(params)
+    elif params.task == "merge_qsm":
+        run_merge_qsm_task(params)
     else:
         print(f"Error: Unknown task: {params.task}")
-        print("Valid tasks: tile, merge, remap, create_merged_file")
+        print("Valid tasks: tile, merge, remap, create_merged_file, merge_qsm")
         sys.exit(1)
 
 

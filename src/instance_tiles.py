@@ -149,11 +149,18 @@ def _instance_ids(chunk, dimension):
 
 
 def _statistics(task):
-    """Per dimension: rows (id, file, count, sum x, sum y, min x, max x, min y, max y) of one point range."""
-    source, start, count, dimensions, file_index = task
+    """Per dimension: rows (id, file, count, sum x, sum y, min x, max x, min y, max y) of one point range.
+
+    With ``footprint``, also the range's unique 1 m footprint cells (QSM terrain per original).
+    """
+    source, start, count, dimensions, file_index, footprint = task
     parts = {d: [] for d in dimensions}
+    cells = []
     for chunk in _chunks(source, start, count):
         x, y = np.asarray(chunk.x), np.asarray(chunk.y)
+        if footprint:
+            from raycloud_terrain import cell_keys
+            cells.append(np.unique(cell_keys(np.column_stack((x, y)))))
         for d in dimensions:
             ids = _instance_ids(chunk, d)
             positive = ids > 0
@@ -168,7 +175,7 @@ def _statistics(task):
             parts[d].append({"ids": uid, "files": np.full(len(uid), file_index), "count": n,
                              "sx": np.bincount(inverse, xs), "sy": np.bincount(inverse, ys),
                              "minx": mnx, "maxx": mxx, "miny": mny, "maxy": mxy})
-    return parts
+    return parts, (file_index, np.unique(np.concatenate(cells)) if cells else np.empty(0, np.int64))
 
 
 def _group(ids, table):
@@ -188,7 +195,9 @@ def _group(ids, table):
 def _combine(parts):
     """Per instance totals, plus per (instance, file) boxes for the reuse check."""
     if not parts:
-        return {"ids": np.empty(0, np.uint64), "reused": np.empty(0, np.uint64), "shared": 0}
+        return {"ids": np.empty(0, np.uint64), "reused": np.empty(0, np.uint64), "shared": 0,
+                "instance_files": np.rec.fromarrays([np.empty(0, np.uint64), np.empty(0, np.int64)],
+                                                    names=["instance", "file"])}
     table = {name: np.concatenate([part[name] for part in parts]) for name in parts[0]}
     ids, files = table["ids"], table["files"]
     out = _group(ids, table)
@@ -208,6 +217,7 @@ def _combine(parts):
         reused = uid[shared & (gap > REUSE_GAP)]
     out["reused"] = np.asarray(reused, dtype=np.uint64)
     out["shared"] = int(np.count_nonzero(shared))
+    out["instance_files"] = per_file["ids"]  # (instance, file) pairs: the originals holding each instance
     return out
 
 
@@ -414,7 +424,8 @@ def _output_directories(output_dir, dimensions, resolutions, selections):
 
 
 def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions, attributes=(),
-                         check_ids=True, wide=WIDE_INSTANCE, workers=1, formats=None, output_directories=None):
+                         check_ids=True, wide=WIDE_INSTANCE, workers=1, formats=None, output_directories=None,
+                         qsm_manifest=False, rct_terrain=None):
     """Write ``instance_tiles_<dimension>_<resolution>/<label>.laz`` per dimension and resolution.
 
     Zero resolution retains every owned source point, including coincident points.
@@ -423,6 +434,11 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
     All resolutions come from the same two reads. ``tiles``: [Tile] with
     ``core`` (xmin, ymin, xmax, ymax). Returns {dimension: {instance checks,
     "outputs": {resolution: {"directory", "tiles", "points"}}}}.
+
+    ``qsm_manifest`` also writes what ``merge_qsm`` needs (``qsm_tiles``): a
+    manifest per dimension and the originals' footprints; ``rct_terrain``, a
+    folder of per-original RCT terrain meshes, adds a cropped terrain mesh per
+    tile of the first resolution (and implies the manifest).
     """
     from point_cloud_metadata import write_retained_evlrs
     from output_publication import publish_files, validate_output_paths
@@ -465,10 +481,14 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
         scratch = Path(scratch)
         parts = {d: [] for d in dimensions}
         file_of = {str(source): i for i, source in enumerate(sources)}
-        for result in pool.map(_statistics, [(s, a, n, tuple(dimensions), file_of[s]) for s, a, n in tasks]):
+        qsm_manifest = bool(qsm_manifest or rct_terrain)
+        footprints = [[] for _ in sources]
+        for result, (file_index, cells) in pool.map(
+                _statistics, [(s, a, n, tuple(dimensions), file_of[s], qsm_manifest) for s, a, n in tasks]):
             for d in dimensions:
                 parts[d].extend(result[d])
-        owners = {}
+            footprints[file_index].append(cells)
+        owners, instance_files, merged_terrain = {}, {}, None
         cores = [tile.core for tile in tiles]
         for d in dimensions:
             statistics = _combine(parts[d])
@@ -477,6 +497,7 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
             cx = statistics.get("sx", np.zeros(0)) / n
             cy = statistics.get("sy", np.zeros(0)) / n
             owners[d] = (statistics["ids"], _core_index(cx, cy, cores))
+            instance_files[d] = statistics["instance_files"]
             results[d] = id_report
         total = sum(counts)
         area = max(1e-9, (max(c[2] for c in cores) - min(c[0] for c in cores))
@@ -497,6 +518,7 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
             staged = scratch / "out" / dimension_dirs[d]
             written = {r: [] for r in resolutions}
             points = {r: 0 for r in resolutions}
+            tile_bounds = {}
             for index, tile in enumerate(tiles):
                 tile_dir = spill_dir / dimension_dirs[d] / tile.label
                 if not tile_dir.exists():
@@ -527,6 +549,10 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
                                 writer.write_points(laspy.ScaleAwarePointRecord(
                                     array, out_header.point_format, out_header.scales, out_header.offsets))
                         write_retained_evlrs(writer, out_header)
+                    if slot == 0:
+                        with laspy.open(target) as reader:
+                            mins, maxs = reader.header.mins, reader.header.maxs
+                        tile_bounds[tile.label] = (float(mins[0]), float(mins[1]), float(maxs[0]), float(maxs[1]))
                     target = convert_instance_tile(target, formats[slot], (d, *attributes))
                     written[resolution].append((target, tile.label))
                     points[resolution] += kept[slot]
@@ -542,15 +568,55 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
                         products.append((sidecar, vector_schema_sidecar_path(destination)))
                 results[d]["outputs"][resolution] = {"directory": directory, "tiles": len(written[resolution]),
                                                      "points": points[resolution], "format": output_format}
+            if qsm_manifest:
+                if rct_terrain and merged_terrain is None:
+                    from qsm_tiles import open_rct_terrain
+                    merged_terrain = open_rct_terrain(rct_terrain)
+                results[d]["qsm"] = _stage_qsm_inputs(
+                    scratch, output_dir, d, sources, tiles, tile_bounds, instance_files[d], owners[d],
+                    directories[d][0], merged_terrain, products)
+        if qsm_manifest:
+            from qsm_tiles import FOOTPRINTS_FILE, write_footprints
+            staged = scratch / FOOTPRINTS_FILE
+            write_footprints(staged, [file_stem(s) for s in sources],
+                             [np.unique(np.concatenate(cells)) if cells else np.empty(0, np.int64)
+                              for cells in footprints])
+            products.append((staged, Path(output_dir) / FOOTPRINTS_FILE))
         publish_files(products, inputs=sources)
     print(f"  Instance tiles {list(dimensions)} at {list(resolutions)} m: {total:,} points read twice in "
           f"{spilled - started:.1f} s; written in {time.monotonic() - spilled:.1f} s")
     return results
 
 
+def _stage_qsm_inputs(scratch, output_dir, dimension, sources, tiles, tile_bounds, instance_files, owners,
+                      tile_directory, rct_terrain, products):
+    """Stage the QSM manifest of one dimension and, with the merged RCT terrain, a cropped terrain mesh per tile."""
+    from ply_crs import crs_comment_from_file
+    from qsm_tiles import manifest, manifest_name, tile_terrain_directory, write_json, write_tile_terrain
+
+    crs = crs_comment_from_file(sources[0])
+    staged = scratch / "qsm" / quote(dimension, safe="")
+    staged.mkdir(parents=True)
+    write_json(staged / manifest_name(dimension),
+               manifest(dimension, [file_stem(s) for s in sources], tiles, tile_bounds, instance_files, owners, crs))
+    products.append((staged / manifest_name(dimension), Path(output_dir) / manifest_name(dimension)))
+    report = {"manifest": manifest_name(dimension), "terrain": {}}
+    if rct_terrain is not None:
+        terrain_dir = tile_terrain_directory(tile_directory)
+        for label, bounds in sorted(tile_bounds.items()):
+            target = staged / f"{label}.ply"
+            report["terrain"][label] = write_tile_terrain(target, rct_terrain, bounds, crs=crs)
+            products.append((target, terrain_dir / f"{label}.ply"))
+        report["terrain_directory"] = str(terrain_dir)
+        report["rct_terrain"] = {"originals": rct_terrain.sources, "faces": int(len(rct_terrain.faces)),
+                                 "shared_faces_dropped": rct_terrain.shared_faces,
+                                 "welded_vertices": int(rct_terrain.welded)}
+    return report
+
+
 def instance_tiles_from_plan(plan, output_dir, dimensions, *, resolutions, attributes=(),
                              check_ids=True, wide=WIDE_INSTANCE, workers=1, publish_occupancy=True,
-                             formats=None, output_directories=None):
+                             formats=None, output_directories=None, qsm_manifest=False, rct_terrain=None):
     """Tile-task entry: the planned grid's cores own instances and background.
 
     ``publish_occupancy`` writes the occupied tiles into the layout; leave it to
@@ -583,7 +649,8 @@ def instance_tiles_from_plan(plan, output_dir, dimensions, *, resolutions, attri
                  for label, bounds in sorted(jobs.items())]
     results = write_instance_tiles(sources, tiles, dimensions, Path(output_dir), resolutions=resolutions,
                                    attributes=attributes, check_ids=check_ids, wide=wide, workers=workers,
-                                   formats=formats, output_directories=output_directories)
+                                   formats=formats, output_directories=output_directories,
+                                   qsm_manifest=qsm_manifest, rct_terrain=rct_terrain)
     if publish_occupancy and not plan.skip_tiling:
         occupied = set()
         for d in dimensions:

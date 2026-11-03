@@ -36,8 +36,9 @@ class Parameters(BaseSettings):
         description=(
             "Task to perform: 'tile' (tiling + subsampling), 'merge' (transfer, filter and merge; "
             "--segmented-remapped-folder filters already-dense tiles), 'remap' "
-            "(prediction source -> original files), or 'create_merged_file' "
-            "(prod-merged from original_with_predictions)"
+            "(prediction source -> original files), 'create_merged_file' "
+            "(prod-merged from original_with_predictions), or 'merge_qsm' (RayCloudTools QSMs of instance "
+            "tiles per original, with the viewer's QSM octree; no points are read)"
         ),
     )
 
@@ -177,6 +178,37 @@ class Parameters(BaseSettings):
         description="Instance tiles: skip the check that fails when many instance IDs occur in several input "
                     "files more than 5 m apart (IDs reused by separately segmented files).",
         validation_alias=AliasChoices("allow-reused-instance-ids", "allow_reused_instance_ids"),
+    )
+
+    qsm_manifest: bool = Field(
+        False,
+        description="Instance tiles: also write what merge_qsm needs to put RayCloudTools QSMs per original "
+                    "without reading points: qsm_manifest_<dimension>.json (originals, tiles, every instance "
+                    "with its tile and originals) and qsm_footprints.npz (each original's 1 m cells).",
+        validation_alias=AliasChoices("qsm-manifest", "qsm_manifest"),
+    )
+
+    rct_terrain_folder: Optional[Path] = Field(
+        default=None,
+        description="Instance tiles (implies --qsm-manifest): folder with the per-original terrain meshes of an "
+                    "earlier RayCloudTools run (<original>_terrain_mesh.ply). Writes <tiles>_terrain/<tile>.ply "
+                    "per instance tile, the triangles within 10 m of the tile with shared ones once, for "
+                    "RayCloudTools --terrain-mesh. merge_qsm: copy these as each original's terrain.",
+        validation_alias=AliasChoices("rct-terrain-folder", "rct_terrain_folder"),
+    )
+
+    instance_manifest: Optional[Path] = Field(
+        default=None,
+        description="merge_qsm: qsm_manifest_<dimension>.json of the tile run (qsm_footprints.npz beside it "
+                    "is needed without --rct-terrain-folder).",
+        validation_alias=AliasChoices("instance-manifest", "instance_manifest"),
+    )
+
+    qsm_folder: Optional[Path] = Field(
+        default=None,
+        description="merge_qsm: folder with the RayCloudTools --instance-dimension outputs of every instance "
+                    "tile: <tile>_trees.txt, <tile>_trees_info.txt, <tile>_trees_mesh.ply and <tile>_mesh.ply.",
+        validation_alias=AliasChoices("qsm-folder", "qsm_folder"),
     )
 
     tile_outputs: Optional[str] = Field(
