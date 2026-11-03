@@ -16,6 +16,7 @@ Usage:
     python src/run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output
 """
 
+import os
 import sys
 import argparse
 from pathlib import Path
@@ -797,7 +798,51 @@ def _print_cli_help() -> None:
         print()
 
 
+RUST_ENGINE = Path(os.environ.get("SMARTTILE_RUST_BINARY", "/opt/smarttile/bin/smarttile-rs"))
+# The Rust engine exits with this code when a requested option is not ported yet.
+RUST_NOT_PORTED = 3
+
+
+def _engine_args(argv):
+    """Split ``--engine rust|python`` off the arguments (default: rust when it is installed)."""
+    engine, rest, skip = None, [], False
+    for i, arg in enumerate(argv):
+        if skip:
+            skip = False
+            continue
+        if arg.startswith("--engine="):
+            engine = arg.split("=", 1)[1]
+        elif arg == "--engine":
+            engine = argv[i + 1] if i + 1 < len(argv) else ""
+            skip = True
+        else:
+            rest.append(arg)
+    if engine not in (None, "rust", "python"):
+        print(f"Error: --engine must be rust or python, not {engine!r}")
+        sys.exit(1)
+    return engine, rest
+
+
+def _run_rust_engine(argv):
+    """Run the task with the Rust engine; return False when it declines (option not ported)."""
+    import subprocess
+
+    result = subprocess.run([str(RUST_ENGINE), *argv])
+    if result.returncode == RUST_NOT_PORTED:
+        print("Rust engine: option not ported yet; running the Python implementation", flush=True)
+        return False
+    sys.exit(result.returncode)
+
+
 def main():
+    engine, argv = _engine_args(sys.argv[1:])
+    sys.argv = [sys.argv[0], *argv]
+    wants_help = any(arg in ("-h", "--help", "--show-params", "--show_params") for arg in argv)
+    if engine != "python" and not wants_help and RUST_ENGINE.is_file():
+        _run_rust_engine(argv)
+    elif engine == "rust" and not wants_help:
+        print(f"Error: --engine rust requested but {RUST_ENGINE} is not installed")
+        sys.exit(1)
     if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
         _print_cli_help()
         sys.exit(0)

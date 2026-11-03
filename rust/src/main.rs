@@ -45,7 +45,15 @@ fn parse_args() -> Result<BTreeMap<String, String>, String> {
                 _ => (name.to_string(), "true".to_string()),
             },
         };
-        args.insert(name.replace('_', "-"), value);
+        // `run.py` aliases.
+        let (name, value) = match name.replace('_', "-").as_str() {
+            "produce-merged-file" => ("transfer-original-dims-to-merged".to_string(), value),
+            "no-produce-merged-file" => ("transfer-original-dims-to-merged".to_string(), "false".to_string()),
+            "no-transfer-original-dims-to-merged" => ("transfer-original-dims-to-merged".to_string(), "false".to_string()),
+            "no-original-point-index" => ("original-point-index".to_string(), "false".to_string()),
+            other => (other.to_string(), value),
+        };
+        args.insert(name, value);
     }
     Ok(args)
 }
@@ -469,7 +477,8 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             println!("Error: {error}");
-            ExitCode::FAILURE
+            // `run.py` falls back to Python for options this engine does not cover yet.
+            if error.contains("not ported") || error.contains("not yet ported") { ExitCode::from(3) } else { ExitCode::FAILURE }
         }
     }
 }
