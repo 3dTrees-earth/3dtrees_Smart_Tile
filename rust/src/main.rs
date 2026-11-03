@@ -322,7 +322,7 @@ fn run_remap(args: &BTreeMap<String, String>) -> Result<(), String> {
                  "workers", "number-of-threads", "remap-dims", "instance-dimension", "collection-dir",
                  "transfer-original-dims-to-merged", "no-transfer-original-dims-to-merged", "original-copc-input-dir",
                  "match-instances", "no-match-instances", "prediction-resolution-original", "no-prediction-resolution-original",
-                 "pre-remap-reassign-instances"];
+                 "pre-remap-reassign-instances", "remap-tolerance", "baseline-1cm-folders"];
     let unknown: Vec<&String> = args.keys().filter(|k| !known.contains(&k.as_str()) && !PRODUCT_FLAGS.contains(&k.as_str())).collect();
     if !unknown.is_empty() {
         return Err(format!("Unknown or not yet ported remap argument(s): {}", unknown.iter().map(|k| format!("--{k}")).collect::<Vec<_>>().join(" ")));
@@ -349,15 +349,15 @@ fn run_remap(args: &BTreeMap<String, String>) -> Result<(), String> {
     if flag(args, "pre-remap-reassign-instances") {
         return Err("pre-remap label reassignment is incompatible with the strict reconciled-label contract".into());
     }
-    if number(args, "resolution-1")?.is_some_and(|r| r != 0.01) {
-        return Err("remap with --resolution-1 other than 0.01 is not ported yet".into());
-    }
     remap::run(&remap::RemapParams {
         collections, originals, output: output.clone(), workers: workers.min(allocated_cpus()), requested_workers: workers,
         instance_dimension: args.get("instance-dimension").cloned().unwrap_or_else(|| "PredInstance".into()),
         target_dims: args.get("remap-dims").map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()),
         match_instances: flag(args, "match-instances"),
         prediction_resolution_original: flag(args, "prediction-resolution-original"),
+        resolution_1: number(args, "resolution-1")?,
+        remap_tolerance: number(args, "remap-tolerance")?,
+        baseline_folders: args.get("baseline-1cm-folders").map(|v| v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(PathBuf::from).collect::<Vec<_>>()).filter(|v| !v.is_empty()),
     })?;
     let made = prod_merged_after(args, &output, &root, workers.min(allocated_cpus()))?;
     if let Some(dir) = &collection_dir {

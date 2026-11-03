@@ -34,6 +34,10 @@ pub struct RemapParams {
     /// `--match-instances` and `--prediction-resolution-original`.
     pub match_instances: bool,
     pub prediction_resolution_original: bool,
+    /// `--resolution-1` (overrides the manifests), `--remap-tolerance` (radius override), `--baseline-1cm-folders`.
+    pub resolution_1: Option<f64>,
+    pub remap_tolerance: Option<f64>,
+    pub baseline_folders: Option<Vec<PathBuf>>,
 }
 
 fn local(raw: &[u8], h: &SourceHeader, origin: &[f64; 3]) -> [f64; 3] {
@@ -181,7 +185,20 @@ pub fn run(params: &RemapParams) -> Res<()> {
     if !params.prediction_resolution_original && resolutions.len() > 1 {
         return Err("Prediction collections declare conflicting first-stage resolutions".into());
     }
-    let resolution = resolutions.iter().next().map(|b| f64::from_bits(*b)).unwrap_or(0.01);
+    let resolution = params.resolution_1.unwrap_or_else(|| resolutions.iter().next().map(|b| f64::from_bits(*b)).unwrap_or(0.01));
+    if !(resolution.is_finite() && resolution > 0.0) {
+        return Err("First subsampling resolution must be finite and positive".into());
+    }
+    if params.remap_tolerance.is_some_and(|r| !(r.is_finite() && r > 0.0)) {
+        return Err("Original remap tolerance must be finite and positive".into());
+    }
+    // `--baseline-1cm-folders`: one shared baseline or one per model, instead of the manifests'.
+    if let Some(folders) = &params.baseline_folders {
+        if folders.len() != 1 && folders.len() != params.collections.len() {
+            return Err("Provide one shared baseline or one baseline per model".into());
+        }
+        baselines = (0..params.collections.len()).map(|i| Some(folders[if folders.len() == 1 { 0 } else { i }].clone())).collect();
+    }
     // `original_prediction_radius`: half the diagonal of each collection's coarsest XYZ steps plus an 8-ULP encoding guard.
     let radii: Vec<f64> = if params.prediction_resolution_original {
         params.collections.iter().map(|c| {
@@ -199,7 +216,7 @@ pub fn run(params: &RemapParams) -> Res<()> {
             Ok(((half[0] * half[0] + half[1] * half[1]) + half[2] * half[2]).sqrt() + 8.0 * (f64::from_bits(magnitude.to_bits() + 1) - magnitude))
         }).collect::<Res<_>>()?
     } else {
-        vec![3f64.sqrt() * resolution; params.collections.len()]
+        vec![params.remap_tolerance.unwrap_or(3f64.sqrt() * resolution); params.collections.len()]
     };
     let radius = radii.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let originals = original_files(&params.originals)?;
