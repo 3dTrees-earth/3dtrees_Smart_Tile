@@ -556,39 +556,71 @@ fn tile_overlaps(pairs: &[Pair], layout: &Value, origin: &[f64; 3]) -> Overlaps 
 pub struct TileIndex { pub set: PointSet, pub labels: Vec<u64> }
 
 fn build_index(files: &[PathBuf], model: &Model, origin: &[f64; 3], radius: f64) -> Res<TileIndex> {
+    Ok(build_index_where(files, model, origin, radius, None, None)?.0)
+}
+
+/// Which points of a tile an index keeps (tile, local point).
+type Keep<'a> = &'a (dyn Fn(usize, &[f64; 3]) -> bool + Sync);
+
+/// The index of `build_index`, optionally restricted to the points `keep` accepts (their ids
+/// stay in tile and point order, their `index` the point's position in its tile), and with the
+/// `semantic` dimension of each kept point.
+fn build_index_where(files: &[PathBuf], model: &Model, origin: &[f64; 3], radius: f64, keep: Option<Keep>, semantic: Option<&str>)
+                     -> Res<(TileIndex, Vec<u64>)> {
     let started = std::time::Instant::now();
+    type Part = (Vec<[f64; 3]>, Vec<u64>, Vec<u64>, Vec<i64>); // xyz, labels, semantics, point index
     // Tiles decode in parallel, then join in tile order.
-    let parts: Vec<Res<(Vec<[f64; 3]>, Vec<u64>)>> = files.par_iter().map(|file| {
+    let parts: Vec<Res<Part>> = files.par_iter().enumerate().map(|(tile, file)| {
         let header = lasio::read_header(file)?;
         let layout = PointLayout::of(&header)?;
         let (field, _) = layout.find(&model.instance).unwrap();
-        let (mut xyz, mut labels) = (Vec::with_capacity(header.point_count as usize), Vec::with_capacity(header.point_count as usize));
+        let semantic_field = match semantic {
+            Some(name) => Some(layout.find(name).ok_or_else(|| format!("{}: no {name}", file.display()))?.0),
+            None => None,
+        };
+        let capacity = if keep.is_some() { 0 } else { header.point_count as usize };
+        let mut part: Part = (Vec::with_capacity(capacity), Vec::with_capacity(capacity), Vec::new(), Vec::new());
         let record_len = header.record_length as usize;
+        let mut offset = 0i64;
         for block in blocks(file)? {
             let block = block?;
-            let parts: Vec<(Vec<[f64; 3]>, Vec<u64>)> = block.raw_bytes().par_chunks(MAX_BATCH_POINTS as usize * record_len).map(|chunk| {
+            let batch = MAX_BATCH_POINTS as usize * record_len;
+            let parts: Vec<Part> = block.raw_bytes().par_chunks(batch).enumerate().map(|(n, chunk)| {
                 let mut scratch = [0u8; 8];
-                chunk.chunks_exact(record_len).map(|r| (local(r, &header, origin), field.scalar().read_int(field.get(r, &mut scratch)) as u64)).unzip()
+                let mut out: Part = Default::default();
+                for (k, r) in chunk.chunks_exact(record_len).enumerate() {
+                    let p = local(r, &header, origin);
+                    if keep.is_some_and(|keep| !keep(tile, &p)) { continue; }
+                    out.0.push(p);
+                    out.1.push(field.scalar().read_int(field.get(r, &mut scratch)) as u64);
+                    if let Some(f) = semantic_field { out.2.push(f.scalar().read_int(f.get(r, &mut scratch)) as u64); }
+                    out.3.push(offset + (n * MAX_BATCH_POINTS as usize + k) as i64);
+                }
+                out
             }).collect();
-            for (x, l) in parts { xyz.extend(x); labels.extend(l); }
+            offset += (block.raw_bytes().len() / record_len) as i64;
+            for (x, l, s, i) in parts { part.0.extend(x); part.1.extend(l); part.2.extend(s); part.3.extend(i); }
         }
-        Ok((xyz, labels))
+        Ok(part)
     }).collect();
     let t_read = started.elapsed().as_secs_f64();
     let mut index = TileIndex { set: PointSet::new(radius), labels: Vec::new() };
+    let mut semantics = Vec::new();
     for (tile, part) in parts.into_iter().enumerate() {
-        let (xyz, labels) = part?;
-        for (n, p) in xyz.into_iter().enumerate() {
-            index.set.push(p, tile as u32, n as i64);
+        let (xyz, labels, s, at) = part?;
+        for (p, n) in xyz.into_iter().zip(at) {
+            index.set.push(p, tile as u32, n);
         }
         index.labels.extend(labels);
+        semantics.extend(s);
     }
+    if semantic.is_none() { semantics.resize(index.labels.len(), 0); }
     let t_push = started.elapsed().as_secs_f64();
     index.set.build();
     if std::env::var_os("SMARTTILE_TIMINGS").is_some() {
-        eprintln!("    index: read {t_read:.1} s, push {:.1} s, build {:.1} s", t_push - t_read, started.elapsed().as_secs_f64() - t_push);
+        eprintln!("    index: read {t_read:.1} s, push {:.1} s, build {:.1} s, {} points", t_push - t_read, started.elapsed().as_secs_f64() - t_push, index.set.len());
     }
-    Ok(index)
+    Ok((index, semantics))
 }
 
 /// Large blocks of raw records (32 batches, decompressed in parallel); callers split them
@@ -913,26 +945,6 @@ fn rewrite_recovered(model: &Model, dense: &Path, rejected: &std::collections::B
     lasio::write_records(output, &target, batches, false, None)
 }
 
-fn build_index_with_semantic(files: &[PathBuf], model: &Model, origin: &[f64; 3], radius: f64) -> Res<(TileIndex, Vec<u64>)> {
-    let index = build_index(files, model, origin, radius)?;
-    let mut semantics = Vec::with_capacity(index.labels.len());
-    if let Some(name) = &model.semantic {
-        let mut scratch = [0u8; 8];
-        for file in files {
-            let (_, field) = instance_reader(file, name)?;
-            for chunk in chunks(file)? {
-                let chunk = chunk?;
-                for r in chunk.raw_bytes().chunks_exact(chunk.record_len()) {
-                    semantics.push(field.scalar().read_int(field.get(r, &mut scratch)) as u64);
-                }
-            }
-        }
-    } else {
-        semantics.resize(index.labels.len(), 0);
-    }
-    Ok((index, semantics))
-}
-
 /// The uncovered core samples each admitted orphan claimed (sorted as the claims table).
 #[allow(clippy::too_many_arguments)]
 fn claims_of(model: &Model, dense: &[PathBuf], ownership: &[Ownership], regions: &[Region], overlaps: &Overlaps,
@@ -951,12 +963,15 @@ thread_local! {
 }
 
 /// Checked and unsupported samples: a positive survivor within 1 cm (plus guard) of every sample.
-fn recovered_support(admitted: &[(usize, u64)], claims: &BTreeMap<(usize, u64), Vec<[f64; 3]>>, survivors: &PointSet, labels: &[(u64, u64)])
-                     -> (u64, u64, Vec<(usize, u64, [f64; 3])>) {
+fn recovered_support(admitted: &[(usize, u64)], claims: &BTreeMap<(usize, u64), Vec<[f64; 3]>>, survivors: &crate::parts::Parts)
+                     -> Res<(u64, u64, Vec<(usize, u64, [f64; 3])>)> {
     let (mut checked, mut missing, mut examples) = (0, 0, Vec::new());
     for key in admitted {
         for batch in claims[key].chunks(MAX_BATCH_POINTS as usize) {
-            let covered = survivors.covered(batch, 0.01, &|id| labels[id as usize].0 > 0);
+            let (lo, hi) = crate::parts::bounds(batch);
+            let reached = survivors.reach(lo, hi, 0.01)?;
+            let sets: Vec<&PointSet> = reached.iter().map(|l| &l.set).collect();
+            let covered = crate::spatial::covered_across(&sets, batch, 0.01, &|s, id| reached[s].labels[id as usize] > 0);
             checked += batch.len() as u64;
             missing += covered.iter().filter(|c| !**c).count() as u64;
             for (k, c) in covered.iter().enumerate() {
@@ -964,7 +979,7 @@ fn recovered_support(admitted: &[(usize, u64)], claims: &BTreeMap<(usize, u64), 
             }
         }
     }
-    (checked, missing, examples)
+    Ok((checked, missing, examples))
 }
 
 /// `inside_xy`: inclusive XY box membership with an 8-ULP allowance of the box magnitude.
@@ -1267,6 +1282,22 @@ fn instance_scalar(max_id: u64) -> crate::points::Scalar {
     if max_id > u16::MAX as u64 { crate::points::Scalar::U32 } else { crate::points::Scalar::U16 }
 }
 
+/// Per tile, the overlap boxes later tiles share with it: only points inside one can match a later tile's query.
+fn later_overlaps(overlaps: &Overlaps) -> Vec<Vec<([f64; 2], [f64; 2])>> {
+    let mut later = vec![Vec::new(); overlaps.len()];
+    for (u, bounds) in overlaps.iter().enumerate() {
+        for (&t, b) in bounds { if t < u { later[t].push(*b); } }
+    }
+    later
+}
+
+/// The 1 cm index of the points inside any overlap of their tile (the only competitors of shared points).
+fn overlap_index(files: &[PathBuf], model: &Model, origin: &[f64; 3], overlaps: &Overlaps) -> Res<TileIndex> {
+    let later = later_overlaps(overlaps);
+    let keep = |tile: usize, p: &[f64; 3]| overlaps[tile].values().chain(&later[tile]).any(|b| inside_xy(p, b));
+    Ok(build_index_where(files, model, origin, 0.01, Some(&keep), None)?.0)
+}
+
 /// Per tile of deduplication: input, survivors and up to five removals (point, survivor tile, survivor record, distance).
 pub struct DedupTile { pub input: u64, pub surviving: u64, pub examples: Vec<(i64, u32, i64, f64)> }
 
@@ -1274,19 +1305,20 @@ pub struct DedupTile { pub input: u64, pub surviving: u64, pub examples: Vec<(i6
 /// within 1 cm carries the same (dataset instance, semantic) labels.
 #[allow(clippy::too_many_arguments)]
 fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64), u64>, output_dir: &Path, origin: &[f64; 3],
-               overlaps: &Overlaps, statistics: &mut Statistics, regions: &[Region], stage_index: &TileIndex,
-               stage_semantics: &[u64], pool: &rayon::ThreadPool, metrics: &mut Vec<DedupTile>, survivor_values: &mut Vec<u8>)
-               -> Res<(Vec<PathBuf>, PointSet, Vec<(u64, u64)>)> {
-    let mut timing = [0f64; 4]; // nearest, conflict, write, survivor index
+               overlaps: &Overlaps, statistics: &mut Statistics, regions: &[Region], stage_index: TileIndex,
+               stage_semantics: Vec<u64>, pool: &rayon::ThreadPool, metrics: &mut Vec<DedupTile>,
+               survivors: Option<&mut crate::parts::Parts>) -> Res<Vec<PathBuf>> {
+    let mut timing = [0f64; 2]; // nearest + write, survivor index
     const RADIUS: f64 = 0.01;
     fs::create_dir_all(output_dir).map_err(|e| e.to_string())?;
     let groups = mapping.values().collect::<std::collections::BTreeSet<_>>().len() as u64;
     let instance_type = instance_scalar(groups);
-    let mut survivors = PointSet::new(RADIUS);
-    // Each finished tile's survivors, indexed once (`survivors` gathers them all for later stages).
-    let mut tile_sets: Vec<PointSet> = Vec::new();
-    let mut tile_offsets: Vec<u32> = Vec::new();
-    let mut survivor_labels: Vec<(u64, u64)> = Vec::new();
+    // Each finished tile's survivors inside an overlap with a later tile (the only ones a later
+    // query can accept), indexed once with their labels; `survivors` (when kept) gets every
+    // tile's survivors as one part.
+    let later = later_overlaps(overlaps);
+    let mut tile_sets: Vec<(PointSet, Vec<(u64, u64)>)> = Vec::new();
+    let mut survivors = survivors;
     let mut outputs = Vec::new();
     for (tile, file) in files.iter().enumerate() {
         let header = lasio::read_header(file)?;
@@ -1323,13 +1355,11 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
         let mut metric = DedupTile { input: 0, surviving: 0, examples: Vec::new() };
         let mut new_points: Vec<([f64; 3], i64, (u64, u64))> = Vec::new();
         let mut new_values: Vec<u8> = Vec::new();
-        let mut batches = Vec::new();
         // `survivors.nearest(before_tile=tile, overlaps=overlaps[tile])`: only earlier tiles overlapping
         // this one can hold a duplicate. Within a tile the batches are independent (survivors join
         // after the tile), so they run in parallel and are merged in order.
         let earlier: Vec<usize> = (0..tile).filter(|t| bounds.contains_key(t)).collect();
-        let sets: Vec<&PointSet> = earlier.iter().map(|&t| &tile_sets[t]).collect();
-        let set_offsets: Vec<u32> = earlier.iter().map(|&t| tile_offsets[t]).collect();
+        let sets: Vec<&PointSet> = earlier.iter().map(|&t| &tile_sets[t].0).collect();
         let allowed = |s: usize, id: u32, q: &[f64; 3]| {
             let b = &bounds[&earlier[s]];
             inside_xy(&sets[s].xyz[id as usize], b) && inside_xy(q, b)
@@ -1347,13 +1377,13 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
                 (if l == 0 { 0 } else { mapping[&(tile, l)] }, s)
             }).collect();
             let groups = crate::spatial::spatial_batches(&xyz);
-            let mut found: Vec<Option<(u32, f64)>> = vec![None; xyz.len()];
+            let mut found: Vec<Option<(usize, u32, f64)>> = vec![None; xyz.len()]; // (earlier tile, its survivor, distance)
             for g in &groups {
                 // A group with no point inside an earlier overlap has no candidates.
                 if !g.iter().any(|&i| earlier.iter().any(|t| inside_xy(&xyz[i], &bounds[t]))) { continue; }
                 let pts: Vec<[f64; 3]> = g.iter().map(|&i| xyz[i]).collect();
                 let near = crate::spatial::nearest_across(&sets, &pts, RADIUS, &allowed);
-                for (&i, n) in g.iter().zip(near) { found[i] = n.map(|(s, id, d)| (set_offsets[s] + id, d)); }
+                for (&i, n) in g.iter().zip(near) { found[i] = n.map(|(s, id, d)| (earlier[s], id, d)); }
             }
             // `conflicting_match`: no earlier tile's record within 1 cm may carry other labels,
             // except background semantics and two trees each owning its own location.
@@ -1391,11 +1421,11 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
             let mut b = Batch { out: Vec::with_capacity(records.len() * out_len), kept_ids: Vec::new(), kept_xyz: Vec::new(), points: Vec::new(),
                                 values: Vec::new(), examples: Vec::new(), input: records.len() as u64, conflict };
             for (k, r) in records.iter().enumerate() {
-                let duplicate = found[k].is_some_and(|(id, _)| survivor_labels[id as usize] == labels[k]);
+                let duplicate = found[k].is_some_and(|(t, id, _)| tile_sets[t].1[id as usize] == labels[k]);
                 if duplicate {
                     if b.examples.len() < 5 {
-                        let (id, d) = found[k].unwrap();
-                        b.examples.push((offset + k as i64, survivors.tile[id as usize], survivors.index[id as usize], d));
+                        let (t, id, d) = found[k].unwrap();
+                        b.examples.push((offset + k as i64, t as u32, tile_sets[t].0.index[id as usize], d));
                     }
                     continue;
                 }
@@ -1418,17 +1448,15 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
             }
             b
         };
+        // Batches stream into the writer, so a tile's output is never held whole.
         let t_found = std::time::Instant::now();
-        for block in blocks(file)? {
-            let block = block?;
-            let pieces: Vec<&[u8]> = block.raw_bytes().chunks(MAX_BATCH_POINTS as usize * record_len).collect();
-            let base_offset = offset;
-            let results: Vec<Batch> = pool.install(|| {
-                use rayon::prelude::*;
-                pieces.par_iter().enumerate().map(|(n, c)| process(c, base_offset + (n as i64) * MAX_BATCH_POINTS as i64)).collect()
-            });
-            for b in results {
-                if let Some(conflict) = b.conflict { return Err(conflict); }
+        let mut source = blocks(file)?;
+        let mut pending: std::collections::VecDeque<Batch> = std::collections::VecDeque::new();
+        let mut failed = false;
+        let stream = std::iter::from_fn(|| loop {
+            if failed { return None; }
+            if let Some(b) = pending.pop_front() {
+                if let Some(conflict) = b.conflict { failed = true; return Some(Err(conflict)); }
                 for e in b.examples { if metric.examples.len() < 5 { metric.examples.push(e); } }
                 statistics.add(&b.kept_ids, &b.kept_xyz);
                 metric.input += b.input;
@@ -1436,34 +1464,50 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
                 offset += b.input as i64;
                 new_points.extend(b.points);
                 new_values.extend_from_slice(&b.values);
-                batches.push(Ok(b.out));
+                return Some(Ok(b.out));
             }
+            let block = match source.next()? {
+                Ok(block) => block,
+                Err(e) => { failed = true; return Some(Err(e)); }
+            };
+            let pieces: Vec<&[u8]> = block.raw_bytes().chunks(MAX_BATCH_POINTS as usize * record_len).collect();
+            let base_offset = offset;
+            pending.extend(pool.install(|| {
+                use rayon::prelude::*;
+                pieces.par_iter().enumerate().map(|(n, c)| process(c, base_offset + (n as i64) * MAX_BATCH_POINTS as i64)).collect::<Vec<Batch>>()
+            }));
+        });
+        let output = output_dir.join(file.file_name().unwrap());
+        if let Err(e) = lasio::write_records(&output, &target, stream, true, Some(pool)) {
+            let _ = fs::remove_file(&output);
+            return Err(e);
         }
         timing[0] += t_found.elapsed().as_secs_f64();
-        let output = output_dir.join(file.file_name().unwrap());
-        let t_write = std::time::Instant::now();
-        lasio::write_records(&output, &target, batches, true, Some(pool))?;
-        timing[2] += t_write.elapsed().as_secs_f64();
         let t_build = std::time::Instant::now();
-        let mut set = PointSet::new(RADIUS);
-        tile_offsets.push(survivors.len() as u32);
-        for (p, index, labels) in new_points {
-            survivors.push(p, tile as u32, index);
-            set.push(p, tile as u32, index);
-            survivor_labels.push(labels);
+        let mut set = (PointSet::new(RADIUS), Vec::new());
+        for (p, index, labels) in &new_points {
+            if later[tile].iter().any(|b| inside_xy(p, b)) {
+                set.0.push(*p, tile as u32, *index);
+                set.1.push(*labels);
+            }
         }
-        survivor_values.extend_from_slice(&new_values);
-        set.build();
+        if let Some(parts) = survivors.as_deref_mut() {
+            let xyz: Vec<[f64; 3]> = new_points.iter().map(|p| p.0).collect();
+            let index: Vec<i64> = new_points.iter().map(|p| p.1).collect();
+            let labels: Vec<u64> = new_points.iter().map(|p| p.2 .0).collect();
+            drop(new_points);
+            parts.add(tile as u32, &xyz, &index, &labels, &new_values)?;
+        }
+        set.0.build();
         tile_sets.push(set);
-        timing[3] += t_build.elapsed().as_secs_f64();
+        timing[1] += t_build.elapsed().as_secs_f64();
         outputs.push(output);
         metrics.push(metric);
     }
-    survivors.build();
     if std::env::var_os("SMARTTILE_TIMINGS").is_some() {
-        eprintln!("    dedup: nearest {:.1} s, conflict {:.1} s, write {:.1} s, survivor index {:.1} s", timing[0], timing[1], timing[2], timing[3]);
+        eprintln!("    dedup: nearest + write {:.1} s, survivor index {:.1} s", timing[0], timing[1]);
     }
-    Ok((outputs, survivors, survivor_labels))
+    Ok(outputs)
 }
 
 /// Raw records of a file, chunk by chunk, with a field reader for the instance label.
@@ -1542,8 +1586,8 @@ fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Pat
         let mut scratch = [0u8; 8];
         let mut departing: Departures = Vec::new();
         let mut moved = 0u64;
-        let mut batches = Vec::new();
-        for chunk in chunks(file)? {
+        // Kept records stream into the rewritten tile, chunk by chunk.
+        let batches = chunks(file)?.map(|chunk| -> Res<Vec<u8>> {
             let chunk = chunk?;
             let mut kept = Vec::new();
             let mut parts: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
@@ -1568,10 +1612,13 @@ fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Pat
                 let n = (bytes.len() / chunk.record_len()) as u64;
                 departing.push((owner, bytes, n));
             }
-            batches.push(Ok(kept));
-        }
+            Ok(kept)
+        });
         let temporary = file.with_extension("consolidating.laz");
-        lasio::write_records(&temporary, &target, batches, true, None)?;
+        if let Err(e) = lasio::write_records(&temporary, &target, batches, true, None) {
+            let _ = fs::remove_file(&temporary);
+            return Err(e);
+        }
         fs::rename(&temporary, file).map_err(|e| e.to_string())?;
         Ok((departing, moved))
     }).collect());
@@ -1590,10 +1637,9 @@ fn consolidate(files: &[PathBuf], instance: &str, regions: &[Region], work: &Pat
         let file = &files[owner];
         let target = TileHeader::copy_of(&headers[owner])?;
         let record_len = target.record_length();
-        let mut batches: Vec<Res<Vec<u8>>> = Vec::new();
-        for chunk in chunks(file)? { batches.push(chunk.map(|c| c.raw_bytes().to_vec())); }
         let all: Vec<u8> = parts.concat();
-        for chunk in all.chunks(MAX_BATCH_POINTS as usize * record_len) { batches.push(Ok(chunk.to_vec())); }
+        let batches = chunks(file)?.map(|chunk| chunk.map(|c| c.raw_bytes().to_vec()))
+            .chain(all.chunks(MAX_BATCH_POINTS as usize * record_len).map(|chunk| Ok(chunk.to_vec())));
         let temporary = file.with_extension("consolidating.laz");
         lasio::write_records(&temporary, &target, batches, true, None)?;
         fs::rename(&temporary, file).map_err(|e| e.to_string())
@@ -1619,11 +1665,30 @@ fn process_cpu_seconds() -> f64 {
 fn timed<T>(name: &str, model: &Model, report: &mut Map<String, Value>, f: impl FnOnce() -> Res<T>) -> Res<T> {
     let started = std::time::Instant::now();
     let result = f()?;
+    release_free_memory();
     let seconds = started.elapsed().as_secs_f64();
     println!("{}: {name} finished in {seconds:.3}s", model.name);
+    if std::env::var_os("SMARTTILE_TIMINGS").is_some() { eprintln!("    resident after {name}: {} MiB", resident_mib()); }
     report.entry("phase_seconds").or_insert_with(|| Value::Object(Map::new())).as_object_mut().unwrap()
         .insert(name.into(), crate::pyfmt::float(seconds));
     Ok(result)
+}
+
+/// Hands freed heap pages back to the system after a stage (glibc keeps them per thread arena),
+/// so the resident size follows the live data.
+pub fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" { fn malloc_trim(pad: usize) -> i32; }
+        // SAFETY: glibc's malloc_trim only releases free memory and takes no pointers.
+        unsafe { malloc_trim(0); }
+    }
+}
+
+/// The process's resident anonymous memory (`RssAnon`), for the timing log.
+pub fn resident_mib() -> u64 {
+    fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find(|l| l.starts_with("RssAnon:"))
+        .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())).unwrap_or(0) / 1024
 }
 
 fn write_json(path: &Path, value: &Value) -> Res<()> {
@@ -1909,7 +1974,10 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     if params.matching { set_parallelism(report, "reconciliation_processes", serde_json::json!(qw.min(n))); }
     let mut reconciliation = ReconcileReport::default();
     let mapping = timed("reconciliation", &model, report, || {
-        let index = build_index(&current, &model, &origin, 0.05)?;
+        // A match needs a point inside an overlap with a later tile.
+        let later = later_overlaps(&overlaps);
+        let keep = |tile: usize, p: &[f64; 3]| later[tile].iter().any(|b| inside_xy(p, b));
+        let index = build_index_where(&current, &model, &origin, 0.05, Some(&keep), None)?.0;
         reconcile(&model, &current, &index, &origin, &counts, params.overlap_threshold, 0.05, &overlaps,
                   (!admitted.is_empty()).then_some(&normal_keys), &pool, &mut reconciliation, params.matching)
     })?;
@@ -1939,7 +2007,7 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
         report.insert("shared_point_ownership".into(), Value::Null);
         set_parallelism(report, "shared_point_ownership_processes", serde_json::json!(qw.min(n)));
         let stage = timed("shared_point_ownership", &model, report, || {
-            let index = build_index(&files, &model, &origin, 0.01)?;
+            let index = overlap_index(&files, &model, &origin, &overlaps)?;
             assign_shared_points(&model, &files, &index, &regions, &mapping, &resolved, &origin, &overlaps, false, &pool)
         })?;
         let (next, tiles): (Vec<PathBuf>, Vec<SharedTile>) = stage.into_iter().unzip();
@@ -1950,7 +2018,7 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
             report.insert("tree_background_ownership".into(), Value::Null);
             set_parallelism(report, "tree_background_ownership_processes", serde_json::json!(qw.min(n)));
             let stage = timed("tree_background_ownership", &model, report, || {
-                let index = build_index(&files, &model, &origin, 0.01)?;
+                let index = overlap_index(&files, &model, &origin, &overlaps)?;
                 assign_shared_points(&model, &files, &index, &regions, &mapping, &priority, &origin, &overlaps, true, &pool)
             })?;
             let (next, tiles): (Vec<PathBuf>, Vec<SharedTile>) = stage.into_iter().unzip();
@@ -1966,13 +2034,21 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
         && lasio::read_header(file).map(|h| h.point_count > 2 * MAX_BATCH_POINTS).unwrap_or(false)).map(|(t, _)| t).collect();
     set_parallelism(report, "deduplication_parallel_tiles", serde_json::json!(parallel_tiles));
     let mut dedup = Vec::new();
-    let mut survivor_values = Vec::new();
-    let (final_files, survivors, survivor_labels) = timed("deduplication", &model, report, || {
+    // The survivors serve the recovered-geometry check and the originals (when kept), as one
+    // part per tile indexed at the originals' radius (instance as label, model values as rows).
+    let keep_survivors = params.originals.is_some() || !admitted.is_empty();
+    let survivor_width: usize = model.dimensions.iter().map(|d| if d.name == model.instance { instance_scalar(ids.len() as u64).size() } else { d.size() }).sum();
+    let mut survivors = crate::parts::Parts::new(&scratch.join("survivors").join(suffix), params.remap_tolerance.unwrap_or(3f64.sqrt() * params.resolution_1),
+                                                 survivor_width, true)?;
+    let final_files = timed("deduplication", &model, report, || {
         let t_index = std::time::Instant::now();
-        let (stage_index, semantics) = build_index_with_semantic(&files, &model, &origin, 0.01)?;
+        // Only points inside an overlap with a later tile can be a candidate.
+        let later = later_overlaps(&overlaps);
+        let keep = |tile: usize, p: &[f64; 3]| later[tile].iter().any(|b| inside_xy(p, b));
+        let (stage_index, semantics) = build_index_where(&files, &model, &origin, 0.01, Some(&keep), model.semantic.as_deref())?;
         if std::env::var_os("SMARTTILE_TIMINGS").is_some() { eprintln!("    dedup: stage index {:.1} s", t_index.elapsed().as_secs_f64()); }
-        deduplicate(&model, &files, &mapping, &final_dir, &origin, &overlaps, &mut statistics, &regions, &stage_index, &semantics, &pool,
-                    &mut dedup, &mut survivor_values)
+        deduplicate(&model, &files, &mapping, &final_dir, &origin, &overlaps, &mut statistics, &regions, stage_index, semantics, &pool,
+                    &mut dedup, keep_survivors.then_some(&mut survivors))
     })?;
     report.insert("deduplication".into(), serde_json::json!({"radius_m": 0.01,
         "tiles": dedup.iter().enumerate().map(|(tile, t)| serde_json::json!({"tile": tile, "input": t.input, "surviving": t.surviving,
@@ -1981,7 +2057,8 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
         })).collect::<Vec<_>>(), "conflicts": []}));
     // `validate_recovered_geometry`: every claimed core sample of a recovered tree is still supported.
     if !admitted.is_empty() {
-        let (checked, missing, examples) = recovered_support(&admitted, &claims_of(&model, &dense_files, &ownership, &regions, &overlaps, &origin, &admitted)?, &survivors, &survivor_labels);
+        let (checked, missing, examples) = recovered_support(&admitted, &claims_of(&model, &dense_files, &ownership, &regions, &overlaps, &origin, &admitted)?, &survivors)?;
+        survivors.release();
         orphan_json["final_support"] = serde_json::json!({"checked_samples": checked, "missing_samples": missing,
             "missing_examples": examples.iter().map(|(t, i, p)| serde_json::json!({"tile": t, "local_instance": i,
                 "xyz": [f(p[0] + origin[0]), f(p[1] + origin[1]), f(p[2] + origin[2])]})).collect::<Vec<_>>()});
@@ -2049,12 +2126,12 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     manifest.insert("tile_bounds_json".into(), Value::String("tile_bounds.json".into()));
     manifest.insert("tile_bounds_sha256".into(), Value::String(crate::sha256::file_hex(&final_dir.join("tile_bounds.json"))?));
     write_json(&final_dir.join("smarttile_merge.json"), &Value::Object(manifest))?;
-    Ok(ModelOutcome { model, labels, final_dir, dense, final_files, survivors, survivor_values, groups, reassigned, csv })
+    Ok(ModelOutcome { model, labels, final_dir, dense, final_files, survivors: keep_survivors.then_some(survivors), groups, reassigned, csv })
 }
 
 /// What a model's merge leaves for enrichment and publication.
-struct ModelOutcome { model: Model, labels: Vec<String>, final_dir: PathBuf, dense: PathBuf, final_files: Vec<PathBuf>, survivors: PointSet,
-                      survivor_values: Vec<u8>, groups: u64, reassigned: BTreeMap<u64, u64>, csv: String }
+struct ModelOutcome { model: Model, labels: Vec<String>, final_dir: PathBuf, dense: PathBuf, final_files: Vec<PathBuf>,
+                      survivors: Option<crate::parts::Parts>, groups: u64, reassigned: BTreeMap<u64, u64>, csv: String }
 
 pub fn run(params: &MergeParams) -> Res<()> {
     let started = std::time::Instant::now();
@@ -2114,10 +2191,11 @@ pub fn run(params: &MergeParams) -> Res<()> {
         // `enrich_originals` on every model's final survivors, measured against its dense baseline.
         let mut originals_stage = None;
         if let Some(originals) = &params.originals {
+            if std::env::var_os("SMARTTILE_TIMINGS").is_some() { eprintln!("    resident before originals: {} MiB", resident_mib()); }
             let radius = original_radius;
             let mut collections = Vec::new();
             let mut baselines = Vec::new();
-            for o in outcomes.iter_mut() {
+            for (i, o) in outcomes.iter_mut().enumerate() {
                 let mut dimensions = o.model.dimensions.clone();
                 for d in dimensions.iter_mut().filter(|d| d.name == o.model.instance) {
                     d.data_type = instance_scalar(o.groups).extra_bytes_id();
@@ -2126,9 +2204,10 @@ pub fn run(params: &MergeParams) -> Res<()> {
                 }
                 let width = dimensions.iter().map(|d| d.size()).sum();
                 collections.push(crate::remap::Collection { name: o.model.name.clone(), instance: Some(o.model.instance.clone()), dimensions,
-                    set: std::mem::replace(&mut o.survivors, PointSet::new(0.01)), values: std::mem::take(&mut o.survivor_values), width, maximum: o.groups });
-                baselines.push(Some(crate::remap::load_collection(&o.dense, &origin, radius, &o.model.instance)?.set));
+                    parts: o.survivors.take().expect("survivors kept for originals"), width, maximum: o.groups });
+                baselines.push(Some(crate::remap::load_baseline(&o.dense, &origin, radius, &o.model.instance, &scratch.join(format!("baseline_{i:03}")))?));
             }
+            if std::env::var_os("SMARTTILE_TIMINGS").is_some() { eprintln!("    resident with baselines: {} MiB", resident_mib()); }
             let (selected, used) = crate::remap::select_dimensions(&collections, params.target_dims.as_ref(), &[])?;
             let files = crate::remap::original_files(originals)?;
             let stage = scratch.join("originals");

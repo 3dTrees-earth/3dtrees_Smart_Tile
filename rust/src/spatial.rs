@@ -96,21 +96,8 @@ impl PointSet {
 
     /// Bucket the points (ids in insertion order within a cell).
     pub fn build(&mut self) {
-        use rayon::prelude::*;
-        // (cell, id) pairs sorted in place: ids ascend within a cell.
-        let mut keyed: Vec<((i64, i64, i64), u32)> = self.xyz.par_iter().enumerate().map(|(i, p)| (self.key(p), i as u32)).collect();
-        keyed.par_sort_unstable();
-        // Runs of equal cells, in (x, y, z) order.
-        let mut runs: Vec<((i64, i64, i64), u32, u32)> = Vec::new();
-        let mut start = 0;
-        while start < keyed.len() {
-            let key = keyed[start].0;
-            let mut end = start + 1;
-            while end < keyed.len() && keyed[end].0 == key { end += 1; }
-            runs.push((key, start as u32, (end - start) as u32));
-            start = end;
-        }
-        self.order = keyed.into_iter().map(|(_, i)| i).collect();
+        let (runs, order) = self.sorted_runs();
+        self.order = order;
         self.cells = FxMap::default();
         self.grid = None;
         if runs.is_empty() { return; }
@@ -128,6 +115,39 @@ impl PointSet {
             cells.reserve(runs.len());
             for (k, s, l) in runs { cells.insert(k, (s, l)); }
             self.cells = cells;
+        }
+    }
+
+    /// Point ids sorted by (cell, id) and the runs of equal cells, in (x, y, z) order.
+    /// Cell keys are packed into one u64 when their extent allows, halving the sort's memory.
+    fn sorted_runs(&self) -> (Vec<((i64, i64, i64), u32, u32)>, Vec<u32>) {
+        use rayon::prelude::*;
+        let none = || ([i64::MAX; 3], [i64::MIN; 3]);
+        let (lo, hi) = self.xyz.par_iter().map(|p| self.key(p)).fold(none, |(mut lo, mut hi), k| {
+            for (a, v) in [k.0, k.1, k.2].into_iter().enumerate() { lo[a] = lo[a].min(v); hi[a] = hi[a].max(v); }
+            (lo, hi)
+        }).reduce(none, |(a, b), (c, d)| ([a[0].min(c[0]), a[1].min(c[1]), a[2].min(c[2])], [b[0].max(d[0]), b[1].max(d[1]), b[2].max(d[2])]));
+        let bits = |a: usize| if self.xyz.is_empty() { 0 } else { 64 - ((hi[a] - lo[a]) as u64).leading_zeros() };
+        let (bx, by, bz) = (bits(0), bits(1), bits(2));
+        let mut runs: Vec<((i64, i64, i64), u32, u32)> = Vec::new();
+        let mut push = |key: (i64, i64, i64), at: usize| match runs.last_mut() {
+            Some(r) if r.0 == key => r.2 += 1,
+            _ => runs.push((key, at as u32, 1)),
+        };
+        if bx + by + bz < 64 {
+            let pack = |k: (i64, i64, i64)| ((((k.0 - lo[0]) as u64) << by | (k.1 - lo[1]) as u64) << bz) | (k.2 - lo[2]) as u64;
+            let mut keyed: Vec<(u64, u32)> = self.xyz.par_iter().enumerate().map(|(i, p)| (pack(self.key(p)), i as u32)).collect();
+            keyed.par_sort_unstable();
+            let (my, mz) = ((1u64 << by) - 1, (1u64 << bz) - 1);
+            for (at, (k, _)) in keyed.iter().enumerate() {
+                push(((k >> (by + bz)) as i64 + lo[0], ((k >> bz) & my) as i64 + lo[1], (k & mz) as i64 + lo[2]), at);
+            }
+            (runs, keyed.into_iter().map(|(_, i)| i).collect())
+        } else {
+            let mut keyed: Vec<((i64, i64, i64), u32)> = self.xyz.par_iter().enumerate().map(|(i, p)| (self.key(p), i as u32)).collect();
+            keyed.par_sort_unstable();
+            for (at, (k, _)) in keyed.iter().enumerate() { push(*k, at); }
+            (runs, keyed.into_iter().map(|(_, i)| i).collect())
         }
     }
 
@@ -216,22 +236,6 @@ impl PointSet {
         out
     }
 
-    /// `PointIndex.nearest_distances`: the minimum distance within the radius plus the
-    /// group's 8-ULP guard (infinity when none), for baseline coverage.
-    pub fn nearest_distances(&self, queries: &[[f64; 3]], radius: f64) -> Vec<f64> {
-        let mut out = vec![f64::INFINITY; queries.len()];
-        for group in spatial_batches(queries) {
-            let points: Vec<[f64; 3]> = group.iter().map(|&i| queries[i]).collect();
-            let limit = radius + distance_roundoff(&points);
-            for &qi in &group {
-                let mut best = f64::INFINITY;
-                self.within(&queries[qi], limit, |_, d| best = best.min(d));
-                out[qi] = best;
-            }
-        }
-        out
-    }
-
     /// `PointIndex.nearest`: per query, the stored point (id) and distance chosen by the merge rule.
     /// `allowed(id)` filters stored points (tile, labels, overlaps).
     pub fn nearest(&self, queries: &[[f64; 3]], radius: f64, allowed: &dyn Fn(u32) -> bool) -> Vec<Option<(u32, f64)>> {
@@ -257,6 +261,40 @@ impl PointSet {
         }
         out
     }
+}
+
+/// `PointIndex.nearest_distances` over several point sets queried together: the minimum
+/// distance within the radius plus the group's 8-ULP guard (infinity when none), for baseline coverage.
+pub fn nearest_distances_across(sets: &[&PointSet], queries: &[[f64; 3]], radius: f64) -> Vec<f64> {
+    let mut out = vec![f64::INFINITY; queries.len()];
+    for group in spatial_batches(queries) {
+        let points: Vec<[f64; 3]> = group.iter().map(|&i| queries[i]).collect();
+        let limit = radius + distance_roundoff(&points);
+        for &qi in &group {
+            let mut best = f64::INFINITY;
+            for set in sets { set.within(&queries[qi], limit, |_, d| best = best.min(d)); }
+            out[qi] = best;
+        }
+    }
+    out
+}
+
+/// `covered` over several point sets queried together (`allowed` sees the set and point).
+pub fn covered_across(sets: &[&PointSet], queries: &[[f64; 3]], radius: f64, allowed: &dyn Fn(usize, u32) -> bool) -> Vec<bool> {
+    let mut out = vec![false; queries.len()];
+    for group in spatial_batches(queries) {
+        let points: Vec<[f64; 3]> = group.iter().map(|&i| queries[i]).collect();
+        let limit = radius + distance_roundoff(&points);
+        for &qi in &group {
+            let mut found = false;
+            for (s, set) in sets.iter().enumerate() {
+                if found { break; }
+                set.within(&queries[qi], limit, |id, _| if !found && allowed(s, id) { found = true });
+            }
+            out[qi] = found;
+        }
+    }
+    out
 }
 
 /// `nearest_for` over several point sets queried together (e.g. one per tile): candidates from every

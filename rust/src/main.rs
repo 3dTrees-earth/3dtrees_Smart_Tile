@@ -15,6 +15,7 @@ mod overview;
 mod points;
 mod proj;
 mod products;
+mod parts;
 mod pyfmt;
 mod remap;
 mod scan;
