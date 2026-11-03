@@ -420,7 +420,8 @@ fn load_source(path: &Path, model: &Model, origin: &[f64; 3], radius: f64) -> Re
     let layout = PointLayout::of(&header)?;
     let fields: Vec<Layout> = model.dimensions.iter().map(|d| layout.find(&d.name).unwrap().0).collect();
     let width: usize = model.dimensions.iter().map(|d| d.size()).sum();
-    let mut source = Source { set: PointSet::new(radius), values: Vec::new(), width };
+    // The transfer radius spans several 10 cm points: 27 radius-sized cells beat 8 larger ones.
+    let mut source = Source { set: PointSet::with_cell(radius * 1.001), values: Vec::new(), width };
     let mut index = 0i64;
     let mut scratch = [0u8; 8];
     read_records(path, |chunk| {
@@ -464,8 +465,9 @@ fn transfer_tile(model: &Model, n: usize, pair: &Pair, output: &Path, origin: &[
     // 32,768-point batches (`chunk_iterator(MAX_BATCH_POINTS)`), queried
     // GROUP at a time on the worker pool and written in order.
     const GROUP: usize = 32;
-    let transfer = |chunk: &las::PointData| -> (Vec<u8>, u64, u64) {
-        let records: Vec<&[u8]> = chunk.raw_bytes().chunks_exact(chunk.record_len()).collect();
+    let record_len = target_header.record_length as usize;
+    let transfer = |chunk: &[u8]| -> (Vec<u8>, u64, u64) {
+        let records: Vec<&[u8]> = chunk.chunks_exact(record_len).collect();
         let xyz: Vec<[f64; 3]> = records.iter().map(|r| local(r, &target_header, origin)).collect();
         let nearest = source.set.nearest(&xyz, radius, &|_| true);
         let mut out = Vec::with_capacity(records.len() * out_len);
@@ -488,14 +490,12 @@ fn transfer_tile(model: &Model, n: usize, pair: &Pair, output: &Path, origin: &[
     let batches = std::iter::from_fn(|| {
         if pending.is_empty() && failed.is_none() {
             let t = std::time::Instant::now();
-            let mut chunks = Vec::new();
-            while chunks.len() < GROUP {
-                match reader.read_points(MAX_BATCH_POINTS) {
-                    Ok(c) if c.is_empty() => break,
-                    Ok(c) => chunks.push(c),
-                    Err(e) => { failed = Some(e.to_string()); break; }
-                }
-            }
+            // One large read (decompressed in parallel), processed in 32,768-point batches.
+            let block = match reader.read_points(GROUP as u64 * MAX_BATCH_POINTS) {
+                Ok(c) => Some(c),
+                Err(e) => { failed = Some(e.to_string()); None }
+            };
+            let chunks: Vec<&[u8]> = block.as_ref().map(|b| b.raw_bytes().chunks(MAX_BATCH_POINTS as usize * record_len).collect()).unwrap_or_default();
             decode.set(decode.get() + t.elapsed().as_secs_f64());
             let t = std::time::Instant::now();
             let results: Vec<(Vec<u8>, u64, u64)> = pool.install(|| chunks.par_iter().map(|c| transfer(c)).collect());
@@ -590,6 +590,17 @@ fn build_index(files: &[PathBuf], model: &Model, origin: &[f64; 3], radius: f64)
     Ok(index)
 }
 
+/// Large blocks of raw records (32 batches, decompressed in parallel); callers split them
+/// into `MAX_BATCH_POINTS` batches, which keeps `chunk_iterator` boundaries.
+fn blocks(path: &Path) -> Res<impl Iterator<Item = Res<las::PointData>>> {
+    let mut reader = las::Reader::from_path(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(std::iter::from_fn(move || match reader.read_points(32 * MAX_BATCH_POINTS) {
+        Ok(c) if c.is_empty() => None,
+        Ok(c) => Some(Ok(c)),
+        Err(e) => Some(Err(e.to_string())),
+    }))
+}
+
 /// Batches of raw records of a LAS/LAZ file (`chunk_iterator(MAX_BATCH_POINTS)`).
 fn chunks(path: &Path) -> Res<impl Iterator<Item = Res<las::PointData>>> {
     let mut reader = las::Reader::from_path(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -629,13 +640,14 @@ fn filter_tile(model: &Model, file: &Path, region: &Region, output: &Path, origi
     let header = lasio::read_header(file)?;
     let layout = PointLayout::of(&header)?;
     let (label_field, _) = layout.find(&model.instance).unwrap();
-    let mut scratch = [0u8; 8];
-    // Per instance: size, XYZ sum (per batch, then added), box.
-    let mut aggregates: BTreeMap<u64, (u64, [f64; 3], [f64; 3], [f64; 3])> = BTreeMap::new();
-    for chunk in chunks(file)? {
-        let chunk = chunk?;
-        let records: Vec<&[u8]> = chunk.raw_bytes().chunks_exact(chunk.record_len()).collect();
-        let mut batch: BTreeMap<u64, (u64, [f64; 3], [f64; 3], [f64; 3])> = BTreeMap::new();
+    // Per instance: size, XYZ sum (per batch, then added), box. Batches of a block run in parallel.
+    type Aggregate = (u64, [f64; 3], [f64; 3], [f64; 3]);
+    let mut aggregates: BTreeMap<u64, Aggregate> = BTreeMap::new();
+    let record_len = header.record_length as usize;
+    let aggregate = |chunk: &[u8]| -> BTreeMap<u64, Aggregate> {
+        let mut scratch = [0u8; 8];
+        let records: Vec<&[u8]> = chunk.chunks_exact(record_len).collect();
+        let mut batch: BTreeMap<u64, Aggregate> = BTreeMap::new();
         for r in &records {
             let label = label_field.scalar().read_int(label_field.get(r, &mut scratch)) as u64;
             if label == 0 { continue; }
@@ -650,6 +662,12 @@ fn filter_tile(model: &Model, file: &Path, region: &Region, output: &Path, origi
             e.0 += 1;
             for a in 0..3 { e.2[a] = e.2[a].min(p[a]); e.3[a] = e.3[a].max(p[a]); }
         }
+        batch
+    };
+    for block in blocks(file)? {
+        let block = block?;
+        let parts: Vec<BTreeMap<u64, Aggregate>> = block.raw_bytes().par_chunks(MAX_BATCH_POINTS as usize * record_len).map(aggregate).collect();
+      for batch in parts {
         for (label, (n, value, lo, hi)) in batch {
             let e = aggregates.entry(label).or_insert((0, [0.0; 3], [f64::INFINITY; 3], [f64::NEG_INFINITY; 3]));
             let first = e.0 == 0;
@@ -664,6 +682,7 @@ fn filter_tile(model: &Model, file: &Path, region: &Region, output: &Path, origi
                 e.3[a] = e.3[a].max(hi[a]);
             }
         }
+      }
     }
     let mut out = Ownership { removed: Vec::new(), counts: BTreeMap::new(), sizes: aggregates.iter().map(|(k, v)| (*k, v.0)).collect(),
                               background_input: 0, background_removed: 0, input: 0, surviving: 0, decisions: Vec::new() };
@@ -681,24 +700,34 @@ fn filter_tile(model: &Model, file: &Path, region: &Region, output: &Path, origi
     let target = TileHeader::copy_of(&header)?;
     let removed: std::collections::BTreeSet<u64> = out.removed.iter().copied().collect();
     let mut background = (0u64, 0u64);
-    let batches = chunks(file)?.map(|chunk| chunk.map(|chunk| {
-        let mut kept = Vec::new();
+    let keep_chunk = |chunk: &[u8]| -> (Vec<u8>, u64, u64) {
+        let (mut kept, mut seen, mut dropped) = (Vec::new(), 0u64, 0u64);
         let mut scratch = [0u8; 8];
-        for r in chunk.raw_bytes().chunks_exact(chunk.record_len()) {
+        for r in chunk.chunks_exact(record_len) {
             let label = label_field.scalar().read_int(label_field.get(r, &mut scratch)) as u64;
             let keep = if label == 0 {
                 let p = local(r, &header, origin);
-                background.0 += 1;
+                seen += 1;
                 let keep = owned_background(p[0] + origin[0], p[1] + origin[1], region);
-                if !keep { background.1 += 1; }
+                if !keep { dropped += 1; }
                 keep
             } else {
                 !removed.contains(&label)
             };
             if keep { kept.extend_from_slice(r); }
         }
-        kept
-    }));
+        (kept, seen, dropped)
+    };
+    let mut batches: Vec<Res<Vec<u8>>> = Vec::new();
+    for block in blocks(file)? {
+        let block = block?;
+        let parts: Vec<(Vec<u8>, u64, u64)> = block.raw_bytes().par_chunks(MAX_BATCH_POINTS as usize * record_len).map(keep_chunk).collect();
+        for (kept, seen, dropped) in parts {
+            background.0 += seen;
+            background.1 += dropped;
+            batches.push(Ok(kept));
+        }
+    }
     out.surviving = lasio::write_records(output, &target, batches, false, None)?;
     out.input = header.point_count;
     out.background_input = background.0;
@@ -1263,120 +1292,123 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
         let mut metric = DedupTile { input: 0, surviving: 0, examples: Vec::new() };
         let mut new_points: Vec<([f64; 3], i64, (u64, u64))> = Vec::new();
         let mut new_values: Vec<u8> = Vec::new();
-        let mut scratch = [0u8; 8];
         let mut batches = Vec::new();
-        for chunk in chunks(file)? {
-            let chunk = chunk?;
-            let records: Vec<&[u8]> = chunk.raw_bytes().chunks_exact(chunk.record_len()).collect();
+        // `survivors.nearest(before_tile=tile, overlaps=overlaps[tile])`: only earlier tiles overlapping
+        // this one can hold a duplicate. Within a tile the batches are independent (survivors join
+        // after the tile), so they run in parallel and are merged in order.
+        let earlier: Vec<usize> = (0..tile).filter(|t| bounds.contains_key(t)).collect();
+        let sets: Vec<&PointSet> = earlier.iter().map(|&t| &tile_sets[t]).collect();
+        let set_offsets: Vec<u32> = earlier.iter().map(|&t| tile_offsets[t]).collect();
+        let allowed = |s: usize, id: u32, q: &[f64; 3]| {
+            let b = &bounds[&earlier[s]];
+            inside_xy(&sets[s].xyz[id as usize], b) && inside_xy(q, b)
+        };
+        let record_len = header.record_length as usize;
+        struct Batch { out: Vec<u8>, kept_ids: Vec<u64>, kept_xyz: Vec<[f64; 3]>, points: Vec<([f64; 3], i64, (u64, u64))>, values: Vec<u8>,
+                       examples: Vec<(i64, u32, i64, f64)>, input: u64, conflict: Option<String> }
+        let process = |chunk: &[u8], offset: i64| -> Batch {
+            let mut scratch = [0u8; 8];
+            let records: Vec<&[u8]> = chunk.chunks_exact(record_len).collect();
             let xyz: Vec<[f64; 3]> = records.iter().map(|r| local(r, &header, origin)).collect();
             let labels: Vec<(u64, u64)> = records.iter().map(|r| {
                 let l = instance_field.scalar().read_int(instance_field.get(r, &mut scratch)) as u64;
                 let s = semantic_field.map(|f| f.scalar().read_int(f.get(r, &mut scratch)) as u64).unwrap_or(0);
                 (if l == 0 { 0 } else { mapping[&(tile, l)] }, s)
             }).collect();
-            // `survivors.nearest(before_tile=tile, overlaps=overlaps[tile])`
-            // Only earlier tiles overlapping this one can hold a duplicate.
-            let earlier: Vec<usize> = (0..tile).filter(|t| bounds.contains_key(t)).collect();
-            let sets: Vec<&PointSet> = earlier.iter().map(|&t| &tile_sets[t]).collect();
-            let set_offsets: Vec<u32> = earlier.iter().map(|&t| tile_offsets[t]).collect();
-            let allowed = |s: usize, id: u32, q: &[f64; 3]| {
-                let b = &bounds[&earlier[s]];
-                inside_xy(&sets[s].xyz[id as usize], b) && inside_xy(q, b)
-            };
-            let t_found = std::time::Instant::now();
-            let found = pool.install(|| {
-                use rayon::prelude::*;
-                let groups = crate::spatial::spatial_batches(&xyz);
-                let results: Vec<Vec<(usize, Option<(u32, f64)>)>> = groups.par_iter().map(|g| {
-                    // A group with no point inside an earlier overlap has no candidates.
-                    if !g.iter().any(|&i| earlier.iter().any(|t| inside_xy(&xyz[i], &bounds[t]))) {
-                        return g.iter().map(|&i| (i, None)).collect();
-                    }
-                    let pts: Vec<[f64; 3]> = g.iter().map(|&i| xyz[i]).collect();
-                    let near = crate::spatial::nearest_across(&sets, &pts, RADIUS, &allowed);
-                    g.iter().copied().zip(near.into_iter().map(|n| n.map(|(s, id, d)| (set_offsets[s] + id, d)))).collect()
-                }).collect();
-                let mut found = vec![None; xyz.len()];
-                for r in results.into_iter().flatten() { found[r.0] = r.1; }
-                found
-            });
+            let groups = crate::spatial::spatial_batches(&xyz);
+            let mut found: Vec<Option<(u32, f64)>> = vec![None; xyz.len()];
+            for g in &groups {
+                // A group with no point inside an earlier overlap has no candidates.
+                if !g.iter().any(|&i| earlier.iter().any(|t| inside_xy(&xyz[i], &bounds[t]))) { continue; }
+                let pts: Vec<[f64; 3]> = g.iter().map(|&i| xyz[i]).collect();
+                let near = crate::spatial::nearest_across(&sets, &pts, RADIUS, &allowed);
+                for (&i, n) in g.iter().zip(near) { found[i] = n.map(|(s, id, d)| (set_offsets[s] + id, d)); }
+            }
             // `conflicting_match`: no earlier tile's record within 1 cm may carry other labels,
             // except background semantics and two trees each owning its own location.
-            timing[0] += t_found.elapsed().as_secs_f64();
-            let t_conflict = std::time::Instant::now();
-            let conflict = pool.install(|| {
-                use rayon::prelude::*;
-                crate::spatial::spatial_batches(&xyz).par_iter().find_map_any(|g| {
-                    let pts: Vec<[f64; 3]> = g.iter().map(|&i| xyz[i]).collect();
-                    let limit = RADIUS + crate::spatial::distance_roundoff(&pts);
-                    for (k, &i) in g.iter().enumerate() {
-                        let q = &pts[k];
-                        if !bounds.iter().any(|(t, b)| *t < tile && inside_xy(q, b)) { continue; }
-                        let mut best: BTreeMap<(usize, (u64, u64)), (f64, u32)> = BTreeMap::new();
-                        stage_index.set.within_pub(q, limit, |id, d| {
-                            let t = stage_index.set.tile[id as usize] as usize;
-                            if t >= tile { return; }
-                            let Some(b) = bounds.get(&t) else { return };
-                            if !inside_xy(q, b) || !inside_xy(&stage_index.set.xyz[id as usize], b) { return; }
-                            let raw = stage_index.labels[id as usize];
-                            let label = (if raw == 0 { 0 } else { mapping[&(t, raw)] }, stage_semantics[id as usize]);
-                            let e = best.entry((t, label)).or_insert((f64::INFINITY, id));
-                            if d < e.0 { *e = (d, id); }
-                        });
-                        for ((t, label), (_, id)) in best {
-                            let mut disagrees = labels[i] != label;
-                            if label.0 == 0 { disagrees &= labels[i].0 != 0; }
-                            let other_pt = &stage_index.set.xyz[id as usize];
-                            let separate = preferred_core(q, tile, t, regions, origin) && preferred_core(other_pt, t, tile, regions, origin);
-                            disagrees &= !(labels[i].0 > 0 && label.0 > 0 && separate);
-                            if disagrees {
-                                return Some(format!("Unresolved cross-tile label conflict: tile {tile} point {} labels {:?} vs tile {t} labels {label:?}",
-                                                    offset + i as i64, labels[i]));
-                            }
+            let conflict = groups.iter().find_map(|g| {
+                let pts: Vec<[f64; 3]> = g.iter().map(|&i| xyz[i]).collect();
+                let limit = RADIUS + crate::spatial::distance_roundoff(&pts);
+                for (k, &i) in g.iter().enumerate() {
+                    let q = &pts[k];
+                    if !bounds.iter().any(|(t, b)| *t < tile && inside_xy(q, b)) { continue; }
+                    let mut best: BTreeMap<(usize, (u64, u64)), (f64, u32)> = BTreeMap::new();
+                    stage_index.set.within_pub(q, limit, |id, d| {
+                        let t = stage_index.set.tile[id as usize] as usize;
+                        if t >= tile { return; }
+                        let Some(b) = bounds.get(&t) else { return };
+                        if !inside_xy(q, b) || !inside_xy(&stage_index.set.xyz[id as usize], b) { return; }
+                        let raw = stage_index.labels[id as usize];
+                        let label = (if raw == 0 { 0 } else { mapping[&(t, raw)] }, stage_semantics[id as usize]);
+                        let e = best.entry((t, label)).or_insert((f64::INFINITY, id));
+                        if d < e.0 { *e = (d, id); }
+                    });
+                    for ((t, label), (_, id)) in best {
+                        let mut disagrees = labels[i] != label;
+                        if label.0 == 0 { disagrees &= labels[i].0 != 0; }
+                        let other_pt = &stage_index.set.xyz[id as usize];
+                        let separate = preferred_core(q, tile, t, regions, origin) && preferred_core(other_pt, t, tile, regions, origin);
+                        disagrees &= !(labels[i].0 > 0 && label.0 > 0 && separate);
+                        if disagrees {
+                            return Some(format!("Unresolved cross-tile label conflict: tile {tile} point {} labels {:?} vs tile {t} labels {label:?}",
+                                                offset + i as i64, labels[i]));
                         }
                     }
-                    None
-                })
+                }
+                None
             });
-            timing[1] += t_conflict.elapsed().as_secs_f64();
-            if let Some(conflict) = conflict {
-                return Err(conflict);
-            }
-            let mut out = Vec::with_capacity(records.len() * out_len);
-            let mut kept_ids = Vec::new();
-            let mut kept_xyz = Vec::new();
+            let mut b = Batch { out: Vec::with_capacity(records.len() * out_len), kept_ids: Vec::new(), kept_xyz: Vec::new(), points: Vec::new(),
+                                values: Vec::new(), examples: Vec::new(), input: records.len() as u64, conflict };
             for (k, r) in records.iter().enumerate() {
                 let duplicate = found[k].is_some_and(|(id, _)| survivor_labels[id as usize] == labels[k]);
                 if duplicate {
-                    if metric.examples.len() < 5 {
+                    if b.examples.len() < 5 {
                         let (id, d) = found[k].unwrap();
-                        metric.examples.push((offset + k as i64, survivors.tile[id as usize], survivors.index[id as usize], d));
+                        b.examples.push((offset + k as i64, survivors.tile[id as usize], survivors.index[id as usize], d));
                     }
                     continue;
                 }
-                let start = out.len();
-                out.extend_from_slice(&r[..base]);
-                for (o, size) in &kept { out.extend_from_slice(&r[*o..o + size]); }
-                out.resize(start + out_len, 0);
+                let start = b.out.len();
+                b.out.extend_from_slice(&r[..base]);
+                for (o, size) in &kept { b.out.extend_from_slice(&r[*o..o + size]); }
+                b.out.resize(start + out_len, 0);
                 for (j, (src, dst)) in source_fields.iter().zip(&out_layout).enumerate() {
                     if model.dimensions[j].name == model.instance {
-                        dst.set(&mut out[start..], &labels[k].0.to_le_bytes());
+                        dst.set(&mut b.out[start..], &labels[k].0.to_le_bytes());
                     } else {
                         let v = src.get(r, &mut scratch).to_vec();
-                        dst.set(&mut out[start..], &v);
+                        dst.set(&mut b.out[start..], &v);
                     }
                 }
-                new_points.push((xyz[k], offset + k as i64, labels[k]));
-                new_values.extend_from_slice(&out[start + base + kept_width..start + out_len]);
-                kept_ids.push(labels[k].0);
-                kept_xyz.push(xyz[k]);
+                b.points.push((xyz[k], offset + k as i64, labels[k]));
+                b.values.extend_from_slice(&b.out[start + base + kept_width..start + out_len]);
+                b.kept_ids.push(labels[k].0);
+                b.kept_xyz.push(xyz[k]);
             }
-            statistics.add(&kept_ids, &kept_xyz);
-            metric.input += records.len() as u64;
-            metric.surviving += kept_ids.len() as u64;
-            offset += records.len() as i64;
-            batches.push(Ok(out));
+            b
+        };
+        let t_found = std::time::Instant::now();
+        for block in blocks(file)? {
+            let block = block?;
+            let pieces: Vec<&[u8]> = block.raw_bytes().chunks(MAX_BATCH_POINTS as usize * record_len).collect();
+            let base_offset = offset;
+            let results: Vec<Batch> = pool.install(|| {
+                use rayon::prelude::*;
+                pieces.par_iter().enumerate().map(|(n, c)| process(c, base_offset + (n as i64) * MAX_BATCH_POINTS as i64)).collect()
+            });
+            for b in results {
+                if let Some(conflict) = b.conflict { return Err(conflict); }
+                for e in b.examples { if metric.examples.len() < 5 { metric.examples.push(e); } }
+                statistics.add(&b.kept_ids, &b.kept_xyz);
+                metric.input += b.input;
+                metric.surviving += b.kept_ids.len() as u64;
+                offset += b.input as i64;
+                new_points.extend(b.points);
+                new_values.extend_from_slice(&b.values);
+                batches.push(Ok(b.out));
+            }
         }
+        timing[0] += t_found.elapsed().as_secs_f64();
         let output = output_dir.join(file.file_name().unwrap());
         let t_write = std::time::Instant::now();
         lasio::write_records(&output, &target, batches, true, Some(pool))?;

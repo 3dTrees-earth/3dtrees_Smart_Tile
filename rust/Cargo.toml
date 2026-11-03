@@ -11,7 +11,7 @@ name = "smarttile"
 path = "src/main.rs"
 
 [dependencies]
-las = { version = "0.11", features = ["laz"] }
+las = { version = "0.11", features = ["laz-parallel"] }
 laz = { version = "0.13", features = ["parallel"] }
 libloading = "0.9"
 rayon = "1.12"

@@ -76,7 +76,12 @@ impl PointSet {
     /// `radius`: the query radius. Cells are slightly more than twice as large, so a query
     /// within the radius (plus the 8-ULP guard) touches only the 2×2×2 cells around it.
     pub fn new(radius: f64) -> PointSet {
-        PointSet { xyz: Vec::new(), tile: Vec::new(), index: Vec::new(), cell: radius * 2.004, cells: FxMap::default(), order: Vec::new(), grid: None }
+        PointSet::with_cell(radius * 2.004)
+    }
+
+    /// An explicit cell edge (queries farther than half of it search all cells within reach).
+    pub fn with_cell(cell: f64) -> PointSet {
+        PointSet { xyz: Vec::new(), tile: Vec::new(), index: Vec::new(), cell, cells: FxMap::default(), order: Vec::new(), grid: None }
     }
 
     fn key(&self, p: &[f64; 3]) -> (i64, i64, i64) {
