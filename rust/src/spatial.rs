@@ -68,10 +68,10 @@ pub struct PointSet {
 }
 
 impl PointSet {
-    /// `radius`: the query radius; cells are slightly larger so the 8-ULP
-    /// guard never reaches beyond the neighbouring cells.
+    /// `radius`: the query radius. Cells are slightly more than twice as large, so a query
+    /// within the radius (plus the 8-ULP guard) touches only the 2×2×2 cells around it.
     pub fn new(radius: f64) -> PointSet {
-        PointSet { xyz: Vec::new(), tile: Vec::new(), index: Vec::new(), cell: radius * 1.001, cells: FxMap::default(), order: Vec::new() }
+        PointSet { xyz: Vec::new(), tile: Vec::new(), index: Vec::new(), cell: radius * 2.004, cells: FxMap::default(), order: Vec::new() }
     }
 
     fn key(&self, p: &[f64; 3]) -> (i64, i64, i64) {
@@ -118,8 +118,26 @@ impl PointSet {
     }
 
     fn within(&self, q: &[f64; 3], limit: f64, mut f: impl FnMut(u32, f64)) {
-        let reach = (limit / self.cell).ceil() as i64;
         let (cx, cy, cz) = self.key(q);
+        if limit < self.cell * 0.5 {
+            // Only the neighbour on the query's side of each axis can hold a point within `limit`.
+            let side = |v: f64, c: i64| if v / self.cell - (c as f64) < 0.5 { -1 } else { 1 };
+            let (sx, sy, sz) = (side(q[0], cx), side(q[1], cy), side(q[2], cz));
+            for dx in [0, sx] {
+                for dy in [0, sy] {
+                    for dz in [0, sz] {
+                        for &id in self.ids(&(cx + dx, cy + dy, cz + dz)) {
+                            let d = distance(q, &self.xyz[id as usize]);
+                            if d <= limit {
+                                f(id, d);
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        let reach = (limit / self.cell).ceil() as i64;
         for dx in -reach..=reach {
             for dy in -reach..=reach {
                 for dz in -reach..=reach {
