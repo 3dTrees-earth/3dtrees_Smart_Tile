@@ -192,22 +192,29 @@ fn run() -> Result<(), String> {
 }
 
 fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
-    let known = ["task", "subsampled-segmented-folder", "subsampled-10cm-folder", "subsampled-target-folder", "tile-bounds-json",
+    let known = ["task", "subsampled-segmented-folder", "subsampled-10cm-folder", "segmented-folders", "subsampled-target-folder", "tile-bounds-json",
                  "output-folder", "output-dir", "workers", "number-of-threads", "prediction-transfer-tolerance", "instance-dimension", "stop-after", "overlap-threshold",
                  "original-laz-input-dir", "original-input-dir", "original-laz-output-dir", "collection-dir",
                  "transfer-original-dims-to-merged", "no-transfer-original-dims-to-merged",
-                 "reassign-small-instances", "no-reassign-small-instances", "max-cluster-size", "max-volume-for-merge"];
+                 "reassign-small-instances", "no-reassign-small-instances", "skip-merged-file", "no-skip-merged-file", "max-cluster-size", "max-volume-for-merge"];
     let unknown: Vec<&String> = args.keys().filter(|k| !known.contains(&k.as_str()) && !PRODUCT_FLAGS.contains(&k.as_str())).collect();
     if !unknown.is_empty() {
         return Err(format!("Unknown or not yet ported merge argument(s): {}", unknown.iter().map(|k| format!("--{k}")).collect::<Vec<_>>().join(" ")));
     }
-    let segmented = args.get("subsampled-segmented-folder").or(args.get("subsampled-10cm-folder")).map(PathBuf::from)
-        .ok_or("--subsampled-segmented-folder is required (other merge input modes are not ported yet)")?;
+    let collections: Vec<PathBuf> = match (args.get("subsampled-segmented-folder").or(args.get("subsampled-10cm-folder")), args.get("segmented-folders")) {
+        (Some(one), None) => vec![PathBuf::from(one)],
+        (None, Some(many)) => many.split(',').map(str::trim).filter(|s| !s.is_empty()).map(PathBuf::from).collect(),
+        _ => return Err("provide exactly one segmented input mode".into()),
+    };
+    let segmented = collections[0].clone();
+    if args.get("segmented-folders").is_some() && !args.contains_key("subsampled-target-folder") {
+        return Err("merge of ready predictions (--segmented-folders without --subsampled-target-folder) is not ported yet".into());
+    }
     let target = args.get("subsampled-target-folder").map(PathBuf::from).unwrap_or_else(|| segmented.parent().unwrap().join("subsampled_res1"));
     let workers = number(args, "workers")?.or(number(args, "number-of-threads")?).map(|w| w as usize).unwrap_or_else(allocated_cpus);
     let params = merge::MergeParams {
         work: args.get("output-folder").or(args.get("output-dir")).map(PathBuf::from).unwrap_or_else(|| segmented.parent().unwrap().to_path_buf()),
-        segmented,
+        collections,
         target,
         tile_bounds_json: args.get("tile-bounds-json").map(PathBuf::from).ok_or("--tile-bounds-json is required")?,
         workers: workers.min(allocated_cpus()),
@@ -218,6 +225,7 @@ fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
         overlap_threshold: number(args, "overlap-threshold")?.unwrap_or(0.3),
         originals: args.get("original-laz-input-dir").or(args.get("original-input-dir")).map(PathBuf::from),
         original_output: args.get("original-laz-output-dir").map(PathBuf::from),
+        skip_merged_file: flag(args, "skip-merged-file"),
         small_instances: if flag(args, "reassign-small-instances") {
             let size = number(args, "max-cluster-size")?.unwrap_or(3000.0);
             let volume = number(args, "max-volume-for-merge")?.unwrap_or(4.0);

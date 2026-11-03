@@ -21,7 +21,8 @@ use crate::spatial::PointSet;
 pub const MAX_BATCH_POINTS: u64 = 32_768;
 
 pub struct MergeParams {
-    pub segmented: PathBuf,
+    /// One or more prediction collections (`--segmented-folders` or the single segmented folder).
+    pub collections: Vec<PathBuf>,
     pub target: PathBuf,
     pub tile_bounds_json: PathBuf,
     pub work: PathBuf,
@@ -34,6 +35,8 @@ pub struct MergeParams {
     /// Raw originals to enrich in the same run, and where the enriched copies go.
     pub originals: Option<PathBuf>,
     pub original_output: Option<PathBuf>,
+    /// `--skip-merged-file`: no `merged_tiles.laz` (never written for several collections).
+    pub skip_merged_file: bool,
     /// `--reassign-small-instances`: (max cluster size, max bounding-box volume in m³).
     pub small_instances: Option<(u64, f64)>,
     /// Development: stop after this stage (only "dense" is ported).
@@ -1455,30 +1458,23 @@ fn available_destination(path: &Path) -> Res<()> {
     Ok(())
 }
 
-pub fn run(params: &MergeParams) -> Res<()> {
-    let started = std::time::Instant::now();
-    let layout: Value = serde_json::from_str(&fs::read_to_string(&params.tile_bounds_json).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let output_tiles = params.work.join("output_tiles");
-    let baseline_output = params.work.join("output_tiles_unfiltered_1cm");
-    let merged_output = params.work.join("merged_tiles.laz");
-    let merged_metadata = params.work.join("merged_tiles_instance_metadata.csv");
-    for path in [&output_tiles, &baseline_output, &merged_output] {
-        available_destination(path)?;
-    }
-    let files = crate::tile::point_cloud_files(&params.segmented)?;
+/// One model's merge (`merge_collections` loop body): dense transfer through consolidation and
+/// the metadata beside its final tiles, under `scratch/<stage>/<suffix>`. Fills `report` as it goes.
+#[allow(clippy::too_many_arguments)]
+fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &Value, origin: [f64; 3], scratch: &Path,
+               pool: &rayon::ThreadPool, report: &mut Map<String, Value>) -> Res<ModelOutcome> {
+    let files = crate::tile::point_cloud_files(collection)?;
     if files.is_empty() {
-        return Err(format!("No predictions in {}", params.segmented.display()));
+        return Err(format!("No predictions in {}", collection.display()));
     }
     let headers = files.iter().map(|f| lasio::read_header(f)).collect::<Res<Vec<_>>>()?;
-    let origin = headers[0].offsets;
-    let model = describe_model(&files, &headers, &params.segmented, &params.instance_dimension)?;
-    let (pairs, labels) = pairs(&params.segmented, &params.target, &layout)?;
+    let model = describe_model(&files, &headers, collection, &params.instance_dimension)?;
+    let (pairs, labels) = pairs(collection, &params.target, layout)?;
     let qw = params.workers.max(1);
     let n = pairs.len();
     let f = crate::pyfmt::float;
-    let mut report = Map::new();
     report.insert("model".into(), Value::String(model.name.clone()));
-    report.insert("source".into(), Value::String(params.segmented.display().to_string()));
+    report.insert("source".into(), Value::String(collection.display().to_string()));
     report.insert("instance_dimension".into(), Value::String(model.instance.clone()));
     report.insert("semantic_dimension".into(), model.semantic.clone().map(Value::String).unwrap_or(Value::Null));
     report.insert("tile_sources".into(), Value::Array(pairs.iter().enumerate().map(|(n, p)| serde_json::json!({
@@ -1492,6 +1488,246 @@ pub fn run(params: &MergeParams) -> Res<()> {
     parallelism.insert("dense_query_processes".into(), serde_json::json!(shares));
     report.insert("parallelism".into(), Value::Object(parallelism));
     report.insert("transfer".into(), Value::Null);
+    let dense = scratch.join("dense").join(suffix);
+    fs::create_dir_all(&dense).map_err(|e| e.to_string())?;
+    let dense_files: Vec<PathBuf> = (0..pairs.len()).map(|n| dense.join(format!("tile_{n:05}.laz"))).collect();
+    let transferred = timed("dense_transfer_and_index", &model, report, || {
+        let results: Vec<Res<(u64, u64)>> = pool.install(|| pairs.par_iter().enumerate()
+            .map(|(n, p)| transfer_tile(&model, n, p, &dense, &origin, params.transfer_radius, &pool)).collect());
+        results.into_iter().collect::<Res<Vec<_>>>()
+    })?;
+    report.insert("transfer".into(), Value::Array(pairs.iter().zip(&transferred).enumerate().map(|(n, (p, (total, matched)))| serde_json::json!({
+        "source": p.prediction.display().to_string(), "target": p.target.display().to_string(), "tile": n,
+        "total": total, "matched": matched, "missing_examples": [], "radius_m": f(params.transfer_radius)})).collect()));
+    let regions = regions(&pairs, layout);
+    let overlaps = tile_overlaps(&pairs, layout, &origin);
+    let owned = scratch.join("owned").join(suffix);
+    fs::create_dir_all(&owned).map_err(|e| e.to_string())?;
+    let owned_files: Vec<PathBuf> = (0..pairs.len()).map(|n| owned.join(format!("tile_{n:05}.laz"))).collect();
+    report.insert("instance_ownership".into(), Value::Null);
+    set_parallelism(report, "core_filter_processes", serde_json::json!(qw.min(n)));
+    let ownership = timed("core_filter_and_index", &model, report, || {
+        let results: Vec<Res<Ownership>> = pool.install(|| (0..pairs.len()).into_par_iter()
+            .map(|n| filter_tile(&model, &dense_files[n], &regions[n], &owned_files[n], &origin)).collect());
+        results.into_iter().collect::<Res<Vec<_>>>()
+    })?;
+    // `instance_ownership`: provisional decisions per tile; recovery revises them below.
+    let mut tiles_json: Vec<Map<String, Value>> = ownership.iter().enumerate().map(|(tile, o)| {
+        let mut m = regions[tile].json();
+        let prediction = pairs[tile].prediction.display().to_string();
+        let removed = o.decisions.iter().filter(|d| !d.kept).count();
+        for (k, v) in [("tile", serde_json::json!(tile)), ("input", serde_json::json!(o.input)), ("surviving", serde_json::json!(o.surviving)),
+                       ("removed", serde_json::json!(o.input - o.surviving)), ("background_input", serde_json::json!(o.background_input)),
+                       ("background_removed", serde_json::json!(o.background_removed)), ("kept_instances", serde_json::json!(o.decisions.len() - removed)),
+                       ("removed_instances", serde_json::json!(removed))] {
+            m.insert(k.into(), v);
+        }
+        m.insert("instances".into(), Value::Array(o.decisions.iter().map(|d| serde_json::json!({
+            "instance": d.instance, "points": d.points, "anchor_xy": [f(d.anchor[0]), f(d.anchor[1])], "anchor_xyz": d.anchor.map(f),
+            "bbox_xyz": [d.lower.map(f), d.upper.map(f)], "source_prediction": prediction, "normal_kept": d.kept, "kept": d.kept,
+            "disposition": if d.kept { "normal_owner" } else { "rejected_buffer" }})).collect()));
+        m
+    }).collect();
+    report.insert("orphan_recovery".into(), Value::Null);
+    let recovered = scratch.join("recovered").join(suffix);
+    let mut orphan = OrphanReport::default();
+    let (admitted, current, revised) = timed("orphan_recovery", &model, report, || {
+        let started = std::time::Instant::now();
+        let owned_index = build_index(&owned_files, &model, &origin, 0.01)?;
+        let admitted = orphan_recovery(&model, &dense_files, &ownership, &owned_index, &regions, &overlaps, &origin, &mut orphan)?;
+        fs::create_dir_all(&recovered).map_err(|e| e.to_string())?;
+        let mut by_tile: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
+        for (tile, id) in &admitted { by_tile.entry(*tile).or_default().push(*id); }
+        let mut revised = BTreeMap::new();
+        for (tile, ids) in &by_tile {
+            let rejected: std::collections::BTreeSet<u64> = ownership[*tile].removed.iter().copied().filter(|r| !ids.contains(r)).collect();
+            revised.insert(*tile, rewrite_recovered(&model, &dense_files[*tile], &rejected, &regions[*tile], &recovered.join(format!("tile_{tile:05}.laz")), &origin)?);
+        }
+        let current: Vec<PathBuf> = (0..pairs.len()).map(|n| if by_tile.contains_key(&n) { recovered.join(format!("tile_{n:05}.laz")) } else { owned_files[n].clone() }).collect();
+        let _ = started;
+        Ok((admitted, current, revised))
+    })?;
+    for (tile, id) in &admitted {
+        let m = &mut tiles_json[*tile];
+        if let Some(d) = m["instances"].as_array_mut().unwrap().iter_mut().find(|d| d["instance"] == serde_json::json!(id)) {
+            d["kept"] = Value::Bool(true);
+            d["disposition"] = Value::String("recovered_orphan".into());
+            d.as_object_mut().unwrap().insert("recovered".into(), Value::Bool(true));
+        }
+    }
+    for (tile, count) in &revised {
+        let ids: Vec<u64> = { let mut v: Vec<u64> = admitted.iter().filter(|(t, _)| t == tile).map(|(_, i)| *i).collect(); v.sort(); v };
+        let m = &mut tiles_json[*tile];
+        let input = m["input"].as_u64().unwrap();
+        m["surviving"] = serde_json::json!(count);
+        m["removed"] = serde_json::json!(input - count);
+        m["kept_instances"] = serde_json::json!(m["kept_instances"].as_u64().unwrap() + ids.len() as u64);
+        m["removed_instances"] = serde_json::json!(m["removed_instances"].as_u64().unwrap() - ids.len() as u64);
+        m.insert("recovered_instances".into(), serde_json::json!(ids));
+    }
+    report.insert("instance_ownership".into(), serde_json::json!({"anchor": "centroid", "geometry": "remapped_1cm",
+        "background": "spatial core owner; half-open east/north edges", "semantics": "preserve per-point values from owning tile",
+        "boundary": "inclusive core; outer edges retained", "tiles": tiles_json}));
+    let mut orphan_json = serde_json::json!({
+        "policy": "whole rejected instance only for unsupported positive core geometry", "support_radius_m": 0.01,
+        "tie_break": "descending new distinct XYZ core samples, then source tile and local ID",
+        "candidates": orphan.candidates, "uncovered_locations": orphan.uncovered,
+        "admitted": orphan.admitted.iter().map(|(t, i, score)| serde_json::json!({"tile": t, "local_instance": i, "new_locations": score,
+            "source": pairs[*t].prediction.display().to_string()})).collect::<Vec<_>>(),
+        "final_support": if admitted.is_empty() { "no recovery needed" } else { "pending" },
+        "claim_seconds": 0.0, "selection_checked_locations": orphan.checked, "selection_seconds": 0.0});
+    report.insert("orphan_recovery".into(), orphan_json.clone());
+    let mut counts: BTreeMap<(usize, u64), u64> = BTreeMap::new();
+    for (tile, o) in ownership.iter().enumerate() { for (id, n) in &o.counts { counts.insert((tile, *id), *n); } }
+    let normal_keys: std::collections::BTreeSet<(usize, u64)> = counts.keys().copied().collect();
+    for (tile, id) in &admitted { counts.insert((*tile, *id), ownership[*tile].sizes[id]); }
+    report.insert("reconciliation".into(), Value::Null);
+    set_parallelism(report, "reconciliation_processes", serde_json::json!(qw.min(n)));
+    let mut reconciliation = ReconcileReport::default();
+    let mapping = timed("reconciliation", &model, report, || {
+        let index = build_index(&current, &model, &origin, 0.05)?;
+        reconcile(&model, &current, &index, &origin, &counts, params.overlap_threshold, 0.05, &overlaps,
+                  (!admitted.is_empty()).then_some(&normal_keys), &pool, &mut reconciliation)
+    })?;
+    let ids: std::collections::BTreeSet<u64> = mapping.values().copied().collect();
+    let pair = |e: &(usize, u64, usize, u64, u64)| serde_json::json!({"tiles": [e.0, e.2], "instances": [e.1, e.3], "matches": e.4});
+    let c = reconciliation.counters;
+    report.insert("reconciliation".into(), serde_json::json!({"radius_m": 0.05, "overlap_threshold": f(params.overlap_threshold),
+        "groups": ids.len(), "accepted_pairs": reconciliation.accepted.iter().map(pair).collect::<Vec<_>>(),
+        "rejected_recovery_bridge_count": reconciliation.bridge_count,
+        "rejected_recovery_bridges": reconciliation.bridges.iter().map(|e| { let mut v = pair(e); v["reason"] = "distinct retained groups".into(); v }).collect::<Vec<_>>(),
+        "ids": mapping.iter().map(|((t, l), id)| serde_json::json!([t, l, id])).collect::<Vec<_>>(),
+        "files_read": c[0], "points_read": c[1], "query_points": c[2], "skipped_query_points": c[3]}));
+    report.insert("semantic_ownership".into(), serde_json::json!({
+        "policy": "preserve every member's unique points; shared points use nearest-core tile ownership",
+        "scope": "per point, including members of the same reconciled instance", "tie_break": "stable source tile filename order"}));
+    let shared_json = |background_only: bool, tiles: &[SharedTile]| serde_json::json!({
+        "radius_m": 0.01,
+        "policy": if background_only { "retained tree wins over background, preserving its attributes" }
+                  else { "all retained tree claims, including merged members: nearest claimant core in XY" },
+        "tie_break": "stable source tile filename order", "boundary": "closed tree cores; preserve unshared buffer points",
+        "tiles": tiles.iter().enumerate().map(|(tile, t)| serde_json::json!({"tile": tile, "removed": t.removed,
+            "removal_examples": t.examples.iter().map(|(p, o, r, d)| serde_json::json!({"point": p, "owner": [o, r], "distance_m": f(*d)})).collect::<Vec<_>>(),
+            "query_points": t.query_points, "query_blocks": t.query_blocks})).collect::<Vec<_>>()});
+    let mut files = current;
+    if files.len() > 1 {
+        let resolved = scratch.join("resolved").join(suffix);
+        report.insert("shared_point_ownership".into(), Value::Null);
+        set_parallelism(report, "shared_point_ownership_processes", serde_json::json!(qw.min(n)));
+        let stage = timed("shared_point_ownership", &model, report, || {
+            let index = build_index(&files, &model, &origin, 0.01)?;
+            assign_shared_points(&model, &files, &index, &regions, &mapping, &resolved, &origin, &overlaps, false, &pool)
+        })?;
+        let (next, tiles): (Vec<PathBuf>, Vec<SharedTile>) = stage.into_iter().unzip();
+        report.insert("shared_point_ownership".into(), shared_json(false, &tiles));
+        files = next;
+        if ownership.iter().any(|o| o.background_input > o.background_removed) {
+            let priority = scratch.join("tree_priority").join(suffix);
+            report.insert("tree_background_ownership".into(), Value::Null);
+            set_parallelism(report, "tree_background_ownership_processes", serde_json::json!(qw.min(n)));
+            let stage = timed("tree_background_ownership", &model, report, || {
+                let index = build_index(&files, &model, &origin, 0.01)?;
+                assign_shared_points(&model, &files, &index, &regions, &mapping, &priority, &origin, &overlaps, true, &pool)
+            })?;
+            let (next, tiles): (Vec<PathBuf>, Vec<SharedTile>) = stage.into_iter().unzip();
+            report.insert("tree_background_ownership".into(), shared_json(true, &tiles));
+            files = next;
+        }
+    }
+    let final_dir = scratch.join("final").join(suffix);
+    let mut statistics = Statistics::default();
+    report.insert("deduplication".into(), Value::Null);
+    set_parallelism(report, "deduplication_query_processes", serde_json::json!(qw));
+    let parallel_tiles: Vec<usize> = files.iter().enumerate().filter(|(tile, file)| qw > 1 && *tile > 0
+        && lasio::read_header(file).map(|h| h.point_count > 2 * MAX_BATCH_POINTS).unwrap_or(false)).map(|(t, _)| t).collect();
+    set_parallelism(report, "deduplication_parallel_tiles", serde_json::json!(parallel_tiles));
+    let mut dedup = Vec::new();
+    let mut survivor_values = Vec::new();
+    let (final_files, survivors, survivor_labels) = timed("deduplication", &model, report, || {
+        let (stage_index, semantics) = build_index_with_semantic(&files, &model, &origin, 0.01)?;
+        deduplicate(&model, &files, &mapping, &final_dir, &origin, &overlaps, &mut statistics, &regions, &stage_index, &semantics, &pool,
+                    &mut dedup, &mut survivor_values)
+    })?;
+    report.insert("deduplication".into(), serde_json::json!({"radius_m": 0.01,
+        "tiles": dedup.iter().enumerate().map(|(tile, t)| serde_json::json!({"tile": tile, "input": t.input, "surviving": t.surviving,
+            "removed": t.input - t.surviving,
+            "removal_examples": t.examples.iter().map(|(p, st, si, d)| serde_json::json!({"point": p, "survivor": [st, si], "distance_m": f(*d)})).collect::<Vec<_>>()
+        })).collect::<Vec<_>>(), "conflicts": []}));
+    // `validate_recovered_geometry`: every claimed core sample of a recovered tree is still supported.
+    if !admitted.is_empty() {
+        let (checked, missing, examples) = recovered_support(&admitted, &claims_of(&model, &dense_files, &ownership, &regions, &overlaps, &origin, &admitted)?, &survivors, &survivor_labels);
+        orphan_json["final_support"] = serde_json::json!({"checked_samples": checked, "missing_samples": missing,
+            "missing_examples": examples.iter().map(|(t, i, p)| serde_json::json!({"tile": t, "local_instance": i,
+                "xyz": [f(p[0] + origin[0]), f(p[1] + origin[1]), f(p[2] + origin[2])]})).collect::<Vec<_>>()});
+        report.insert("orphan_recovery".into(), orphan_json.clone());
+        if missing > 0 {
+            return Err(format!("{}: recovered tree geometry lost after ownership and deduplication: {missing}/{checked} core samples unsupported; see orphan_recovery.final_support in report", model.name));
+        }
+    }
+    let groups = ids.len() as u64;
+    let mut reassigned: BTreeMap<u64, u64> = BTreeMap::new();
+    if let Some((max_cluster_size, max_volume)) = params.small_instances {
+        report.insert("small_instance_reassignment".into(), Value::Null);
+        let (plan, mut stage) = timed("small_instance_reassignment", &model, report, || {
+            let (plan, mut stage) = plan_reassignment(&statistics, max_cluster_size, max_volume);
+            if !plan.is_empty() {
+                stage.insert("relabeled_points_per_tile".into(), serde_json::json!(relabel_tiles(&final_files, &model.instance, &plan)?));
+            }
+            Ok((plan, stage))
+        })?;
+        report.insert("small_instance_reassignment".into(), Value::Object(std::mem::take(&mut stage)));
+        reassigned = plan;
+    }
+    let final_ids: std::collections::BTreeSet<u64> = ids.iter().map(|i| *reassigned.get(i).unwrap_or(i)).collect();
+    let added: std::collections::BTreeSet<u64> = reassigned.values().copied().collect();
+    report.insert("instance_consolidation".into(), Value::Null);
+    let (split, moved, per_owner) = timed("instance_consolidation", &model, report, || consolidate(&final_files, &model.instance, &regions, &scratch.join("consolidation").join(suffix)))?;
+    report.insert("instance_consolidation".into(), serde_json::json!({
+        "policy": "each positive instance in exactly one tile: owner core holds its XY centroid, else most points (ties: lowest tile); points are moved, never dropped",
+        "split_instances": split, "moved_points": moved,
+        "moved_points_per_owner": per_owner.iter().map(|(k, v)| (k.clone(), serde_json::json!(v))).collect::<Map<_, _>>()}));
+    // Final metadata beside the tiles.
+    let csv: String = std::iter::once("PredInstance,has_added_clusters\r\n".replace("PredInstance", &model.instance))
+        .chain(final_ids.iter().map(|id| format!("{id},{}\r\n", u8::from(added.contains(id))))).collect();
+    fs::write(final_dir.join("instance_metadata.csv"), &csv).map_err(|e| e.to_string())?;
+    let summary_name = format!("{}_summary.json", model.instance);
+    write_json(&final_dir.join(&summary_name), &summary_document(&model, &statistics, &origin, 0.01, &reassigned, params.small_instances.is_some()))?;
+    write_json(&final_dir.join("tile_bounds.json"), layout)?;
+    let mut manifest = Map::new();
+    manifest.insert("contract".into(), Value::String("3DT-2183/v8-group-geometry".into()));
+    manifest.insert("model".into(), Value::String(model.name.clone()));
+    manifest.insert("resolution_1_m".into(), crate::pyfmt::float(0.01));
+    let baseline = if suffix.is_empty() { "../output_tiles_unfiltered_1cm".to_string() } else { format!("../../output_tiles_unfiltered_1cm/{suffix}") };
+    manifest.insert("baseline".into(), Value::String(baseline));
+    manifest.insert("instance_summary".into(), Value::String(summary_name));
+    manifest.insert("tile_bounds_json".into(), Value::String("tile_bounds.json".into()));
+    manifest.insert("tile_bounds_sha256".into(), Value::String(crate::sha256::file_hex(&final_dir.join("tile_bounds.json"))?));
+    write_json(&final_dir.join("smarttile_merge.json"), &Value::Object(manifest))?;
+    Ok(ModelOutcome { model, labels, final_dir, dense, final_files, survivors, survivor_values, groups, reassigned, csv })
+}
+
+/// What a model's merge leaves for enrichment and publication.
+struct ModelOutcome { model: Model, labels: Vec<String>, final_dir: PathBuf, dense: PathBuf, final_files: Vec<PathBuf>, survivors: PointSet,
+                      survivor_values: Vec<u8>, groups: u64, reassigned: BTreeMap<u64, u64>, csv: String }
+
+pub fn run(params: &MergeParams) -> Res<()> {
+    let started = std::time::Instant::now();
+    let layout: Value = serde_json::from_str(&fs::read_to_string(&params.tile_bounds_json).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let output_tiles = params.work.join("output_tiles");
+    let baseline_output = params.work.join("output_tiles_unfiltered_1cm");
+    let single = params.collections.len() == 1;
+    let merged_output = (single && !params.skip_merged_file).then(|| params.work.join("merged_tiles.laz"));
+    let merged_metadata = params.work.join("merged_tiles_instance_metadata.csv");
+    for path in [Some(&output_tiles), Some(&baseline_output), merged_output.as_ref()].into_iter().flatten() {
+        available_destination(path)?;
+    }
+    let first = crate::tile::point_cloud_files(&params.collections[0])?;
+    if first.is_empty() {
+        return Err(format!("No predictions in {}", params.collections[0].display()));
+    }
+    let origin = lasio::read_header(&first[0])?.offsets;
+    let qw = params.workers.max(1);
+    let f = crate::pyfmt::float;
     let scratch = params.work.join(format!(".remap-first-{}", std::process::id()));
     let mut checksums = Map::new();
     let original_output = params.originals.as_ref().map(|_| params.original_output.clone().unwrap_or_else(|| params.work.join("original_with_predictions")));
@@ -1508,285 +1744,82 @@ pub fn run(params: &MergeParams) -> Res<()> {
         "parallelism": {"requested_workers": params.requested_workers, "query_workers": qw,
                         "scope": "bounded spatial queries; small batches run serially"},
         "origin": origin.iter().map(|o| f(*o)).collect::<Vec<_>>()});
+    let mut model_reports: Vec<Map<String, Value>> = Vec::new();
     let top = &mut top_report;
     let result = (|| -> Res<()> {
-        let dense = scratch.join("dense");
-        fs::create_dir_all(&dense).map_err(|e| e.to_string())?;
         let pool = rayon::ThreadPoolBuilder::new().num_threads(params.workers.max(1)).build().map_err(|e| e.to_string())?;
-        let dense_files: Vec<PathBuf> = (0..pairs.len()).map(|n| dense.join(format!("tile_{n:05}.laz"))).collect();
-        let transferred = timed("dense_transfer_and_index", &model, &mut report, || {
-            let results: Vec<Res<(u64, u64)>> = pool.install(|| pairs.par_iter().enumerate()
-                .map(|(n, p)| transfer_tile(&model, n, p, &dense, &origin, params.transfer_radius, &pool)).collect());
-            results.into_iter().collect::<Res<Vec<_>>>()
-        })?;
-        report.insert("transfer".into(), Value::Array(pairs.iter().zip(&transferred).enumerate().map(|(n, (p, (total, matched)))| serde_json::json!({
-            "source": p.prediction.display().to_string(), "target": p.target.display().to_string(), "tile": n,
-            "total": total, "matched": matched, "missing_examples": [], "radius_m": f(params.transfer_radius)})).collect()));
-        let regions = regions(&pairs, &layout);
-        let overlaps = tile_overlaps(&pairs, &layout, &origin);
-        let owned = scratch.join("owned");
-        fs::create_dir_all(&owned).map_err(|e| e.to_string())?;
-        let owned_files: Vec<PathBuf> = (0..pairs.len()).map(|n| owned.join(format!("tile_{n:05}.laz"))).collect();
-        report.insert("instance_ownership".into(), Value::Null);
-        set_parallelism(&mut report, "core_filter_processes", serde_json::json!(qw.min(n)));
-        let ownership = timed("core_filter_and_index", &model, &mut report, || {
-            let results: Vec<Res<Ownership>> = pool.install(|| (0..pairs.len()).into_par_iter()
-                .map(|n| filter_tile(&model, &dense_files[n], &regions[n], &owned_files[n], &origin)).collect());
-            results.into_iter().collect::<Res<Vec<_>>>()
-        })?;
-        // `instance_ownership`: provisional decisions per tile; recovery revises them below.
-        let mut tiles_json: Vec<Map<String, Value>> = ownership.iter().enumerate().map(|(tile, o)| {
-            let mut m = regions[tile].json();
-            let prediction = pairs[tile].prediction.display().to_string();
-            let removed = o.decisions.iter().filter(|d| !d.kept).count();
-            for (k, v) in [("tile", serde_json::json!(tile)), ("input", serde_json::json!(o.input)), ("surviving", serde_json::json!(o.surviving)),
-                           ("removed", serde_json::json!(o.input - o.surviving)), ("background_input", serde_json::json!(o.background_input)),
-                           ("background_removed", serde_json::json!(o.background_removed)), ("kept_instances", serde_json::json!(o.decisions.len() - removed)),
-                           ("removed_instances", serde_json::json!(removed))] {
-                m.insert(k.into(), v);
-            }
-            m.insert("instances".into(), Value::Array(o.decisions.iter().map(|d| serde_json::json!({
-                "instance": d.instance, "points": d.points, "anchor_xy": [f(d.anchor[0]), f(d.anchor[1])], "anchor_xyz": d.anchor.map(f),
-                "bbox_xyz": [d.lower.map(f), d.upper.map(f)], "source_prediction": prediction, "normal_kept": d.kept, "kept": d.kept,
-                "disposition": if d.kept { "normal_owner" } else { "rejected_buffer" }})).collect()));
-            m
-        }).collect();
-        report.insert("orphan_recovery".into(), Value::Null);
-        let recovered = scratch.join("recovered");
-        let mut orphan = OrphanReport::default();
-        let (admitted, current, revised) = timed("orphan_recovery", &model, &mut report, || {
-            let started = std::time::Instant::now();
-            let owned_index = build_index(&owned_files, &model, &origin, 0.01)?;
-            let admitted = orphan_recovery(&model, &dense_files, &ownership, &owned_index, &regions, &overlaps, &origin, &mut orphan)?;
-            fs::create_dir_all(&recovered).map_err(|e| e.to_string())?;
-            let mut by_tile: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
-            for (tile, id) in &admitted { by_tile.entry(*tile).or_default().push(*id); }
-            let mut revised = BTreeMap::new();
-            for (tile, ids) in &by_tile {
-                let rejected: std::collections::BTreeSet<u64> = ownership[*tile].removed.iter().copied().filter(|r| !ids.contains(r)).collect();
-                revised.insert(*tile, rewrite_recovered(&model, &dense_files[*tile], &rejected, &regions[*tile], &recovered.join(format!("tile_{tile:05}.laz")), &origin)?);
-            }
-            let current: Vec<PathBuf> = (0..pairs.len()).map(|n| if by_tile.contains_key(&n) { recovered.join(format!("tile_{n:05}.laz")) } else { owned_files[n].clone() }).collect();
-            let _ = started;
-            Ok((admitted, current, revised))
-        })?;
-        for (tile, id) in &admitted {
-            let m = &mut tiles_json[*tile];
-            if let Some(d) = m["instances"].as_array_mut().unwrap().iter_mut().find(|d| d["instance"] == serde_json::json!(id)) {
-                d["kept"] = Value::Bool(true);
-                d["disposition"] = Value::String("recovered_orphan".into());
-                d.as_object_mut().unwrap().insert("recovered".into(), Value::Bool(true));
-            }
+        let mut outcomes = Vec::new();
+        for (i, collection) in params.collections.iter().enumerate() {
+            let suffix = if single { String::new() } else { format!("model_{i:03}") };
+            model_reports.push(Map::new());
+            let outcome = merge_model(params, collection, &suffix, &layout, origin, &scratch, &pool, model_reports.last_mut().unwrap())?;
+            outcomes.push(outcome);
         }
-        for (tile, count) in &revised {
-            let ids: Vec<u64> = { let mut v: Vec<u64> = admitted.iter().filter(|(t, _)| t == tile).map(|(_, i)| *i).collect(); v.sort(); v };
-            let m = &mut tiles_json[*tile];
-            let input = m["input"].as_u64().unwrap();
-            m["surviving"] = serde_json::json!(count);
-            m["removed"] = serde_json::json!(input - count);
-            m["kept_instances"] = serde_json::json!(m["kept_instances"].as_u64().unwrap() + ids.len() as u64);
-            m["removed_instances"] = serde_json::json!(m["removed_instances"].as_u64().unwrap() - ids.len() as u64);
-            m.insert("recovered_instances".into(), serde_json::json!(ids));
-        }
-        report.insert("instance_ownership".into(), serde_json::json!({"anchor": "centroid", "geometry": "remapped_1cm",
-            "background": "spatial core owner; half-open east/north edges", "semantics": "preserve per-point values from owning tile",
-            "boundary": "inclusive core; outer edges retained", "tiles": tiles_json}));
-        let mut orphan_json = serde_json::json!({
-            "policy": "whole rejected instance only for unsupported positive core geometry", "support_radius_m": 0.01,
-            "tie_break": "descending new distinct XYZ core samples, then source tile and local ID",
-            "candidates": orphan.candidates, "uncovered_locations": orphan.uncovered,
-            "admitted": orphan.admitted.iter().map(|(t, i, score)| serde_json::json!({"tile": t, "local_instance": i, "new_locations": score,
-                "source": pairs[*t].prediction.display().to_string()})).collect::<Vec<_>>(),
-            "final_support": if admitted.is_empty() { "no recovery needed" } else { "pending" },
-            "claim_seconds": 0.0, "selection_checked_locations": orphan.checked, "selection_seconds": 0.0});
-        report.insert("orphan_recovery".into(), orphan_json.clone());
-        let mut counts: BTreeMap<(usize, u64), u64> = BTreeMap::new();
-        for (tile, o) in ownership.iter().enumerate() { for (id, n) in &o.counts { counts.insert((tile, *id), *n); } }
-        let normal_keys: std::collections::BTreeSet<(usize, u64)> = counts.keys().copied().collect();
-        for (tile, id) in &admitted { counts.insert((*tile, *id), ownership[*tile].sizes[id]); }
-        report.insert("reconciliation".into(), Value::Null);
-        set_parallelism(&mut report, "reconciliation_processes", serde_json::json!(qw.min(n)));
-        let mut reconciliation = ReconcileReport::default();
-        let mapping = timed("reconciliation", &model, &mut report, || {
-            let index = build_index(&current, &model, &origin, 0.05)?;
-            reconcile(&model, &current, &index, &origin, &counts, params.overlap_threshold, 0.05, &overlaps,
-                      (!admitted.is_empty()).then_some(&normal_keys), &pool, &mut reconciliation)
-        })?;
-        let ids: std::collections::BTreeSet<u64> = mapping.values().copied().collect();
-        let pair = |e: &(usize, u64, usize, u64, u64)| serde_json::json!({"tiles": [e.0, e.2], "instances": [e.1, e.3], "matches": e.4});
-        let c = reconciliation.counters;
-        report.insert("reconciliation".into(), serde_json::json!({"radius_m": 0.05, "overlap_threshold": f(params.overlap_threshold),
-            "groups": ids.len(), "accepted_pairs": reconciliation.accepted.iter().map(pair).collect::<Vec<_>>(),
-            "rejected_recovery_bridge_count": reconciliation.bridge_count,
-            "rejected_recovery_bridges": reconciliation.bridges.iter().map(|e| { let mut v = pair(e); v["reason"] = "distinct retained groups".into(); v }).collect::<Vec<_>>(),
-            "ids": mapping.iter().map(|((t, l), id)| serde_json::json!([t, l, id])).collect::<Vec<_>>(),
-            "files_read": c[0], "points_read": c[1], "query_points": c[2], "skipped_query_points": c[3]}));
-        report.insert("semantic_ownership".into(), serde_json::json!({
-            "policy": "preserve every member's unique points; shared points use nearest-core tile ownership",
-            "scope": "per point, including members of the same reconciled instance", "tie_break": "stable source tile filename order"}));
-        let shared_json = |background_only: bool, tiles: &[SharedTile]| serde_json::json!({
-            "radius_m": 0.01,
-            "policy": if background_only { "retained tree wins over background, preserving its attributes" }
-                      else { "all retained tree claims, including merged members: nearest claimant core in XY" },
-            "tie_break": "stable source tile filename order", "boundary": "closed tree cores; preserve unshared buffer points",
-            "tiles": tiles.iter().enumerate().map(|(tile, t)| serde_json::json!({"tile": tile, "removed": t.removed,
-                "removal_examples": t.examples.iter().map(|(p, o, r, d)| serde_json::json!({"point": p, "owner": [o, r], "distance_m": f(*d)})).collect::<Vec<_>>(),
-                "query_points": t.query_points, "query_blocks": t.query_blocks})).collect::<Vec<_>>()});
-        let mut files = current;
-        if files.len() > 1 {
-            let resolved = scratch.join("resolved");
-            report.insert("shared_point_ownership".into(), Value::Null);
-            set_parallelism(&mut report, "shared_point_ownership_processes", serde_json::json!(qw.min(n)));
-            let stage = timed("shared_point_ownership", &model, &mut report, || {
-                let index = build_index(&files, &model, &origin, 0.01)?;
-                assign_shared_points(&model, &files, &index, &regions, &mapping, &resolved, &origin, &overlaps, false, &pool)
-            })?;
-            let (next, tiles): (Vec<PathBuf>, Vec<SharedTile>) = stage.into_iter().unzip();
-            report.insert("shared_point_ownership".into(), shared_json(false, &tiles));
-            files = next;
-            if ownership.iter().any(|o| o.background_input > o.background_removed) {
-                let priority = scratch.join("tree_priority");
-                report.insert("tree_background_ownership".into(), Value::Null);
-                set_parallelism(&mut report, "tree_background_ownership_processes", serde_json::json!(qw.min(n)));
-                let stage = timed("tree_background_ownership", &model, &mut report, || {
-                    let index = build_index(&files, &model, &origin, 0.01)?;
-                    assign_shared_points(&model, &files, &index, &regions, &mapping, &priority, &origin, &overlaps, true, &pool)
-                })?;
-                let (next, tiles): (Vec<PathBuf>, Vec<SharedTile>) = stage.into_iter().unzip();
-                report.insert("tree_background_ownership".into(), shared_json(true, &tiles));
-                files = next;
-            }
-        }
-        let final_dir = scratch.join("final");
-        let mut statistics = Statistics::default();
-        report.insert("deduplication".into(), Value::Null);
-        set_parallelism(&mut report, "deduplication_query_processes", serde_json::json!(qw));
-        let parallel_tiles: Vec<usize> = files.iter().enumerate().filter(|(tile, file)| qw > 1 && *tile > 0
-            && lasio::read_header(file).map(|h| h.point_count > 2 * MAX_BATCH_POINTS).unwrap_or(false)).map(|(t, _)| t).collect();
-        set_parallelism(&mut report, "deduplication_parallel_tiles", serde_json::json!(parallel_tiles));
-        let mut dedup = Vec::new();
-        let mut survivor_values = Vec::new();
-        let (final_files, survivors, survivor_labels) = timed("deduplication", &model, &mut report, || {
-            let (stage_index, semantics) = build_index_with_semantic(&files, &model, &origin, 0.01)?;
-            deduplicate(&model, &files, &mapping, &final_dir, &origin, &overlaps, &mut statistics, &regions, &stage_index, &semantics, &pool,
-                        &mut dedup, &mut survivor_values)
-        })?;
-        report.insert("deduplication".into(), serde_json::json!({"radius_m": 0.01,
-            "tiles": dedup.iter().enumerate().map(|(tile, t)| serde_json::json!({"tile": tile, "input": t.input, "surviving": t.surviving,
-                "removed": t.input - t.surviving,
-                "removal_examples": t.examples.iter().map(|(p, st, si, d)| serde_json::json!({"point": p, "survivor": [st, si], "distance_m": f(*d)})).collect::<Vec<_>>()
-            })).collect::<Vec<_>>(), "conflicts": []}));
-        // `validate_recovered_geometry`: every claimed core sample of a recovered tree is still supported.
-        if !admitted.is_empty() {
-            let (checked, missing, examples) = recovered_support(&admitted, &claims_of(&model, &dense_files, &ownership, &regions, &overlaps, &origin, &admitted)?, &survivors, &survivor_labels);
-            orphan_json["final_support"] = serde_json::json!({"checked_samples": checked, "missing_samples": missing,
-                "missing_examples": examples.iter().map(|(t, i, p)| serde_json::json!({"tile": t, "local_instance": i,
-                    "xyz": [f(p[0] + origin[0]), f(p[1] + origin[1]), f(p[2] + origin[2])]})).collect::<Vec<_>>()});
-            report.insert("orphan_recovery".into(), orphan_json.clone());
-            if missing > 0 {
-                return Err(format!("{}: recovered tree geometry lost after ownership and deduplication: {missing}/{checked} core samples unsupported; see orphan_recovery.final_support in report", model.name));
-            }
-        }
-        let groups = ids.len() as u64;
-        let mut reassigned: BTreeMap<u64, u64> = BTreeMap::new();
-        if let Some((max_cluster_size, max_volume)) = params.small_instances {
-            report.insert("small_instance_reassignment".into(), Value::Null);
-            let (plan, mut stage) = timed("small_instance_reassignment", &model, &mut report, || {
-                let (plan, mut stage) = plan_reassignment(&statistics, max_cluster_size, max_volume);
-                if !plan.is_empty() {
-                    stage.insert("relabeled_points_per_tile".into(), serde_json::json!(relabel_tiles(&final_files, &model.instance, &plan)?));
-                }
-                Ok((plan, stage))
-            })?;
-            report.insert("small_instance_reassignment".into(), Value::Object(std::mem::take(&mut stage)));
-            reassigned = plan;
-        }
-        let final_ids: std::collections::BTreeSet<u64> = ids.iter().map(|i| *reassigned.get(i).unwrap_or(i)).collect();
-        let added: std::collections::BTreeSet<u64> = reassigned.values().copied().collect();
-        report.insert("instance_consolidation".into(), Value::Null);
-        let (split, moved, per_owner) = timed("instance_consolidation", &model, &mut report, || consolidate(&final_files, &model.instance, &regions, &scratch.join("consolidation")))?;
-        report.insert("instance_consolidation".into(), serde_json::json!({
-            "policy": "each positive instance in exactly one tile: owner core holds its XY centroid, else most points (ties: lowest tile); points are moved, never dropped",
-            "split_instances": split, "moved_points": moved,
-            "moved_points_per_owner": per_owner.iter().map(|(k, v)| (k.clone(), serde_json::json!(v))).collect::<Map<_, _>>()}));
-        // Final metadata beside the tiles.
-        let csv: String = std::iter::once("PredInstance,has_added_clusters\r\n".replace("PredInstance", &model.instance))
-            .chain(final_ids.iter().map(|id| format!("{id},{}\r\n", u8::from(added.contains(id))))).collect();
-        fs::write(final_dir.join("instance_metadata.csv"), &csv).map_err(|e| e.to_string())?;
-        let summary_name = format!("{}_summary.json", model.instance);
-        write_json(&final_dir.join(&summary_name), &summary_document(&model, &statistics, &origin, 0.01, &reassigned, params.small_instances.is_some()))?;
-        write_json(&final_dir.join("tile_bounds.json"), &layout)?;
-        let mut manifest = Map::new();
-        manifest.insert("contract".into(), Value::String("3DT-2183/v8-group-geometry".into()));
-        manifest.insert("model".into(), Value::String(model.name.clone()));
-        manifest.insert("resolution_1_m".into(), crate::pyfmt::float(0.01));
-        manifest.insert("baseline".into(), Value::String("../output_tiles_unfiltered_1cm".into()));
-        manifest.insert("instance_summary".into(), Value::String(summary_name));
-        manifest.insert("tile_bounds_json".into(), Value::String("tile_bounds.json".into()));
-        manifest.insert("tile_bounds_sha256".into(), Value::String(crate::sha256::file_hex(&final_dir.join("tile_bounds.json"))?));
-        write_json(&final_dir.join("smarttile_merge.json"), &Value::Object(manifest))?;
-        // `enrich_originals` on the final survivors, measured against the dense baseline.
+        // `enrich_originals` on every model's final survivors, measured against its dense baseline.
         let mut originals_stage = None;
         if let Some(originals) = &params.originals {
-            let mut dimensions = model.dimensions.clone();
-            for d in dimensions.iter_mut().filter(|d| d.name == model.instance) {
-                d.data_type = instance_scalar(groups).extra_bytes_id();
-                d.options = 0;
-                d.description = [0; 32];
-            }
-            let width = dimensions.iter().map(|d| d.size()).sum();
-            let collection = crate::remap::Collection { name: model.name.clone(), instance: Some(model.instance.clone()), dimensions,
-                set: survivors, values: std::mem::take(&mut survivor_values), width, maximum: groups };
             let radius = 3f64.sqrt() * 0.01;
-            let baseline = crate::remap::load_collection(&dense, &origin, radius, &model.instance)?.set;
-            let collections = [collection];
+            let mut collections = Vec::new();
+            let mut baselines = Vec::new();
+            for o in outcomes.iter_mut() {
+                let mut dimensions = o.model.dimensions.clone();
+                for d in dimensions.iter_mut().filter(|d| d.name == o.model.instance) {
+                    d.data_type = instance_scalar(o.groups).extra_bytes_id();
+                    d.options = 0;
+                    d.description = [0; 32];
+                }
+                let width = dimensions.iter().map(|d| d.size()).sum();
+                collections.push(crate::remap::Collection { name: o.model.name.clone(), instance: Some(o.model.instance.clone()), dimensions,
+                    set: std::mem::replace(&mut o.survivors, PointSet::new(0.01)), values: std::mem::take(&mut o.survivor_values), width, maximum: o.groups });
+                baselines.push(Some(crate::remap::load_collection(&o.dense, &origin, radius, &o.model.instance)?.set));
+            }
             let (selected, used) = crate::remap::select_dimensions(&collections, None)?;
             let files = crate::remap::original_files(originals)?;
             let stage = scratch.join("originals");
             fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
-            let ids_by_dimension = crate::remap::enrich(&collections, &[Some(baseline)], &selected, &used, &files, &origin, radius, qw, &stage, top)?;
-            let aliases = BTreeMap::from([(model.instance.clone(), reassigned.clone())]);
+            let ids_by_dimension = crate::remap::enrich(&collections, &baselines, &selected, &used, &files, &origin, radius, qw, &stage, top)?;
+            let aliases: BTreeMap<String, BTreeMap<u64, u64>> = outcomes.iter().map(|o| (o.model.instance.clone(), o.reassigned.clone())).collect();
             top["instance_finalization"] = crate::remap::compact(&stage, &ids_by_dimension, &aliases)?;
             originals_stage = Some(stage);
         }
         let merged = scratch.join("merged.laz");
-        merge_file(&final_files, &merged)?;
         let metadata = scratch.join("merged_instance_metadata.csv");
-        fs::write(&metadata, &csv).map_err(|e| e.to_string())?;
+        if merged_output.is_some() {
+            merge_file(&outcomes[0].final_files, &merged)?;
+            fs::write(&metadata, &outcomes[0].csv).map_err(|e| e.to_string())?;
+        }
         // Name the tiles after the layout, then publish.
-        for directory in [&final_dir, &dense] {
-            for (n, label) in labels.iter().enumerate() {
-                fs::rename(directory.join(format!("tile_{n:05}.laz")), directory.join(format!("{label}.laz"))).map_err(|e| e.to_string())?;
+        for (o, report) in outcomes.iter().zip(model_reports.iter_mut()) {
+            for directory in [&o.final_dir, &o.dense] {
+                for (n, label) in o.labels.iter().enumerate() {
+                    fs::rename(directory.join(format!("tile_{n:05}.laz")), directory.join(format!("{label}.laz"))).map_err(|e| e.to_string())?;
+                }
             }
+            report.insert("tile_names".into(), Value::Array(o.labels.iter().map(|l| Value::String(l.clone())).collect()));
         }
-        report.insert("tile_names".into(), Value::Array(labels.iter().map(|l| Value::String(l.clone())).collect()));
         // `checksums`: every LAS/LAZ product (and the metadata file) at its published path.
-        for (source, destination) in [(&final_dir, &output_tiles), (&dense, &baseline_output)] {
-            let mut names: Vec<PathBuf> = fs::read_dir(source).map_err(|e| e.to_string())?.filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.file_name().unwrap().to_string_lossy().contains(".la")).collect();
-            names.sort();
-            for path in names {
-                checksums.insert(destination.join(path.file_name().unwrap()).display().to_string(), Value::String(crate::sha256::file_hex(&path)?));
+        let final_root = scratch.join("final");
+        let dense_root = scratch.join("dense");
+        let mut sources: Vec<(PathBuf, PathBuf)> = vec![(final_root.clone(), output_tiles.clone()), (dense_root.clone(), baseline_output.clone())];
+        if let (Some(stage), Some(destination)) = (&originals_stage, &original_output) { sources.push((stage.clone(), destination.clone())); }
+        for (source, destination) in &sources {
+            for path in laz_files_recursive(source)? {
+                let relative = path.strip_prefix(source).unwrap();
+                checksums.insert(destination.join(relative).display().to_string(), Value::String(crate::sha256::file_hex(&path)?));
             }
         }
-        if let (Some(stage), Some(destination)) = (&originals_stage, &original_output) {
-            let mut names: Vec<PathBuf> = fs::read_dir(stage).map_err(|e| e.to_string())?.filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.file_name().unwrap().to_string_lossy().contains(".la")).collect();
-            names.sort();
-            for path in names {
-                checksums.insert(destination.join(path.file_name().unwrap()).display().to_string(), Value::String(crate::sha256::file_hex(&path)?));
-            }
+        if let Some(out) = &merged_output {
+            checksums.insert(out.display().to_string(), Value::String(crate::sha256::file_hex(&merged)?));
+            checksums.insert(merged_metadata.display().to_string(), Value::String(crate::sha256::file_hex(&metadata)?));
         }
-        checksums.insert(merged_output.display().to_string(), Value::String(crate::sha256::file_hex(&merged)?));
-        checksums.insert(merged_metadata.display().to_string(), Value::String(crate::sha256::file_hex(&metadata)?));
-        let mut products: Vec<(&PathBuf, &PathBuf)> = vec![(&final_dir, &output_tiles), (&dense, &baseline_output), (&merged, &merged_output)];
-        if let (Some(stage), Some(destination)) = (&originals_stage, &original_output) { products.push((stage, destination)); }
-        for (source, destination) in products {
+        let mut products: Vec<(PathBuf, PathBuf)> = sources;
+        if let Some(out) = &merged_output { products.push((merged.clone(), out.clone())); }
+        for (source, destination) in &products {
             if destination.is_dir() { fs::remove_dir(destination).map_err(|e| e.to_string())?; }
             if let Some(parent) = destination.parent() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
             fs::rename(source, destination).map_err(|e| format!("publishing {}: {e}", destination.display()))?;
         }
-        fs::rename(&metadata, &merged_metadata).map_err(|e| e.to_string())?;
+        if merged_output.is_some() { fs::rename(&metadata, &merged_metadata).map_err(|e| e.to_string())?; }
         Ok(())
     })();
     if std::env::var_os("SMARTTILE_KEEP_STAGES").is_none() {
@@ -1796,7 +1829,7 @@ pub fn run(params: &MergeParams) -> Res<()> {
                                                       (Ok(_), None) => "intermediate; final original coverage pending" };
     let mut full = top_report.as_object().unwrap().clone();
     full.insert("state".into(), Value::String(state.into()));
-    full.insert("models".into(), Value::Array(vec![Value::Object(report)]));
+    full.insert("models".into(), Value::Array(model_reports.into_iter().map(Value::Object).collect()));
     if result.is_ok() { full.insert("checksums".into(), Value::Object(checksums)); }
     if let Err(e) = &result { full.insert("error".into(), Value::String(e.clone())); }
     full.insert("wall_seconds".into(), f(started.elapsed().as_secs_f64()));
@@ -1805,4 +1838,18 @@ pub fn run(params: &MergeParams) -> Res<()> {
     result?;
     println!("Merge complete: {state}; report: {}", params.work.join("remap_first_report.json").display());
     Ok(())
+}
+
+/// `sorted(source.rglob("*.la*"))`: LAS/LAZ files below a directory, in path order.
+fn laz_files_recursive(directory: &Path) -> Res<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![directory.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.is_dir() { stack.push(path); } else if path.file_name().unwrap().to_string_lossy().contains(".la") { out.push(path); }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
