@@ -208,7 +208,7 @@ pub fn run(params: &RemapParams) -> Res<()> {
     fs::create_dir_all(&stage_dir).map_err(|e| e.to_string())?;
     let result = enrich(&collections, &baseline_sets, &selected, &used, &originals, &origin, radius, params.workers, &stage_dir, &mut report);
     let outcome = result.and_then(|ids| {
-        report["instance_finalization"] = compact(&stage_dir, &ids)?;
+        report["instance_finalization"] = compact(&stage_dir, &ids, &BTreeMap::new())?;
         let mut names: Vec<PathBuf> = fs::read_dir(&stage_dir).map_err(|e| e.to_string())?.filter_map(|e| e.ok().map(|e| e.path())).collect();
         names.sort();
         let mut checksums = serde_json::Map::new();
@@ -442,7 +442,9 @@ impl Coverage {
 }
 
 /// `compact_originals`: dataset-wide IDs 1..N per instance dimension, uint32, plus the mapping file.
-pub fn compact(dir: &Path, ids_by_dimension: &BTreeMap<String, BTreeMap<String, BTreeSet<u64>>>) -> Res<Value> {
+/// `aliases` ({dimension: {source: target}}, small-instance reassignment) give a source its target's final ID.
+pub fn compact(dir: &Path, ids_by_dimension: &BTreeMap<String, BTreeMap<String, BTreeSet<u64>>>,
+               aliases: &BTreeMap<String, BTreeMap<u64, u64>>) -> Res<Value> {
     if ids_by_dimension.is_empty() {
         return Ok(json!({"mapping": null, "counts": {}}));
     }
@@ -451,9 +453,17 @@ pub fn compact(dir: &Path, ids_by_dimension: &BTreeMap<String, BTreeMap<String, 
     let mut files: BTreeSet<String> = BTreeSet::new();
     for (name, by_file) in ids_by_dimension {
         let sources: BTreeSet<u64> = by_file.values().flatten().copied().filter(|v| *v > 0).collect();
-        let mapping: BTreeMap<u64, u32> = sources.iter().enumerate().map(|(i, s)| (*s, i as u32 + 1)).collect();
-        models.insert(name.clone(), json!({"scope": "dataset", "instance_count": sources.len(),
-            "instances": sources.iter().map(|s| json!({"source_instance_id": s, "instance_id": mapping[s]})).collect::<Vec<_>>()}));
+        let empty = BTreeMap::new();
+        let alias = aliases.get(name).unwrap_or(&empty);
+        let finals: BTreeSet<u64> = sources.iter().map(|s| *alias.get(s).unwrap_or(s)).collect();
+        let rank: BTreeMap<u64, u32> = finals.iter().enumerate().map(|(i, s)| (*s, i as u32 + 1)).collect();
+        let mapping: BTreeMap<u64, u32> = sources.iter().map(|s| (*s, rank[alias.get(s).unwrap_or(s)])).collect();
+        models.insert(name.clone(), json!({"scope": "dataset", "instance_count": finals.len(),
+            "instances": sources.iter().map(|s| {
+                let mut entry = json!({"source_instance_id": s, "instance_id": mapping[s]});
+                if let Some(t) = alias.get(s) { entry["reassigned_to"] = json!(t); }
+                entry
+            }).collect::<Vec<_>>()}));
         files.extend(by_file.keys().cloned());
         mappings.insert(name.clone(), mapping);
     }
@@ -509,7 +519,7 @@ pub fn compact(dir: &Path, ids_by_dimension: &BTreeMap<String, BTreeMap<String, 
     }
     write_json(&dir.join("instance_mapping.json"), &json!({"version": 1, "background": 0, "models": Value::Object(models)}), true)?;
     Ok(json!({"mapping": "instance_mapping.json",
-              "counts": mappings.iter().map(|(k, m)| (k.clone(), json!(m.len()))).collect::<serde_json::Map<_, _>>()}))
+              "counts": mappings.iter().map(|(k, m)| (k.clone(), json!(m.values().max().copied().unwrap_or(0)))).collect::<serde_json::Map<_, _>>()}))
 }
 
 #[cfg(test)]

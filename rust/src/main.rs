@@ -24,7 +24,7 @@ mod tile;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use scan::Format;
@@ -194,8 +194,10 @@ fn run() -> Result<(), String> {
 fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
     let known = ["task", "subsampled-segmented-folder", "subsampled-10cm-folder", "subsampled-target-folder", "tile-bounds-json",
                  "output-folder", "output-dir", "workers", "number-of-threads", "prediction-transfer-tolerance", "instance-dimension", "stop-after", "overlap-threshold",
-                 "original-laz-input-dir", "original-input-dir", "original-laz-output-dir"];
-    let unknown: Vec<&String> = args.keys().filter(|k| !known.contains(&k.as_str())).collect();
+                 "original-laz-input-dir", "original-input-dir", "original-laz-output-dir", "collection-dir",
+                 "transfer-original-dims-to-merged", "no-transfer-original-dims-to-merged",
+                 "reassign-small-instances", "no-reassign-small-instances", "max-cluster-size", "max-volume-for-merge"];
+    let unknown: Vec<&String> = args.keys().filter(|k| !known.contains(&k.as_str()) && !PRODUCT_FLAGS.contains(&k.as_str())).collect();
     if !unknown.is_empty() {
         return Err(format!("Unknown or not yet ported merge argument(s): {}", unknown.iter().map(|k| format!("--{k}")).collect::<Vec<_>>().join(" ")));
     }
@@ -216,6 +218,13 @@ fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
         overlap_threshold: number(args, "overlap-threshold")?.unwrap_or(0.3),
         originals: args.get("original-laz-input-dir").or(args.get("original-input-dir")).map(PathBuf::from),
         original_output: args.get("original-laz-output-dir").map(PathBuf::from),
+        small_instances: if flag(args, "reassign-small-instances") {
+            let size = number(args, "max-cluster-size")?.unwrap_or(3000.0);
+            let volume = number(args, "max-volume-for-merge")?.unwrap_or(4.0);
+            if size < 1.0 || size.fract() != 0.0 { return Err("max_cluster_size must be at least 1".into()); }
+            if !(volume.is_finite() && volume > 0.0) { return Err("max_volume_for_merge must be a finite positive volume".into()); }
+            Some((size as u64, volume))
+        } else { None },
     };
     if let (Some(input), output) = (&params.originals, &params.original_output) {
         if !input.exists() { return Err(format!("LAZ original input directory not found: {}", input.display())); }
@@ -224,13 +233,31 @@ fn run_merge(args: &BTreeMap<String, String>) -> Result<(), String> {
             return Err("--original-laz-output-dir/--output-dir must differ from --original-laz-input-dir.".into());
         }
     }
-    merge::run(&params)
+    if number(args, "resolution-1")?.is_some_and(|r| r != 0.01) {
+        return Err("merge with --resolution-1 other than 0.01 is not ported yet".into());
+    }
+    let collection_dir = args.get("collection-dir").map(PathBuf::from);
+    if let Some(dir) = &collection_dir { collections::check(dir, &params.work)?; }
+    if flag(args, "transfer-original-dims-to-merged") { product_settings(args)?; }
+    merge::run(&params)?;
+    let original_output = params.original_output.clone().unwrap_or_else(|| params.work.join("original_with_predictions"));
+    let made = if params.originals.is_some() { prod_merged_after(args, &original_output, &params.work, params.workers)? } else { Vec::new() };
+    if let Some(dir) = &collection_dir {
+        let mut published = vec![("merged_tiles".to_string(), collections::files(&params.work.join("output_tiles"), &[".laz"]))];
+        if params.originals.is_some() {
+            published.push(("originals_with_predictions".to_string(), collections::files(&original_output, &[".laz", ".las"])));
+        }
+        published.extend(products::collections(&made)?);
+        collections::publish(dir, &published, &[])?;
+    }
+    Ok(())
 }
 
 fn run_remap(args: &BTreeMap<String, String>) -> Result<(), String> {
     let known = ["task", "segmented-folders", "original-laz-input-dir", "original-input-dir", "original-laz-output-dir", "output-dir",
-                 "workers", "number-of-threads", "remap-dims", "instance-dimension"];
-    let unknown: Vec<&String> = args.keys().filter(|k| !known.contains(&k.as_str())).collect();
+                 "workers", "number-of-threads", "remap-dims", "instance-dimension", "collection-dir",
+                 "transfer-original-dims-to-merged", "no-transfer-original-dims-to-merged"];
+    let unknown: Vec<&String> = args.keys().filter(|k| !known.contains(&k.as_str()) && !PRODUCT_FLAGS.contains(&k.as_str())).collect();
     if !unknown.is_empty() {
         return Err(format!("Unknown or not yet ported remap argument(s): {}", unknown.iter().map(|k| format!("--{k}")).collect::<Vec<_>>().join(" ")));
     }
@@ -241,10 +268,70 @@ fn run_remap(args: &BTreeMap<String, String>) -> Result<(), String> {
     let output = args.get("original-laz-output-dir").or(args.get("output-dir")).map(PathBuf::from)
         .unwrap_or_else(|| originals.parent().unwrap().join("original_with_predictions"));
     let workers = number(args, "workers")?.or(number(args, "number-of-threads")?).map(|w| w as usize).unwrap_or_else(allocated_cpus);
+    let root = output.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let collection_dir = args.get("collection-dir").map(PathBuf::from);
+    if let Some(dir) = &collection_dir { collections::check(dir, &root)?; }
+    if flag(args, "transfer-original-dims-to-merged") { product_settings(args)?; }
+    if number(args, "resolution-1")?.is_some_and(|r| r != 0.01) {
+        return Err("remap with --resolution-1 other than 0.01 is not ported yet".into());
+    }
     remap::run(&remap::RemapParams {
-        collections, originals, output, workers: workers.min(allocated_cpus()), requested_workers: workers,
+        collections, originals, output: output.clone(), workers: workers.min(allocated_cpus()), requested_workers: workers,
         instance_dimension: args.get("instance-dimension").cloned().unwrap_or_else(|| "PredInstance".into()),
         target_dims: args.get("remap-dims").map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()),
+    })?;
+    let made = prod_merged_after(args, &output, &root, workers.min(allocated_cpus()))?;
+    if let Some(dir) = &collection_dir {
+        let mut published = vec![("originals_with_predictions".to_string(), collections::files(&output, &[".laz", ".las"]))];
+        published.extend(products::collections(&made)?);
+        collections::publish(dir, &published, &[])?;
+    }
+    Ok(())
+}
+
+/// The create_merged_file product options (also used by `--transfer-original-dims-to-merged`).
+struct ProductSettings { resolutions: Vec<(String, f64)>, formats: Vec<String>, original_point_index: bool, staged_copc_dir: Option<PathBuf> }
+
+const PRODUCT_FLAGS: [&str; 7] = ["merged-resolutions", "merged-output-formats", "resolution-1", "resolution-2", "original-point-index",
+                                  "no-original-point-index", "staged-copc-dir"];
+
+fn product_settings(args: &BTreeMap<String, String>) -> Result<ProductSettings, String> {
+    let resolutions = products::parse_resolutions(args.get("merged-resolutions").map(String::as_str).unwrap_or("res1,res2"),
+                                                  number(args, "resolution-1")?.unwrap_or(0.01), number(args, "resolution-2")?.unwrap_or(0.1))?;
+    let mut formats: Vec<String> = Vec::new();
+    for token in args.get("merged-output-formats").map(String::as_str).unwrap_or("copc.laz").trim_matches(['[', ']']).split(',') {
+        let token = token.trim().trim_matches(['\'', '"']).to_lowercase();
+        if token.is_empty() { continue; }
+        let format = match token.as_str() {
+            "las" | "laz" | ".laz" => "laz",
+            "copc" | "copc_laz" | "copc-laz" | "copc.laz" | ".copc.laz" => "copc.laz",
+            "ply" | ".ply" => "ply",
+            _ => return Err(format!("Unsupported merged output format '{token}'. Use laz, copc.laz, or ply.")),
+        };
+        if !formats.iter().any(|f| f == format) { formats.push(format.into()); }
+    }
+    if formats.is_empty() {
+        return Err("No merged output formats selected".into());
+    }
+    let original_point_index = !args.contains_key("no-original-point-index")
+        && args.get("original-point-index").map(|v| !matches!(v.to_lowercase().as_str(), "false" | "0" | "no")).unwrap_or(true);
+    Ok(ProductSettings { resolutions, formats, original_point_index, staged_copc_dir: args.get("staged-copc-dir").map(PathBuf::from) })
+}
+
+fn flag(args: &BTreeMap<String, String>, name: &str) -> bool {
+    !args.contains_key(&format!("no-{name}")) && args.get(name).is_some_and(|v| !matches!(v.to_lowercase().as_str(), "false" | "0" | "no"))
+}
+
+/// `_create_prod_merged_outputs` after merge or remap (`--transfer-original-dims-to-merged`).
+fn prod_merged_after(args: &BTreeMap<String, String>, originals: &Path, output_dir: &Path, workers: usize) -> Result<Vec<PathBuf>, String> {
+    if !flag(args, "transfer-original-dims-to-merged") || !originals.exists() {
+        return Ok(Vec::new());
+    }
+    let settings = product_settings(args)?;
+    println!("\n{}\nCreating Prod-Merged Files (Rust SmartTile)\n{}", "=".repeat(60), "=".repeat(60));
+    products::run(&products::ProductParams {
+        input: originals.to_path_buf(), output_dir: output_dir.to_path_buf(), resolutions: settings.resolutions, formats: settings.formats,
+        workers, original_point_index: settings.original_point_index, staged_copc_dir: settings.staged_copc_dir,
     })
 }
 
@@ -272,30 +359,11 @@ fn run_create_merged_file(args: &BTreeMap<String, String>) -> Result<(), String>
     if workers < 1 {
         return Err("Query workers must be positive".into());
     }
-    let resolutions = products::parse_resolutions(args.get("merged-resolutions").map(String::as_str).unwrap_or("res1,res2"),
-                                                  number(args, "resolution-1")?.unwrap_or(0.01), number(args, "resolution-2")?.unwrap_or(0.1))?;
-    let mut formats: Vec<String> = Vec::new();
-    for token in args.get("merged-output-formats").map(String::as_str).unwrap_or("copc.laz").trim_matches(['[', ']']).split(',') {
-        let token = token.trim().trim_matches(['\'', '"']).to_lowercase();
-        if token.is_empty() { continue; }
-        let format = match token.as_str() {
-            "las" | "laz" | ".laz" => "laz",
-            "copc" | "copc_laz" | "copc-laz" | "copc.laz" | ".copc.laz" => "copc.laz",
-            "ply" | ".ply" => "ply",
-            _ => return Err(format!("Unsupported merged output format '{token}'. Use laz, copc.laz, or ply.")),
-        };
-        if !formats.iter().any(|f| f == format) { formats.push(format.into()); }
-    }
-    if formats.is_empty() {
-        return Err("No merged output formats selected".into());
-    }
-    let original_point_index = !args.contains_key("no-original-point-index")
-        && args.get("original-point-index").map(|v| !matches!(v.to_lowercase().as_str(), "false" | "0" | "no")).unwrap_or(true);
+    let settings = product_settings(args)?;
     println!("{}\nCreating Prod-Merged Files (Rust SmartTile)\n{}", "=".repeat(60), "=".repeat(60));
-    let staged_copc_dir = args.get("staged-copc-dir").map(PathBuf::from);
     let run = |input: PathBuf| products::run(&products::ProductParams {
-        input, output_dir: output_dir.clone(), resolutions: resolutions.clone(), formats: formats.clone(),
-        workers: workers.min(allocated_cpus()), original_point_index, staged_copc_dir: staged_copc_dir.clone(),
+        input, output_dir: output_dir.clone(), resolutions: settings.resolutions.clone(), formats: settings.formats.clone(),
+        workers: workers.min(allocated_cpus()), original_point_index: settings.original_point_index, staged_copc_dir: settings.staged_copc_dir.clone(),
     });
     let made = if inputs.len() > 1 {
         fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;

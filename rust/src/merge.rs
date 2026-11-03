@@ -34,6 +34,8 @@ pub struct MergeParams {
     /// Raw originals to enrich in the same run, and where the enriched copies go.
     pub originals: Option<PathBuf>,
     pub original_output: Option<PathBuf>,
+    /// `--reassign-small-instances`: (max cluster size, max bounding-box volume in m³).
+    pub small_instances: Option<(u64, f64)>,
     /// Development: stop after this stage (only "dense" is ported).
     pub stop_after: Option<String>,
 }
@@ -1312,9 +1314,18 @@ fn write_json(path: &Path, value: &Value) -> Res<()> {
 }
 
 /// `instance_summary` (no reassignment aliases): one row per final instance, in the source CRS.
-fn summary_document(model: &Model, statistics: &Statistics, origin: &[f64; 3], resolution_1: f64) -> Value {
+fn summary_document(model: &Model, statistics: &Statistics, origin: &[f64; 3], resolution_1: f64,
+                    aliases: &BTreeMap<u64, u64>, reassignment_enabled: bool) -> Value {
     use crate::pyfmt::float;
-    let instances: Vec<Value> = statistics.rows.iter().map(|(id, (n, lo, hi, sum))| {
+    // `instance_summary`: sources fold into their targets (in ID order).
+    let mut folded: BTreeMap<u64, (u64, [f64; 3], [f64; 3], [f64; 3])> = BTreeMap::new();
+    for (id, (n, lo, hi, sum)) in &statistics.rows {
+        let e = folded.entry(*aliases.get(id).unwrap_or(id)).or_insert((0, [f64::INFINITY; 3], [f64::NEG_INFINITY; 3], [0.0; 3]));
+        e.0 += n;
+        for a in 0..3 { e.1[a] = e.1[a].min(lo[a]); e.2[a] = e.2[a].max(hi[a]); e.3[a] += sum[a]; }
+    }
+    let instances: Vec<Value> = folded.iter().map(|(id, (n, lo, hi, sum))| {
+        let from: Vec<u64> = aliases.iter().filter(|(_, t)| *t == id).map(|(s, _)| *s).collect();
         let volume = ((hi[0] - lo[0]) * (hi[1] - lo[1])) * (hi[2] - lo[2]);
         let centroid: [f64; 3] = std::array::from_fn(|a| sum[a] / *n as f64 + origin[a]);
         serde_json::json!({
@@ -1324,11 +1335,89 @@ fn summary_document(model: &Model, statistics: &Statistics, origin: &[f64; 3], r
             "bbox_volume_m3": float(volume),
             "centroid": centroid.iter().map(|c| float(*c)).collect::<Vec<_>>(),
             "centroid_xy": [float(sum[0] / *n as f64 + origin[0]), float(sum[1] / *n as f64 + origin[1])],
-            "reassigned_from": []})
+            "reassigned_from": from})
     }).collect();
     serde_json::json!({"model": model.name, "instance_dimension": model.instance, "resolution_1_m": float(resolution_1),
                        "coordinates": "source CRS", "id_encoding": "reconciled dataset ID",
-                       "small_instance_reassignment": false, "instances": instances})
+                       "small_instance_reassignment": reassignment_enabled, "instances": instances})
+}
+
+/// `plan_reassignment`: small instances (fewer points and a smaller box) take the ID of the
+/// non-small instance with the nearest XY centroid within 5 m. Returns the mapping and its report.
+fn plan_reassignment(statistics: &Statistics, max_cluster_size: u64, max_volume: f64) -> (BTreeMap<u64, u64>, Map<String, Value>) {
+    const SEARCH_RADIUS: f64 = 5.0;
+    let f = crate::pyfmt::float;
+    let rows: Vec<(u64, u64, f64, [f64; 2])> = statistics.rows.iter().map(|(id, (n, lo, hi, sum))| {
+        (*id, *n, ((hi[0] - lo[0]) * (hi[1] - lo[1])) * (hi[2] - lo[2]), [sum[0] / *n as f64, sum[1] / *n as f64])
+    }).collect();
+    let small: Vec<bool> = rows.iter().map(|r| r.1 < max_cluster_size && r.2 < max_volume).collect();
+    let targets: Vec<usize> = (0..rows.len()).filter(|&i| !small[i]).collect();
+    let (mut mapping, mut reassigned, mut kept) = (BTreeMap::new(), Vec::new(), Vec::new());
+    if small.iter().any(|s| *s) && !targets.is_empty() {
+        for (i, row) in rows.iter().enumerate().filter(|(i, _)| small[*i]) {
+            let _ = i;
+            // cKDTree nearest: the smallest distance, ties to the first target.
+            let (distance, target) = targets.iter().map(|&t| {
+                let (dx, dy) = (rows[t].3[0] - row.3[0], rows[t].3[1] - row.3[1]);
+                (((0.0 + dx * dx) + dy * dy).sqrt(), t)
+            }).fold((f64::INFINITY, usize::MAX), |best, c| if c.0 < best.0 { c } else { best });
+            let mut decision = serde_json::json!({"instance": row.0, "points": row.1, "bbox_volume_m3": f(row.2), "xy_distance_m": f(distance)});
+            if distance <= SEARCH_RADIUS {
+                mapping.insert(row.0, rows[target].0);
+                decision["target"] = serde_json::json!(rows[target].0);
+                reassigned.push(decision);
+            } else {
+                decision["reason"] = serde_json::json!(format!("no non-small instance within {} m", crate::pyfmt::float_repr(SEARCH_RADIUS)));
+                kept.push(decision);
+            }
+        }
+    } else {
+        kept = rows.iter().zip(&small).filter(|(_, s)| **s).map(|(r, _)| serde_json::json!({"instance": r.0, "reason": "no non-small instance"})).collect();
+    }
+    let moved: u64 = rows.iter().filter(|r| mapping.contains_key(&r.0)).map(|r| r.1).sum();
+    let mut report = Map::new();
+    report.insert("policy".into(), "fewer than max_cluster_size points and bounding box below max_volume_m3; nearest non-small instance XY centroid (horizontal distance) within search_radius_m".into());
+    report.insert("max_cluster_size".into(), serde_json::json!(max_cluster_size));
+    report.insert("max_volume_m3".into(), f(max_volume));
+    report.insert("search_radius_m".into(), f(SEARCH_RADIUS));
+    report.insert("instances".into(), serde_json::json!(rows.len()));
+    report.insert("small".into(), serde_json::json!(small.iter().filter(|s| **s).count()));
+    report.insert("reassigned_count".into(), serde_json::json!(mapping.len()));
+    report.insert("reassigned_points".into(), serde_json::json!(moved));
+    reassigned.truncate(1000);
+    kept.truncate(1000);
+    report.insert("reassigned".into(), Value::Array(reassigned));
+    report.insert("kept".into(), Value::Array(kept));
+    (mapping, report)
+}
+
+/// `relabel_tiles`: instance IDs rewritten in place (32,768-point batches); relabeled points per tile.
+fn relabel_tiles(files: &[PathBuf], instance: &str, mapping: &BTreeMap<u64, u64>) -> Res<Vec<u64>> {
+    let mut changed = Vec::new();
+    for file in files {
+        let (header, field) = instance_reader(file, instance)?;
+        let target = TileHeader::copy_of(&header)?;
+        let mut points = 0u64;
+        let mut batches = Vec::new();
+        let mut scratch = [0u8; 8];
+        for chunk in chunks(file)? {
+            let chunk = chunk?;
+            let mut out = chunk.raw_bytes().to_vec();
+            for r in out.chunks_exact_mut(chunk.record_len()) {
+                let id = field.scalar().read_int(field.get(r, &mut scratch)) as u64;
+                if let Some(to) = mapping.get(&id) {
+                    field.set(r, &to.to_le_bytes());
+                    points += 1;
+                }
+            }
+            batches.push(Ok(out));
+        }
+        let temporary = file.with_file_name(format!(".{}.relabel", file.file_name().unwrap().to_string_lossy()));
+        lasio::write_records(&temporary, &target, batches, true, None)?;
+        fs::rename(&temporary, file).map_err(|e| e.to_string())?;
+        changed.push(points);
+    }
+    Ok(changed)
 }
 
 /// `merge_file`: the final tiles concatenated in tile order, in the first tile's encoding.
@@ -1598,6 +1687,22 @@ pub fn run(params: &MergeParams) -> Res<()> {
                 return Err(format!("{}: recovered tree geometry lost after ownership and deduplication: {missing}/{checked} core samples unsupported; see orphan_recovery.final_support in report", model.name));
             }
         }
+        let groups = ids.len() as u64;
+        let mut reassigned: BTreeMap<u64, u64> = BTreeMap::new();
+        if let Some((max_cluster_size, max_volume)) = params.small_instances {
+            report.insert("small_instance_reassignment".into(), Value::Null);
+            let (plan, mut stage) = timed("small_instance_reassignment", &model, &mut report, || {
+                let (plan, mut stage) = plan_reassignment(&statistics, max_cluster_size, max_volume);
+                if !plan.is_empty() {
+                    stage.insert("relabeled_points_per_tile".into(), serde_json::json!(relabel_tiles(&final_files, &model.instance, &plan)?));
+                }
+                Ok((plan, stage))
+            })?;
+            report.insert("small_instance_reassignment".into(), Value::Object(std::mem::take(&mut stage)));
+            reassigned = plan;
+        }
+        let final_ids: std::collections::BTreeSet<u64> = ids.iter().map(|i| *reassigned.get(i).unwrap_or(i)).collect();
+        let added: std::collections::BTreeSet<u64> = reassigned.values().copied().collect();
         report.insert("instance_consolidation".into(), Value::Null);
         let (split, moved, per_owner) = timed("instance_consolidation", &model, &mut report, || consolidate(&final_files, &model.instance, &regions, &scratch.join("consolidation")))?;
         report.insert("instance_consolidation".into(), serde_json::json!({
@@ -1606,10 +1711,10 @@ pub fn run(params: &MergeParams) -> Res<()> {
             "moved_points_per_owner": per_owner.iter().map(|(k, v)| (k.clone(), serde_json::json!(v))).collect::<Map<_, _>>()}));
         // Final metadata beside the tiles.
         let csv: String = std::iter::once("PredInstance,has_added_clusters\r\n".replace("PredInstance", &model.instance))
-            .chain(ids.iter().map(|id| format!("{id},0\r\n"))).collect();
+            .chain(final_ids.iter().map(|id| format!("{id},{}\r\n", u8::from(added.contains(id))))).collect();
         fs::write(final_dir.join("instance_metadata.csv"), &csv).map_err(|e| e.to_string())?;
         let summary_name = format!("{}_summary.json", model.instance);
-        write_json(&final_dir.join(&summary_name), &summary_document(&model, &statistics, &origin, 0.01))?;
+        write_json(&final_dir.join(&summary_name), &summary_document(&model, &statistics, &origin, 0.01, &reassigned, params.small_instances.is_some()))?;
         write_json(&final_dir.join("tile_bounds.json"), &layout)?;
         let mut manifest = Map::new();
         manifest.insert("contract".into(), Value::String("3DT-2183/v8-group-geometry".into()));
@@ -1625,13 +1730,13 @@ pub fn run(params: &MergeParams) -> Res<()> {
         if let Some(originals) = &params.originals {
             let mut dimensions = model.dimensions.clone();
             for d in dimensions.iter_mut().filter(|d| d.name == model.instance) {
-                d.data_type = instance_scalar(ids.len() as u64).extra_bytes_id();
+                d.data_type = instance_scalar(groups).extra_bytes_id();
                 d.options = 0;
                 d.description = [0; 32];
             }
             let width = dimensions.iter().map(|d| d.size()).sum();
             let collection = crate::remap::Collection { name: model.name.clone(), instance: Some(model.instance.clone()), dimensions,
-                set: survivors, values: std::mem::take(&mut survivor_values), width, maximum: ids.len() as u64 };
+                set: survivors, values: std::mem::take(&mut survivor_values), width, maximum: groups };
             let radius = 3f64.sqrt() * 0.01;
             let baseline = crate::remap::load_collection(&dense, &origin, radius, &model.instance)?.set;
             let collections = [collection];
@@ -1640,7 +1745,8 @@ pub fn run(params: &MergeParams) -> Res<()> {
             let stage = scratch.join("originals");
             fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
             let ids_by_dimension = crate::remap::enrich(&collections, &[Some(baseline)], &selected, &used, &files, &origin, radius, qw, &stage, top)?;
-            top["instance_finalization"] = crate::remap::compact(&stage, &ids_by_dimension)?;
+            let aliases = BTreeMap::from([(model.instance.clone(), reassigned.clone())]);
+            top["instance_finalization"] = crate::remap::compact(&stage, &ids_by_dimension, &aliases)?;
             originals_stage = Some(stage);
         }
         let merged = scratch.join("merged.laz");

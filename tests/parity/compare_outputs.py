@@ -121,6 +121,15 @@ def normalized_json(path):
     return _without_volatile(data)
 
 
+def is_copc(path):
+    """A COPC file starts its VLRs with the "copc" info record (collection links keep a .laz name)."""
+    import struct
+    with open(path, "rb") as handle:
+        head = handle.read(4096)
+    header_size, = struct.unpack_from("<H", head, 94)
+    return head[header_size + 2:header_size + 6] == b"copc"
+
+
 def compare(reference: Path, candidate: Path):
     files_a = {p.relative_to(reference) for p in reference.rglob("*") if p.is_file() or p.is_symlink()}
     files_b = {p.relative_to(candidate) for p in candidate.rglob("*") if p.is_file() or p.is_symlink()}
@@ -137,7 +146,7 @@ def compare(reference: Path, candidate: Path):
             continue
         lower = name.lower()
         if lower.endswith((".las", ".laz")):
-            problems = compare_las(a, b, copc=lower.endswith(".copc.laz"))
+            problems = compare_las(a, b, copc=lower.endswith(".copc.laz") or is_copc(a))
         elif lower.endswith(".png"):
             # The overview is redrawn (resvg, not matplotlib): same content, other pixels.
             problems = [] if b.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n" else ["not a PNG"]
