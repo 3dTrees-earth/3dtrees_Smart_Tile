@@ -447,13 +447,14 @@ fn transfer_tile(model: &Model, n: usize, pair: &Pair, output: &Path, origin: &[
     let (decode, query) = (std::cell::Cell::new(0.0), std::cell::Cell::new(0.0));
     let target_header = lasio::read_header(&pair.target)?;
     let target_layout = PointLayout::of(&target_header)?;
-    if !target_layout.extra.is_empty() {
-        return Err(format!("{}: targets with ExtraBytes are not ported yet", pair.target.display()));
+    if let Some(d) = model.dimensions.iter().find(|d| target_layout.find(&d.name).is_some()) {
+        return Err(format!("Target already contains prediction dimension {}", d.name));
     }
-    // `target_header`: a copy of the target (CRS standardized) plus the prediction dimensions.
+    // `target_header`: a copy of the target (CRS standardized), its own ExtraBytes kept, plus the prediction dimensions.
     let mut header = TileHeader::for_tile(&target_header, target_header.scales, target_header.offsets)?;
     header.point_format = target_header.point_format;
-    header.extra = model.dimensions.iter().map(OutputExtra::new).collect();
+    header.extra = target_layout.extra.iter().map(|(e, _)| OutputExtra::stored(e)).chain(model.dimensions.iter().map(OutputExtra::new)).collect();
+    if !target_layout.extra.is_empty() { header.sync_extra_bytes(); }
     let base = target_layout.record_length;
     let out_len = header.record_length();
     let (mut total, mut matched) = (0u64, 0u64);
@@ -1223,7 +1224,12 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
         // `target_header(ready=True)`: the model dimensions replace the tile's, the instance as uint16/32.
         let mut target = TileHeader::copy_of(&header)?;
         target.vlrs.retain(|v| !(v.user() == "LASF_Spec" && v.record_id == 4));
-        target.extra = model.dimensions.iter().map(|d| {
+        // Other ExtraBytes of the tile (e.g. of the 1 cm targets) stay first, unchanged.
+        let names: Vec<&str> = model.dimensions.iter().map(|d| d.name.as_str()).collect();
+        let kept: Vec<(usize, usize)> = layout.extra.iter().filter(|(e, _)| !names.contains(&e.name.as_str())).map(|(e, o)| (*o, e.size())).collect();
+        let kept_width: usize = kept.iter().map(|k| k.1).sum();
+        let kept_extra: Vec<OutputExtra> = target.extra.iter().filter(|e| !names.contains(&e.source.name.as_str())).cloned().collect();
+        target.extra = kept_extra.into_iter().chain(model.dimensions.iter().map(|d| {
             if d.name == model.instance {
                 let mut e = d.clone();
                 e.data_type = instance_type.extra_bytes_id();
@@ -1233,12 +1239,12 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
             } else {
                 OutputExtra::new(d)
             }
-        }).collect();
+        })).collect();
         let base = crate::points::base_record_length(header.point_format);
         let source_fields: Vec<Layout> = model.dimensions.iter().map(|d| layout.find(&d.name).unwrap().0).collect();
         let mut out_layout = Vec::new();
-        let mut at = base;
-        for e in &target.extra { out_layout.push(Layout::Bytes { offset: at, scalar: e.source.scalar().unwrap() }); at += e.source.size(); }
+        let mut at = base + kept_width;
+        for e in &target.extra[kept.len()..] { out_layout.push(Layout::Bytes { offset: at, scalar: e.source.scalar().unwrap() }); at += e.source.size(); }
         let out_len = target.record_length();
         let bounds = &overlaps[tile];
         let mut offset = 0i64;
@@ -1326,6 +1332,7 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
                 }
                 let start = out.len();
                 out.extend_from_slice(&r[..base]);
+                for (o, size) in &kept { out.extend_from_slice(&r[*o..o + size]); }
                 out.resize(start + out_len, 0);
                 for (j, (src, dst)) in source_fields.iter().zip(&out_layout).enumerate() {
                     if model.dimensions[j].name == model.instance {
@@ -1336,7 +1343,7 @@ fn deduplicate(model: &Model, files: &[PathBuf], mapping: &BTreeMap<(usize, u64)
                     }
                 }
                 new_points.push((xyz[k], offset + k as i64, labels[k]));
-                new_values.extend_from_slice(&out[start + base..start + out_len]);
+                new_values.extend_from_slice(&out[start + base + kept_width..start + out_len]);
                 kept_ids.push(labels[k].0);
                 kept_xyz.push(xyz[k]);
             }
