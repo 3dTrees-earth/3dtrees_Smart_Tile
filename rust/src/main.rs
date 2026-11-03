@@ -320,7 +320,9 @@ fn validate_copc_twins(copc_dir: &Path, raw_dir: &Path) -> Result<(), String> {
 fn run_remap(args: &BTreeMap<String, String>) -> Result<(), String> {
     let known = ["task", "segmented-folders", "merged-laz", "original-laz-input-dir", "original-input-dir", "original-laz-output-dir", "output-dir",
                  "workers", "number-of-threads", "remap-dims", "instance-dimension", "collection-dir",
-                 "transfer-original-dims-to-merged", "no-transfer-original-dims-to-merged", "original-copc-input-dir"];
+                 "transfer-original-dims-to-merged", "no-transfer-original-dims-to-merged", "original-copc-input-dir",
+                 "match-instances", "no-match-instances", "prediction-resolution-original", "no-prediction-resolution-original",
+                 "pre-remap-reassign-instances"];
     let unknown: Vec<&String> = args.keys().filter(|k| !known.contains(&k.as_str()) && !PRODUCT_FLAGS.contains(&k.as_str())).collect();
     if !unknown.is_empty() {
         return Err(format!("Unknown or not yet ported remap argument(s): {}", unknown.iter().map(|k| format!("--{k}")).collect::<Vec<_>>().join(" ")));
@@ -341,6 +343,12 @@ fn run_remap(args: &BTreeMap<String, String>) -> Result<(), String> {
     if let Some(dir) = &collection_dir { collections::check(dir, &root)?; }
     if let Some(copc) = args.get("original-copc-input-dir") { validate_copc_twins(Path::new(copc), &originals)?; }
     if flag(args, "transfer-original-dims-to-merged") { product_settings(args)?; }
+    if flag(args, "prediction-resolution-original") && (args.contains_key("resolution-1") || args.contains_key("remap-tolerance")) {
+        return Err("--prediction-resolution-original cannot be combined with --resolution-1 or --remap-tolerance".into());
+    }
+    if flag(args, "pre-remap-reassign-instances") {
+        return Err("pre-remap label reassignment is incompatible with the strict reconciled-label contract".into());
+    }
     if number(args, "resolution-1")?.is_some_and(|r| r != 0.01) {
         return Err("remap with --resolution-1 other than 0.01 is not ported yet".into());
     }
@@ -348,6 +356,8 @@ fn run_remap(args: &BTreeMap<String, String>) -> Result<(), String> {
         collections, originals, output: output.clone(), workers: workers.min(allocated_cpus()), requested_workers: workers,
         instance_dimension: args.get("instance-dimension").cloned().unwrap_or_else(|| "PredInstance".into()),
         target_dims: args.get("remap-dims").map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()),
+        match_instances: flag(args, "match-instances"),
+        prediction_resolution_original: flag(args, "prediction-resolution-original"),
     })?;
     let made = prod_merged_after(args, &output, &root, workers.min(allocated_cpus()))?;
     if let Some(dir) = &collection_dir {

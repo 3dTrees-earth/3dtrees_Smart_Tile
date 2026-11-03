@@ -31,6 +31,9 @@ pub struct RemapParams {
     pub requested_workers: usize,
     pub instance_dimension: String,
     pub target_dims: Option<BTreeSet<String>>,
+    /// `--match-instances` and `--prediction-resolution-original`.
+    pub match_instances: bool,
+    pub prediction_resolution_original: bool,
 }
 
 fn local(raw: &[u8], h: &SourceHeader, origin: &[f64; 3]) -> [f64; 3] {
@@ -175,11 +178,30 @@ pub fn run(params: &RemapParams) -> Res<()> {
         if let Some(r) = m["resolution_1_m"].as_f64() { resolutions.insert(r.to_bits()); }
         baselines.push(m["baseline"].as_str().map(|b| c.join(b)).filter(|b| b.is_dir()));
     }
-    if resolutions.len() > 1 {
+    if !params.prediction_resolution_original && resolutions.len() > 1 {
         return Err("Prediction collections declare conflicting first-stage resolutions".into());
     }
     let resolution = resolutions.iter().next().map(|b| f64::from_bits(*b)).unwrap_or(0.01);
-    let radius = 3f64.sqrt() * resolution;
+    // `original_prediction_radius`: half the diagonal of each collection's coarsest XYZ steps plus an 8-ULP encoding guard.
+    let radii: Vec<f64> = if params.prediction_resolution_original {
+        params.collections.iter().map(|c| {
+            let files = if c.is_file() { vec![c.clone()] } else { crate::tile::point_cloud_files(c)? };
+            if files.is_empty() { return Err(format!("No prediction files in {}", c.display())); }
+            let (mut scales, mut magnitude) = ([0f64; 3], 1f64);
+            for file in &files {
+                let h = lasio::read_header(file)?;
+                if h.scales.iter().any(|s| !s.is_finite() || *s <= 0.0) {
+                    return Err(format!("{}: original-resolution predictions need positive finite XYZ scales", file.display()));
+                }
+                for a in 0..3 { scales[a] = scales[a].max(h.scales[a]); magnitude = magnitude.max(h.mins[a].abs()).max(h.maxs[a].abs()); }
+            }
+            let half: Vec<f64> = scales.iter().map(|s| s / 2.0).collect();
+            Ok(((half[0] * half[0] + half[1] * half[1]) + half[2] * half[2]).sqrt() + 8.0 * (f64::from_bits(magnitude.to_bits() + 1) - magnitude))
+        }).collect::<Res<_>>()?
+    } else {
+        vec![3f64.sqrt() * resolution; params.collections.len()]
+    };
+    let radius = radii.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let originals = original_files(&params.originals)?;
     let origin = lasio::read_header(&originals[0])?.offsets;
     let indexing_start = std::time::Instant::now();
@@ -193,7 +215,12 @@ pub fn run(params: &RemapParams) -> Res<()> {
         });
     }
     let indexing_seconds = indexing_start.elapsed().as_secs_f64();
-    let (selected, used) = select_dimensions(&collections, params.target_dims.as_ref())?;
+    let matches: Vec<Option<String>> = if params.match_instances {
+        collections.iter().map(|c| c.instance.clone().map(Some).ok_or_else(|| format!("{}: matching instances needs one PredInstance* dimension per collection", c.name))).collect::<Res<_>>()?
+    } else {
+        vec![None; collections.len()]
+    };
+    let (selected, used) = select_dimensions(&collections, params.target_dims.as_ref(), &matches)?;
     let parent = params.output.parent().unwrap_or(Path::new("."));
     let report_path = parent.join(format!("{}_coverage.json", params.output.file_name().unwrap().to_string_lossy()));
     let f = crate::pyfmt::float;
@@ -208,11 +235,18 @@ pub fn run(params: &RemapParams) -> Res<()> {
     });
     report["parallelism"] = json!({"requested_workers": params.requested_workers, "query_workers": params.workers,
         "scope": "bounded spatial queries; small batches run serially"});
+    if params.prediction_resolution_original {
+        report["resolution_1_m"] = Value::Null;
+        report["original_radii_m"] = json!(radii.iter().map(|r| f(*r)).collect::<Vec<_>>());
+        report["prediction_resolution"] = json!("original");
+        report["original_radius_policy"] = json!("half diagonal of each prediction collection's coarsest LAS XYZ scales; 8 global-coordinate float64 ULP encoding guard");
+    }
     report["timings"] = json!({"indexing_seconds": f(indexing_seconds)});
     let staging = parent.join(format!(".strict-remap-{}", std::process::id()));
     let stage_dir = staging.join("originals");
     fs::create_dir_all(&stage_dir).map_err(|e| e.to_string())?;
-    let result = enrich(&collections, &baseline_sets, &selected, &used, &originals, &origin, radius, params.workers, &stage_dir, &mut report);
+    let result = enrich(&collections, &baseline_sets, &selected, &used, &originals, &origin, &radii, params.workers, &stage_dir, &mut report,
+                        &matches, params.prediction_resolution_original);
     let outcome = result.and_then(|ids| {
         report["instance_finalization"] = compact(&stage_dir, &ids, &BTreeMap::new())?;
         let mut names: Vec<PathBuf> = fs::read_dir(&stage_dir).map_err(|e| e.to_string())?.filter_map(|e| e.ok().map(|e| e.path())).collect();
@@ -259,12 +293,14 @@ pub fn original_files(directory: &Path) -> Res<Vec<PathBuf>> {
 }
 
 /// Selected dimensions per model; the instance becomes uint16/32 (`instance_extra_bytes_params`).
-pub fn select_dimensions(collections: &[Collection], target_dims: Option<&BTreeSet<String>>) -> Res<(Vec<Vec<(usize, ExtraBytes)>>, BTreeSet<String>)> {
+pub fn select_dimensions(collections: &[Collection], target_dims: Option<&BTreeSet<String>>, matches: &[Option<String>])
+                         -> Res<(Vec<Vec<(usize, ExtraBytes)>>, BTreeSet<String>)> {
     let mut used = BTreeSet::new();
     let mut selected: Vec<Vec<(usize, ExtraBytes)>> = Vec::new();
-    for c in collections {
+    for (k, c) in collections.iter().enumerate() {
+        let matched = matches.get(k).cloned().flatten();
         let dims: Vec<(usize, ExtraBytes)> = c.dimensions.iter().enumerate()
-            .filter(|(_, d)| target_dims.is_none_or(|t| t.contains(&d.name))).map(|(i, d)| {
+            .filter(|(_, d)| target_dims.is_none_or(|t| t.contains(&d.name)) && matched.as_deref() != Some(d.name.as_str())).map(|(i, d)| {
                 let mut d = d.clone();
                 if c.instance.as_deref() == Some(d.name.as_str()) {
                     d.data_type = if c.maximum > u16::MAX as u64 { Scalar::U32 } else { Scalar::U16 }.extra_bytes_id();
@@ -287,8 +323,11 @@ pub fn select_dimensions(collections: &[Collection], target_dims: Option<&BTreeS
 /// Records parallelism, coverage, policy and timings in `report`; fails unless coverage is complete.
 #[allow(clippy::too_many_arguments)]
 pub fn enrich(collections: &[Collection], baseline_sets: &[Option<PointSet>], selected: &[Vec<(usize, ExtraBytes)>], used: &BTreeSet<String>,
-              originals: &[PathBuf], origin: &[f64; 3], radius: f64, workers: usize, stage_dir: &Path, report: &mut Value)
+              originals: &[PathBuf], origin: &[f64; 3], radii: &[f64], workers: usize, stage_dir: &Path, report: &mut Value,
+              matches: &[Option<String>], original_geometry: bool)
               -> Res<BTreeMap<String, BTreeMap<String, BTreeSet<u64>>>> {
+    let radius = report["original_radius_m"].as_f64().unwrap_or(radii[0]);
+    let baseline_stage: &'static str = if original_geometry { "unfiltered_original" } else { "unfiltered_1cm" };
     let f = crate::pyfmt::float;
     let source_points: u64 = originals.iter().map(|o| lasio::read_header(o).map(|h| h.point_count)).sum::<Res<u64>>()?;
     let processes = workers.min((source_points / MAX_BATCH_POINTS as u64).max(1) as usize);
@@ -298,8 +337,19 @@ pub fn enrich(collections: &[Collection], baseline_sets: &[Option<PointSet>], se
     parallelism.insert("max_pending_batches".into(), json!(2 * processes));
     parallelism.insert("enrichment_scope".into(), json!("bounded process-parallel original remap; ordered writer"));
     report["original_coverage"] = json!([]);
-    report["original_coverage_policy"] = json!({"unfiltered_1cm": "100% required for every model with baseline geometry",
-        "final_survivors": "100% required except RCT; unmatched RCT predictions become background 0"});
+    let mut policy = serde_json::Map::new();
+    policy.insert(baseline_stage.into(), json!("100% required for every model with baseline geometry"));
+    policy.insert("final_survivors".into(), json!(if original_geometry { "100% required for every model" }
+                                                  else { "100% required except RCT; unmatched RCT predictions become background 0" }));
+    report["original_coverage_policy"] = Value::Object(policy);
+    // Per model with `matches`: the collection's label of each prediction point.
+    let match_labels: Vec<Option<Vec<u64>>> = collections.iter().zip(matches).map(|(c, m)| m.as_ref().map(|name| {
+        let mut o = 0;
+        let mut at = None;
+        for d in &c.dimensions { if &d.name == name { at = Some((o, d.scalar().unwrap())); } o += d.size(); }
+        let (o, scalar) = at.expect("match dimension in collection");
+        (0..c.set.len()).map(|i| scalar.read_int(&c.values[i * c.width + o..]) as u64).collect()
+    })).collect();
     let pool = rayon::ThreadPoolBuilder::new().num_threads(workers.max(1)).build().map_err(|e| e.to_string())?;
     let enrichment_start = std::time::Instant::now();
     let mut phases = [0.0f64; 3]; // spill, query, write
@@ -326,13 +376,36 @@ pub fn enrich(collections: &[Collection], baseline_sets: &[Option<PointSet>], se
             phases[0] += tick.elapsed().as_secs_f64();
             let tick = std::time::Instant::now();
             let mut file_ids: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
-            let mut finals: Vec<Coverage> = collections.iter().map(|c| Coverage::new(&file_name, &c.name, "final_survivors", radius)).collect();
-            let mut bases: Vec<Option<Coverage>> = collections.iter().zip(baseline_sets)
-                .map(|(c, b)| b.as_ref().map(|_| Coverage::new(&file_name, &c.name, "unfiltered_1cm", radius))).collect();
+            let mut finals: Vec<Coverage> = collections.iter().zip(radii).zip(matches).map(|((c, r), m)| {
+                let mut metric = Coverage::new(&file_name, &c.name, "final_survivors", *r);
+                metric.match_dimension = m.clone();
+                metric
+            }).collect();
+            let mut bases: Vec<Option<Coverage>> = collections.iter().zip(baseline_sets).zip(radii)
+                .map(|((c, b), r)| b.as_ref().map(|_| Coverage::new(&file_name, &c.name, baseline_stage, *r))).collect();
+            // The originals' own labels of every matched dimension, by point.
+            let own_labels: BTreeMap<String, Vec<u64>> = matches.iter().flatten().collect::<BTreeSet<_>>().into_iter()
+                .map(|name| Ok((name.clone(), original_labels(file, &header, name)?))).collect::<Res<_>>()?;
             for (m, c) in collections.iter().enumerate() {
-                let results: Vec<(Vec<Option<(u32, f64)>>, Option<Vec<f64>>)> = pool.install(|| batches.par_iter().map(|(_, xyz)| {
+                let radius = radii[m];
+                let results: Vec<(Vec<Option<(u32, f64)>>, Option<Vec<f64>>)> = pool.install(|| batches.par_iter().map(|(indices, xyz)| {
                     let base = baseline_sets[m].as_ref().map(|b| b.nearest_distances(xyz, radius));
-                    (c.set.nearest(xyz, radius, &|_| true), base)
+                    let found = match (&matches[m], &match_labels[m]) {
+                        // `nearest_matching`: per label, the nearest among points of the same label.
+                        (Some(name), Some(theirs)) => {
+                            let ours = &own_labels[name];
+                            let mut by_label: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+                            for (k, &i) in indices.iter().enumerate() { by_label.entry(ours[i as usize]).or_default().push(k); }
+                            let mut found = vec![None; xyz.len()];
+                            for (label, rows) in by_label {
+                                let pts: Vec<[f64; 3]> = rows.iter().map(|&k| xyz[k]).collect();
+                                for (k, hit) in rows.iter().zip(c.set.nearest(&pts, radius, &|id| theirs[id as usize] == label)) { found[*k] = hit; }
+                            }
+                            found
+                        }
+                        _ => c.set.nearest(xyz, radius, &|_| true),
+                    };
+                    (found, base)
                 }).collect());
                 // Byte offset of this model's selected dimensions in a stored row.
                 let start: usize = selected[..m].iter().flatten().map(|(_, d)| d.size()).sum();
@@ -395,11 +468,12 @@ pub fn enrich(collections: &[Collection], baseline_sets: &[Option<PointSet>], se
     timings["enrichment_phase_seconds"] = json!({"spill": f(phases[0]), "query": f(phases[1]), "write": f(phases[2])});
     let ids = result?;
     report["background_assigned_points"] = json!(0);
+    let _ = radius;
     let failures: Vec<&Coverage> = metrics.iter().filter(|m| m.matched != m.total).collect();
     if !failures.is_empty() {
         report["coverage_failures"] = Value::Array(failures.iter().map(|m| json!({"file": m.file, "model": m.model, "stage": m.stage,
                                                                                 "missing": m.total - m.matched})).collect());
-        return Err(format!("100% original coverage within {} m is required; {}", g8(radius),
+        return Err(format!("100% original coverage within {} m is required; {}", g8(report["original_radius_m"].as_f64().unwrap_or(radius)),
                            failures.iter().map(|m| format!("{}/{}/{}: {}/{}", m.file, m.model, m.stage, m.matched, m.total)).collect::<Vec<_>>().join("; ")));
     }
     Ok(ids)
@@ -414,11 +488,12 @@ fn g8(x: f64) -> String {
 }
 
 /// `_coverage_metric` / `_record_coverage`: one original, model and stage.
-struct Coverage { file: String, model: String, stage: &'static str, radius: f64, total: u64, matched: u64, max: f64, histogram: [u64; 5], missing: Vec<[f64; 3]> }
+struct Coverage { file: String, model: String, stage: &'static str, radius: f64, total: u64, matched: u64, max: f64, histogram: [u64; 5], missing: Vec<[f64; 3]>,
+                  match_dimension: Option<String> }
 
 impl Coverage {
     fn new(file: &str, model: &str, stage: &'static str, radius: f64) -> Coverage {
-        Coverage { file: file.into(), model: model.into(), stage, radius, total: 0, matched: 0, max: 0.0, histogram: [0; 5], missing: Vec::new() }
+        Coverage { file: file.into(), model: model.into(), stage, radius, total: 0, matched: 0, max: 0.0, histogram: [0; 5], missing: Vec::new(), match_dimension: None }
     }
 
     fn bounds(&self) -> [f64; 4] { [0.25, 0.5, 0.75, 1.0].map(|q| self.radius * q) }
@@ -440,11 +515,26 @@ impl Coverage {
 
     fn json(&self) -> Value {
         let f = crate::pyfmt::float;
-        json!({"file": self.file, "model": self.model, "stage": self.stage, "radius_m": f(self.radius), "total": self.total,
+        let mut value = json!({"file": self.file, "model": self.model, "stage": self.stage, "radius_m": f(self.radius), "total": self.total,
                "matched": self.matched, "max_matched_distance_m": f(self.max), "distance_histogram": self.histogram,
                "histogram_upper_bounds_m": self.bounds().map(f),
-               "missing_examples": self.missing.iter().map(|p| p.map(f).to_vec()).collect::<Vec<_>>()})
+               "missing_examples": self.missing.iter().map(|p| p.map(f).to_vec()).collect::<Vec<_>>()});
+        if let Some(name) = &self.match_dimension { value["match_instance_dimension"] = json!(name); }
+        value
     }
+}
+
+/// The original's own values of `name`, by point (`spill_original` label stores).
+fn original_labels(file: &Path, header: &SourceHeader, name: &str) -> Res<Vec<u64>> {
+    let layout = PointLayout::of(header)?;
+    let (field, _) = layout.find(name).ok_or_else(|| format!("{}: original lacks the matched instance dimension {name}", file.display()))?;
+    let mut out = Vec::with_capacity(header.point_count as usize);
+    let mut scratch = [0u8; 8];
+    for chunk in chunks(file, ORIGINAL_WRITE_POINTS)? {
+        let chunk = chunk?;
+        for r in chunk.raw_bytes().chunks_exact(chunk.record_len()) { out.push(field.scalar().read_int(field.get(r, &mut scratch)) as u64); }
+    }
+    Ok(out)
 }
 
 /// `compact_originals`: dataset-wide IDs 1..N per instance dimension, uint32, plus the mapping file.

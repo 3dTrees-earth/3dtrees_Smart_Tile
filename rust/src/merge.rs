@@ -2000,11 +2000,12 @@ pub fn run(params: &MergeParams) -> Res<()> {
                     set: std::mem::replace(&mut o.survivors, PointSet::new(0.01)), values: std::mem::take(&mut o.survivor_values), width, maximum: o.groups });
                 baselines.push(Some(crate::remap::load_collection(&o.dense, &origin, radius, &o.model.instance)?.set));
             }
-            let (selected, used) = crate::remap::select_dimensions(&collections, params.target_dims.as_ref())?;
+            let (selected, used) = crate::remap::select_dimensions(&collections, params.target_dims.as_ref(), &[])?;
             let files = crate::remap::original_files(originals)?;
             let stage = scratch.join("originals");
             fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
-            let ids_by_dimension = crate::remap::enrich(&collections, &baselines, &selected, &used, &files, &origin, radius, qw, &stage, top)?;
+            let ids_by_dimension = crate::remap::enrich(&collections, &baselines, &selected, &used, &files, &origin, &vec![radius; collections.len()], qw, &stage, top,
+                                                         &vec![None; collections.len()], false)?;
             let aliases: BTreeMap<String, BTreeMap<u64, u64>> = outcomes.iter().map(|o| (o.model.instance.clone(), o.reassigned.clone())).collect();
             top["instance_finalization"] = crate::remap::compact(&stage, &ids_by_dimension, &aliases)?;
             originals_stage = Some(stage);
