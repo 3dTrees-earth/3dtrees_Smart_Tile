@@ -135,6 +135,7 @@ def test_qsms_go_to_every_original_holding_their_points_with_ids_and_rows_kept(t
     source = (tmp_path / "qsm" / "c00_r00_trees_info.txt").read_text().splitlines()[2]
     assert (merged / "a_trees_info.txt").read_text().splitlines()[2] == source  # rows unchanged
     assert report["qsms"] == 2 and report["instances_without_qsm"] == 0
+    assert report["terrain_cog"]["file"] == "rct_terrain.tif" and (tmp_path / "merged" / "rct_terrain.tif").is_file()
     for stem in ("a", "b"):
         assert (merged / f"{stem}_terrain_mesh.ply").read_bytes() == (terrain / f"{stem}_terrain_mesh.ply").read_bytes()
         assert (merged / f"{stem}_qsm_octree" / "hierarchy.json").is_file()

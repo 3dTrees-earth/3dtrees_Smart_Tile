@@ -15,6 +15,8 @@ task's ``qsm_manifest_<dimension>.json`` this task writes, per original:
   its centroid, over the original's 1 m footprint (``qsm_footprints.npz``).
 - ``<original>_qsm_octree/``: the viewer's QSM octree (``qsm_octree``, 3DT-2626).
 
+and once for all originals ``rct_terrain.tif``, their terrain as a COG (``terrain_cog``).
+
 It fails on an instance in two tiles, on an instance its tile does not own, on
 missing tile files and on tables or meshes that disagree, and reports the
 instances that got no QSM (``qsm_merge_report.json``).
@@ -131,6 +133,7 @@ def merge_qsm(manifest_path, qsm_folder, output_dir, *, dimension=None, rct_terr
               footprints_path=None, octree=True, kind_folders=None):
     """Write the QSMs of one instance dimension per original; returns the report."""
     from qsm_octree import build as build_octree
+    from terrain_cog import TERRAIN_COG, write_terrain_cog
 
     manifest_path, output_dir = Path(manifest_path), Path(output_dir)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -242,6 +245,8 @@ def merge_qsm(manifest_path, qsm_folder, output_dir, *, dimension=None, rct_terr
         "tiles": report_tiles,
         "originals": report_originals,
         "terrain": "rct" if rct_terrain_folder else "instance tiles",
+        "terrain_cog": write_terrain_cog([output_dir / f"{stem}_terrain_mesh.ply" for stem in originals],
+                                         output_dir / TERRAIN_COG, crs=crs),
     }
     (output_dir / REPORT).write_text(json.dumps(report, indent=1, default=str) + "\n", encoding="utf-8")
     return report

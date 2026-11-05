@@ -13,6 +13,7 @@ from raycloud_tree_files import (TABLE_KINDS, pair_tree_sidecars, rct_sidecar_fo
                                  tree_rows, tree_sidecars)
 from raycloud_meshes import DATASET_SCOPE, TILE_SCOPE, TreeMesh, pair_tree_meshes, write_tree_mesh
 from raycloud_terrain import open_tile_terrain, write_original_terrain
+from terrain_cog import TERRAIN_COG, write_terrain_cog
 from ply_crs import crs_comment_from_file
 
 
@@ -144,6 +145,9 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
                                                           crs=crs_comment_from_file(file))
                 entry["sidecars"]["terrain_mesh"] = terrain_file.name
             metadata["files"].append(entry)
+        if tile_terrain:
+            metadata["terrain_cog"] = write_terrain_cog(
+                [output_dir / f["sidecars"]["terrain_mesh"] for f in metadata["files"]], output_dir / TERRAIN_COG)
         (output_dir / MAPPING_FILE).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     finally:
         db.close()
