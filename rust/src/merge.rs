@@ -792,6 +792,19 @@ fn f32_step(f: f32, up: bool) -> f32 {
     f32::from_bits(if (f > 0.0) == up { bits + 1 } else { bits - 1 })
 }
 
+/// The 1 m XY cells (local coordinates) within 2 cm of a rejected instance's box.
+fn rejected_cells(ownership: &[Ownership], origin: &[f64; 3]) -> std::collections::HashSet<(i64, i64)> {
+    const MARGIN: f64 = 0.02;
+    let mut cells = std::collections::HashSet::new();
+    for d in ownership.iter().flat_map(|o| &o.decisions).filter(|d| !d.kept) {
+        let edge = |v: f64, a: usize, m: f64| (v - origin[a] + m).floor() as i64;
+        for x in edge(d.lower[0], 0, -MARGIN)..=edge(d.upper[0], 0, MARGIN) {
+            for y in edge(d.lower[1], 1, -MARGIN)..=edge(d.upper[1], 1, MARGIN) { cells.insert((x, y)); }
+        }
+    }
+    cells
+}
+
 fn orphan_recovery(model: &Model, dense: &[PathBuf], ownership: &[Ownership], owned_index: &TileIndex, regions: &[Region],
                    overlaps: &Overlaps, origin: &[f64; 3], report: &mut OrphanReport) -> Res<Vec<(usize, u64)>> {
     use std::collections::{BTreeSet, HashMap};
@@ -1921,7 +1934,10 @@ fn merge_model(params: &MergeParams, collection: &Path, suffix: &str, layout: &V
     let mut orphan = OrphanReport::default();
     let (admitted, current, revised) = timed("orphan_recovery", &model, report, || {
         let started = std::time::Instant::now();
-        let owned_index = build_index(&owned_files, &model, &origin, 0.01)?;
+        // Only owned points near a rejected instance can cover its samples.
+        let near = rejected_cells(&ownership, &origin);
+        let keep = |_: usize, p: &[f64; 3]| near.contains(&(p[0].floor() as i64, p[1].floor() as i64));
+        let owned_index = build_index_where(&owned_files, &model, &origin, 0.01, Some(&keep), None)?.0;
         let t_index = started.elapsed().as_secs_f64();
         let admitted = orphan_recovery(&model, &dense_files, &ownership, &owned_index, &regions, &overlaps, &origin, &mut orphan)?;
         fs::create_dir_all(&recovered).map_err(|e| e.to_string())?;
@@ -2276,8 +2292,11 @@ pub fn run(params: &MergeParams) -> Res<()> {
     if let Err(e) = &result { full.insert("error".into(), Value::String(e.clone())); }
     full.insert("wall_seconds".into(), f(started.elapsed().as_secs_f64()));
     full.insert("cpu_seconds".into(), f(process_cpu_seconds()));
-    write_json(&root.join("remap_first_report.json"), &Value::Object(full))?;
+    // A failure before any output must still report itself, not the missing folder.
+    let _ = fs::create_dir_all(&root);
+    let written = write_json(&root.join("remap_first_report.json"), &Value::Object(full));
     result?;
+    written?;
     println!("Merge complete: {state}; report: {}", root.join("remap_first_report.json").display());
     Ok(())
 }
