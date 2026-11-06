@@ -12,6 +12,7 @@ from typing import List, Optional, Tuple
 
 from copc_metadata import srs_assignment_from_file
 from crs_records import validate_single_crs_record
+from scratch import scratch_directory
 
 
 def _run_untwine(
@@ -27,7 +28,7 @@ def _run_untwine(
 
     try:
         output_copc.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=".smarttile-standard-", dir=output_copc.parent) as tmpdir:
+        with scratch_directory(".smarttile-standard-", dir=output_copc.parent) as tmpdir:
             input_args = []
             for i, path in enumerate(inputs):
                 if strip_extra_dims and _has_extra_dimensions(path):
@@ -110,7 +111,7 @@ def convert_laz_to_copc(
     )
 
     output_copc.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".smarttile-vector-extra-", dir=output_copc.parent) as tmpdir:
+    with scratch_directory(".smarttile-vector-extra-", dir=output_copc.parent) as tmpdir:
         scalar_input = Path(tmpdir) / "scalarized.laz"
         working_input, schema = scalarize_vector_extra_bytes(input_laz, scalar_input)
         # Keep every enriched conversion private until metadata validation passes.

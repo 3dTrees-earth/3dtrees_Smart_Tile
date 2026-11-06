@@ -2,7 +2,6 @@
 from collections import Counter
 import copy
 import json
-import tempfile
 from contextlib import closing
 from pathlib import Path
 from time import perf_counter
@@ -15,6 +14,7 @@ from bounded_point_index import (MAX_BATCH_POINTS, PointIndex, coordinates, dist
                                  spatial_batches, inside_xy)
 from merge_stages import DUPLICATE_RADIUS, index_written_record, mapped_values
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
+from scratch import scratch_directory
 from parallel_tiles import map_tiles
 
 
@@ -333,7 +333,7 @@ def _assign_tile(model, tile, file, tiles, source_path, dimensions, regions, map
     output = output_dir / file.name
     started = perf_counter()
     shard_path = output_dir / f".index_{tile:05d}.sqlite"
-    with tempfile.TemporaryDirectory(prefix='.ownership-blocks-', dir=output_dir.parent) as scratch, \
+    with scratch_directory('.ownership-blocks-', dir=output_dir.parent) as scratch, \
             PointIndex(source_path, dimensions, query_workers=query_workers, read_only=True) as source_index, \
             PointIndex(shard_path, dimensions, query_workers=1) as index:
         with closing(OwnershipQuerySpool(Path(scratch) / 'queries.sqlite')) as spool:

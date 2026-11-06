@@ -8,9 +8,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from full_resolution_merge import ORIGINAL_POINT_INDEX, create_full_resolution_product  # noqa: E402
+from full_resolution_merge import ORIGINAL_POINT_INDEX, create_full_resolution_product, merged_header  # noqa: E402
 from main_create_merged_file import create_prod_merged_files, parse_merged_resolutions  # noqa: E402
 from merge_stages import describe_model  # noqa: E402
+from point_cloud_metadata import ensure_point_capacity  # noqa: E402
 
 
 def write_cloud(path, xyz, *, scale=0.001, extras=("species_id", "PredInstance_SAT"), index=False):
@@ -245,3 +246,144 @@ def test_ply_point_count_overflow_rejected_from_headers_before_reading_points(tm
         create_full_resolution_product([source], output, "ply", original_point_index=generate_index)
     assert not output.exists()
     assert not list(tmp_path.glob(".full-merge-*"))
+
+
+def format_cloud(path, point_format, *, extras=("species_id",), version="1.4", n=3, seed=1):
+    header = laspy.LasHeader(point_format=point_format, version=version)
+    header.scales, header.offsets = np.full(3, 0.001), np.array([500000.0, 5000000.0, 0.0])
+    for name in extras:
+        header.add_extra_dim(laspy.ExtraBytesParams(name=name, type=np.uint32))
+    las = laspy.LasData(header)
+    rng = np.random.default_rng(seed)
+    las.x, las.y, las.z = 500000 + rng.uniform(0, 9, n), 5000000 + rng.uniform(0, 9, n), rng.uniform(0, 9, n)
+    las.intensity = np.arange(n, dtype=np.uint16) + 7
+    las.classification = np.arange(n, dtype=np.uint8) + 2
+    las.return_number, las.number_of_returns = np.full(n, 1), np.full(n, 2)
+    las.user_data, las.point_source_id = np.full(n, 3), np.full(n, 11)
+    if "gps_time" in las.point_format.dimension_names:
+        las.gps_time = np.arange(n) + 0.5
+    if "red" in las.point_format.dimension_names:
+        las.red, las.green, las.blue = np.full(n, 100), np.full(n, 200), np.full(n, 300)
+    if "nir" in las.point_format.dimension_names:
+        las.nir = np.full(n, 400)
+    if point_format < 6:
+        las.scan_angle_rank = np.array([-15, 0, 30][:n] + [0] * (n - 3), dtype=np.int8)
+    else:
+        las.scan_angle = np.array([-2500, 0, 5000][:n] + [0] * (n - 3), dtype=np.int16)
+    for i, name in enumerate(extras):
+        las[name] = np.arange(n, dtype=np.uint32) * (i + 2)
+    las.write(path)
+    return laspy.read(path)
+
+
+@pytest.mark.parametrize("output_format", ["laz", "copc.laz"])
+@pytest.mark.parametrize("formats, expected", [((1, 3), 7), ((3, 7), 7), ((1, 6), 6), ((6, 8), 8), ((0, 1), 6)])
+def test_mixed_point_formats_are_promoted(tmp_path, formats, expected, output_format):
+    first, second = (tmp_path / "a.las", tmp_path / "b.las")
+    a, b = format_cloud(first, formats[0]), format_cloud(second, formats[1], seed=2)
+    output = tmp_path / f"merged.{output_format}"
+    create_full_resolution_product([first, second], output, output_format, original_point_index=True)
+    merged = laspy.read(output)
+    assert merged.header.point_format.id == expected and str(merged.header.version) == "1.4"
+    assert len(merged) == 6
+    merged = merged.points[np.argsort(merged[ORIGINAL_POINT_INDEX])]  # COPC reorders points
+    for dimension in ("intensity", "classification", "return_number", "user_data", "point_source_id", "species_id"):
+        np.testing.assert_array_equal(np.asarray(merged[dimension]),
+                                      np.r_[np.asarray(a[dimension]), np.asarray(b[dimension])], err_msg=dimension)
+    np.testing.assert_allclose(merged.x, np.r_[a.x, b.x], atol=1e-9)
+    for name, cloud, part in (("first", a, slice(0, 3)), ("second", b, slice(3, 6))):
+        if "gps_time" in cloud.point_format.dimension_names:
+            np.testing.assert_array_equal(merged.gps_time[part], cloud.gps_time, err_msg=name)
+        else:
+            assert not np.any(merged.gps_time[part]), name
+        if "red" in cloud.point_format.dimension_names:
+            np.testing.assert_array_equal(merged.red[part], cloud.red, err_msg=name)
+        elif "red" in merged.point_format.dimension_names:
+            assert not np.any(merged.red[part]), name
+
+
+def test_scan_angle_rank_becomes_scan_angle(tmp_path):
+    first, second = tmp_path / "a.las", tmp_path / "b.las"
+    format_cloud(first, 1)
+    format_cloud(second, 6)
+    output = tmp_path / "merged.laz"
+    create_full_resolution_product([first, second], output, "laz", original_point_index=False)
+    np.testing.assert_array_equal(np.asarray(laspy.read(output).points["scan_angle"]),
+                                  [-2500, 0, 5000, -2500, 0, 5000])
+
+
+def test_extra_bytes_in_another_order_merge_by_name(tmp_path):
+    first, second = tmp_path / "a.las", tmp_path / "b.las"
+    a = format_cloud(first, 3, extras=("alpha", "beta"))
+    b = format_cloud(second, 3, extras=("beta", "alpha"))
+    output = tmp_path / "merged.laz"
+    create_full_resolution_product([first, second], output, "laz", original_point_index=False)
+    merged = laspy.read(output)
+    assert merged.header.point_format.id == 3
+    for name in ("alpha", "beta"):
+        np.testing.assert_array_equal(np.asarray(merged[name]), np.r_[np.asarray(a[name]), np.asarray(b[name])])
+
+
+def test_one_point_format_stays_as_it_is(tmp_path):
+    first, second = tmp_path / "a.las", tmp_path / "b.las"
+    format_cloud(first, 3, version="1.2")
+    format_cloud(second, 3, version="1.2")
+    header = merged_header([first, second], False)
+    assert header.point_format.id == 3 and str(header.version) == "1.2"
+
+
+def legacy_count(path, count):
+    """Claim ``count`` points in a LAS 1.2 header; merged_header reads headers only."""
+    data = bytearray(path.read_bytes())
+    data[107:111] = int(count).to_bytes(4, "little")
+    path.write_bytes(data)
+
+
+@pytest.mark.parametrize("counts, version", [((2_147_483_647, 2_147_483_648), "1.2"),
+                                             ((2_147_483_648, 2_147_483_648), "1.4"),
+                                             ((4_000_000_000, 3_044_924_732), "1.4")])
+def test_version_can_count_every_point(tmp_path, counts, version):
+    paths = [tmp_path / "a.las", tmp_path / "b.las"]
+    for path, count in zip(paths, counts):
+        format_cloud(path, 3, version="1.2")
+        legacy_count(path, count)
+    header = merged_header(paths, True)
+    assert str(header.version) == version and header.point_format.id == 3
+
+
+def test_writer_passes_the_32_bit_limit_after_promotion(tmp_path):
+    # The job's state on dataset 2585: 4,294,255,408 points written, one million more to come.
+    source = format_cloud(tmp_path / "a.las", 3, extras=(), version="1.2")
+    points = laspy.ScaleAwarePointRecord.zeros(1_000_000, header=source.header)
+    with pytest.raises(laspy.errors.LaspyException, match="maximum number of points"):
+        with laspy.open(tmp_path / "old.las", mode="w", header=source.header.copy()) as writer:
+            writer.header.point_count = 4_294_255_408
+            writer.write_points(points)
+    header = ensure_point_capacity(source.header.copy(), 7_044_924_732)
+    assert str(header.version) == "1.4"
+    with laspy.open(tmp_path / "new.las", mode="w", header=header) as writer:
+        writer.header.point_count = 4_294_255_408
+        writer.write_points(points)
+
+
+def test_intermediate_merge_counts_every_point(tmp_path, monkeypatch):
+    from remap_first_pipeline import merge_file
+
+    paths = [tmp_path / "a.las", tmp_path / "b.las"]
+    for path in paths:
+        format_cloud(path, 3, extras=(), version="1.2")
+    monkeypatch.setattr("remap_first_pipeline.ensure_point_capacity",
+                        lambda header, total: (captured.append(total), header)[1])
+    captured = []
+    merge_file(paths, tmp_path / "merged.las")
+    assert captured == [6]
+
+
+@pytest.mark.parametrize("formats", [(1, 3), (3, 7), (1, 6), (6, 8)])
+def test_mixed_point_formats_through_the_task(tmp_path, formats):
+    folder = tmp_path / "in"
+    folder.mkdir()
+    for name, point_format in zip(("a.las", "b.las"), formats):
+        format_cloud(folder / name, point_format)
+    products = create_prod_merged_files(folder, tmp_path / "out", "full", "copc.laz", 0.01, 0.1)
+    assert laspy.read(products[0]).header.point_count == 6

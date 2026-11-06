@@ -25,8 +25,6 @@ import math
 import multiprocessing
 import os
 from pathlib import Path
-import shutil
-import tempfile
 import time
 
 import laspy
@@ -34,6 +32,7 @@ import numpy as np
 
 from output_publication import publish_files, validate_output_paths
 from output_names import file_stem
+from scratch import remove_tree, scratch_directory
 from voxel_grid import voxel_keys
 
 # One spilled point: XYZ in its tile's LAS encoding plus a bit per resolution.
@@ -349,7 +348,7 @@ def _reduce_block(task):
         for index, (centers, used) in enumerate(_reduce_block((child, resolutions, finer, scales, offsets, limit, nearest, include_original))):
             parts[index].append(centers)
             represented[index] += used
-    shutil.rmtree(children)
+    remove_tree(children)
     return [(np.concatenate(p) if p else np.empty((0, 3)), used) for p, used in zip(parts, represented)]
 
 
@@ -444,7 +443,7 @@ def _reduce_and_write(task):
     original_counts = _write_original_fragments(block, originals, slot_dirs, name, limit) if originals else {}
     results = _reduce_block((block, resolutions, cells, scales, offsets, limit, nearest, False)) \
         if any(resolutions) else [(np.empty((0, 3)), 0) for _ in resolutions]
-    shutil.rmtree(block)
+    remove_tree(block)
     dtype = laspy.PointFormat(FRAGMENT_POINT_FORMAT).dtype()
     counts = []
     for slot, (centers, used) in enumerate(results):
@@ -494,7 +493,7 @@ def _assemble(directory, target, template, compress):
         for points in _fragment_batches(directory, header):
             writer.write_points(points)
         write_retained_evlrs(writer, header)
-    shutil.rmtree(directory)
+    remove_tree(directory)
     return True
 
 
@@ -518,7 +517,7 @@ def _assemble_ply(directory, target, template, expected):
     if written != expected:
         raise ValueError(f"{Path(target).name}: wrote {written:,} of {expected:,} points")
     add_crs_comment_to_ply(target, crs)
-    shutil.rmtree(directory)
+    remove_tree(directory)
     return True
 
 
@@ -571,7 +570,7 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
     work_dir.mkdir(parents=True, exist_ok=True)
     workers = max(1, int(workers))
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix=".tile-centroids-", dir=work_dir) as scratch:
+    with scratch_directory(".tile-centroids-", dir=work_dir) as scratch:
         scratch = Path(scratch)
         spill_dir = scratch / "blocks"
         context = multiprocessing.get_context("spawn")
@@ -597,7 +596,7 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
             if not occupied.any():
                 raise ValueError("No planned tile core contains source points")
             for index in np.flatnonzero(~occupied):
-                shutil.rmtree(spill_dir / tiles[index].label, ignore_errors=True)
+                remove_tree(spill_dir / tiles[index].label)
             spilled = time.monotonic()
             spill_bytes = sum(path.stat().st_size for path in spill_dir.rglob("*.bin"))
             print(f"  Read {total_points:,} source points once with {workers} workers in {spilled - started:.1f} s; "

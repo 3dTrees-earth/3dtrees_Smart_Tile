@@ -470,7 +470,7 @@ def run_merge_task(params: Parameters):
         products = []
         if originals and params.transfer_original_dims_to_merged:
             products = _create_prod_merged_outputs(original_output, output_tiles.parent, params)
-        names.restore(output_tiles.parent, original_output)
+        names.restore(output_tiles.parent, original_output, products=products)
         from collection_folders import merged_product_collections, merged_tile_collections, original_collections
         _publish_collections(params, {
             **merged_tile_collections(output_tiles, output_tiles.parent / "segmented_filtered"),
@@ -540,7 +540,7 @@ def run_remap_task(params: Parameters):
         products = []
         if params.transfer_original_dims_to_merged:
             products = _create_prod_merged_outputs(output, output.parent, params)
-        names.restore(output.parent)
+        names.restore(output.parent, products=products)
         from collection_folders import merged_product_collections, original_collections
         _publish_collections(params, {**original_collections(output), **merged_product_collections(products)})
         print(f"Strict original remap complete: {output}")
@@ -572,19 +572,18 @@ def run_create_merged_file_task(params: Parameters):
         names = StagedNames(input_dirs, output_dir)
         input_dirs = [names.folder(folder) for folder in input_dirs]
         if len(input_dirs) > 1:
-            import shutil
-            import tempfile
             from attribute_join import join_attribute_collections
+            from scratch import remove_tree, scratch_directory
 
             output_dir.mkdir(parents=True, exist_ok=True)
             print(f"Joining attributes of {len(input_dirs)} collections of the same originals")
-            with tempfile.TemporaryDirectory(prefix=".joined-originals-", dir=output_dir) as work:
+            with scratch_directory(".joined-originals-", dir=output_dir) as work:
                 joined = join_attribute_collections(input_dirs, Path(work) / "originals")
                 products = _create_prod_merged_outputs(joined, output_dir, params)
-                shutil.rmtree(joined)
+                remove_tree(joined)
         else:
             products = _create_prod_merged_outputs(input_dirs[0], output_dir, params)
-        names.restore(output_dir)
+        names.restore(output_dir, products=products)
         from collection_folders import merged_product_collections
         _publish_collections(params, merged_product_collections(products))
     except Exception as e:

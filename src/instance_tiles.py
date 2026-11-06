@@ -36,8 +36,6 @@ from concurrent.futures import ProcessPoolExecutor
 import math
 import multiprocessing
 from pathlib import Path
-import shutil
-import tempfile
 import time
 from urllib.parse import quote
 
@@ -50,6 +48,7 @@ from tile_centroids import (CHUNK_POINTS, Tile, _block_key, _init_worker, _neare
 from output_names import file_stem
 from voxel_grid import voxel_keys
 from point_cloud_metadata import extra_bytes_metadata_equal, extra_bytes_params_from_dimension_info
+from scratch import remove_tree, scratch_directory
 from prediction_collections import assign_prediction_values, promote_collection_extra_dim
 
 WIDE_INSTANCE = 50.0  # metres: wider instances are reported with a warning
@@ -356,7 +355,7 @@ def _reduce(task):
                 chosen = records[_nearest_to_mean(xyz, starts, counts, sums, scales)]
             _point_records(chosen, point_format, scales, offsets, instance_field, attributes).tofile(fragment)
             results.append((len(chosen), len(records)))
-    shutil.rmtree(block)
+    remove_tree(block)
     return results
 
 
@@ -461,7 +460,7 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
     started = time.monotonic()
     context = multiprocessing.get_context("spawn")
     results, products = {}, []
-    with tempfile.TemporaryDirectory(prefix=".instance-tiles-", dir=output_dir) as scratch, \
+    with scratch_directory(".instance-tiles-", dir=output_dir) as scratch, \
             ProcessPoolExecutor(max_workers=workers, mp_context=context, initializer=_init_worker) as pool:
         scratch = Path(scratch)
         parts = {d: [] for d in dimensions}
@@ -531,7 +530,7 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
                     target = convert_instance_tile(target, formats[slot], (d, *attributes))
                     written[resolution].append((target, tile.label))
                     points[resolution] += kept[slot]
-                shutil.rmtree(staged / tile.label)
+                remove_tree(staged / tile.label)
             results[d]["outputs"] = {}
             for slot, resolution in enumerate(resolutions):
                 directory, output_format = directories[d][slot], formats[slot]

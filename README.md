@@ -317,8 +317,11 @@ value; the report's `parallelism` field records the effective budget.
 
 - Enriched originals keep their header, CRS records, scales, offsets, point
   format and other dimensions; only predictions are added.
-- LAS 1.4/COPC outputs carry exactly one standardized WKT CRS record, so a LAZ
-  derived from COPC is not byte-identical to the enriched original.
+- LAS/LAZ outputs keep the source's CRS records byte for byte. COPC and PDAL
+  products carry one WKT record from the writer, so a LAZ derived from COPC is
+  not byte-identical to the enriched original.
+- An ExtraBytes column named like a standard LAS field keeps its name in LAS/LAZ
+  outputs. Viewer products and COPCs publish it as `<name>_extra`.
 - ExtraBytes `no_data` declarations survive re-encoding; ambiguous ones fail.
 - Vector ExtraBytes (2–3 elements) are scalarized for COPC; the schema is kept in
   a `3DTrees` VLR/EVLR and a `*.vector-extra-bytes.json` sidecar, and every

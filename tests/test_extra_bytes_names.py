@@ -21,7 +21,7 @@ CHANGED = ["Red", "height above ground", "PointID", "normal x", "Coord. Z", "Rou
            "C2C absolute distances[<2]", "reflectance", "Withheld", "classification",
            "Ünïcode name", "a name that is exactly 32 bytes!"]
 KEPT = ["Pulse width", "plain_name", "Amplitude"]
-# Named like standard LAS fields: published as "<name>_extra".
+# Named like standard LAS fields: "<name>_extra" in viewer products and COPCs, unchanged in LAS/LAZ outputs.
 EXTRA = {"Red": "Red_extra", "Withheld": "Withheld_extra", "classification": "classification_extra"}
 
 
@@ -190,7 +190,7 @@ class TaskNameTests(unittest.TestCase):
             run.run_remap_task(params)
             enriched = root / "out/original_with_predictions/original.las"
             names = [n.decode() for n in raw_names(enriched)]
-            self.assertEqual(names[:len(source_values)], [published(n) for n in source_values])
+            self.assertEqual(names[:len(source_values)], list(source_values))
             products = list((root / "out").glob("merged.*"))
             self.assertTrue(products)
             for product in products:
@@ -222,12 +222,12 @@ class CoexistingNameTests(unittest.TestCase):
     def check_outputs(self, root, original_output):
         enriched = original_output / "original.las"
         names = [n.decode() for n in raw_names(enriched)]
-        for expected in ("height above ground", "Withheld_extra", "treeID", "PredInstance_SAT"):
+        for expected in ("height above ground", "Withheld", "treeID", "PredInstance_SAT"):
             self.assertIn(expected, names)
-        self.assertNotIn("Withheld", names)
+        self.assertNotIn("Withheld_extra", names)
         values = read_by_name(enriched)[0]
         np.testing.assert_array_equal(values["height above ground"], np.arange(50) * 0.5)
-        np.testing.assert_array_equal(values["Withheld_extra"], np.arange(50) % 7)
+        np.testing.assert_array_equal(values["Withheld"], np.arange(50) % 7)
         np.testing.assert_array_equal(values["treeID"], np.arange(50) // 10)
         for product in [*root.rglob("merged.*"), *root.rglob("prod_merged_*")]:
             product_names = [n.decode() for n in raw_names(product)]

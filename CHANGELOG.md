@@ -1,5 +1,29 @@
 # Changelog
 
+## v2.4.3 - unreleased
+
+### CRS records (3DT-2718)
+- LAS/LAZ outputs keep the source's CRS records byte for byte, in VLRs and EVLRs, with the WKT flag. `copy_single_source_header` no longer rewrites them as WKT1_GDAL from the local EPSG database. That rewrite dropped the axis order of northing-first CRSs (3805, EPSG:6678) and renamed CRSs between PROJ versions (3827, EPSG:3067 became EUREF-FIN), so the sidecar check rejected the member.
+- laspy serializes CRS records anew when writing; `crs_records.py` makes it write the bytes it read, including NUL padding.
+- Remap checks every enriched original against its source byte for byte. A full-resolution merge keeps the first input's records and warns if another input spells the shared CRS differently.
+- COPC and PDAL products still carry the writer's WKT and are validated semantically; those writers rewrite CRS text.
+
+### ExtraBytes names (3DT-2790)
+- `<name>_extra` applies only to viewer products (`create_merged_file` outputs) and COPCs. Remap and merge LAS/LAZ outputs keep the base's column names, as the sidecar check requires (389: `Class`).
+
+### Full-resolution merge
+- Above 4,294,967,295 points the merged file is LAS 1.4, because LAS 1.3 and older count points in 32 bits (3DT-2789, 2585). Smaller merges keep the inputs' version. The intermediate merged cloud of merge and remap does the same.
+- Inputs with different point formats are promoted to LAS 1.4 format 6, 7 with RGB, or 8 with NIR: standard fields by name, `scan_angle_rank` to `scan_angle`, missing fields zero (3DT-2677).
+- ExtraBytes are compared as a set, so their order may differ between inputs (3DT-2677).
+
+### Tile grid
+- The grid covers the points' own coordinates. PDAL's tile index keeps 15 significant digits, so its minimum could lie inside the data and leave points outside every tile core (3860, 3849: `1 source points lie outside every planned tile core`).
+- Neighbouring cores share one float edge, and the last tile reaches a maximum on its edge.
+
+### Network storage
+- Scratch cleanup retries while NFS reports a folder busy. A folder that stays behind is a warning, not a failed task (`scratch.py`).
+- A cleanup failure no longer replaces the error that stopped the task: the first error and its traceback are written before cleanup. On 6 Nov four remaps ended with only `[Errno 16] Device or resource busy`.
+
 ## v2.4.2 - 2026-10-31
 
 ### ExtraBytes missingness (#15)

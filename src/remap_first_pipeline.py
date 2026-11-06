@@ -6,7 +6,6 @@ import csv
 import json
 import math
 import os
-import tempfile
 import time
 from contextlib import ExitStack
 from pathlib import Path
@@ -22,9 +21,11 @@ from merge_stages import (
     prepare_dense, reconcile_instances,
 )
 from point_cloud_metadata import (
-    copc_only_files, copy_single_source_header, raw_point_cloud_files,
+    copc_only_files, copy_single_source_header, ensure_point_capacity, raw_point_cloud_files,
     update_extra_dimensions, write_retained_evlrs,
 )
+from crs_records import validate_crs_records_unchanged
+from scratch import scratch_directory
 from dense_instance_ownership import (
     ANCHORS, filter_owned_instances, ownership_regions,
     assign_shared_points,
@@ -232,7 +233,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                 source_header = reader.header
             # Query in spatial blocks so each region tree is built once, then
             # write in the original point order (original_blocks docstring).
-            with tempfile.TemporaryDirectory(prefix=".enrich-", dir=output_dir.parent) as scratch:
+            with scratch_directory(".enrich-", dir=output_dir.parent) as scratch:
                 scratch = Path(scratch)
                 tick = time.monotonic()
                 label_paths = {name: scratch / f"label_{i:04d}.npy" for i, name in enumerate(labels)}
@@ -293,6 +294,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                 store.clear()
                 label_stores.clear()
                 data = batches = None
+                validate_crs_records_unchanged(file, output_dir / file.name)
                 phases["write"] += time.monotonic() - tick
                 for dimension, ids in file_ids.items():
                     ids_by_dimension.setdefault(dimension, {})[file.name] = ids
@@ -341,8 +343,12 @@ def tile_overlaps(pairs, tile_bounds_json, origin):
 
 def merge_file(files, output):
     """Stream an intermediate merged cloud, preserving the dense geometry."""
+    total = 0
+    for file in files:
+        with laspy.open(file) as reader:
+            total += int(reader.header.point_count)
     with laspy.open(files[0]) as first:
-        header = copy_single_source_header(first.header)
+        header = ensure_point_capacity(copy_single_source_header(first.header), total)
     with laspy.open(output, mode="w", header=header) as writer:
         for file in files:
             with laspy.open(file) as reader:
@@ -484,7 +490,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
     for path in destinations:
         available_destination(path)
     try:
-        with tempfile.TemporaryDirectory(prefix=".remap-first-", dir=output_tiles.parent) as temporary, ExitStack() as stack:
+        with scratch_directory(".remap-first-", dir=output_tiles.parent) as temporary, ExitStack() as stack:
             work = Path(temporary)
             final_dir, dense_dir = work / "final", work / "dense"
             models, indices, baselines = [], [], []
@@ -793,7 +799,7 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
             raise ValueError("Provide one shared baseline or one baseline per model")
         if len(baseline_collections) == 1:
             baseline_collections = baseline_collections * len(collections)
-        with tempfile.TemporaryDirectory(prefix=".strict-remap-", dir=output.parent) as temporary, ExitStack() as stack:
+        with scratch_directory(".strict-remap-", dir=output.parent) as temporary, ExitStack() as stack:
             work = Path(temporary)
             models, indices, baselines = [], [], []
             source_files = original_files(originals)

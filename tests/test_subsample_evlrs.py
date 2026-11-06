@@ -8,6 +8,7 @@ from laspy.vlrs.vlrlist import VLRList
 from pyproj import CRS
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from crs_records import projection_record_list
 from subsample_com import make_center_of_mass_header
 
 
@@ -31,7 +32,6 @@ class SubsampleEvlrTests(unittest.TestCase):
         header = make_center_of_mass_header(source.header, True)
         self.assertEqual(str(header.version), "1.4")
         self.assertEqual(header.point_format.id, 0)
-        # The effective extended CRS becomes the single standardized WKT VLR.
-        self.assertEqual([v.record_id for v in header.vlrs if v.user_id == "LASF_Projection"], [2112])
-        self.assertFalse(any(v.user_id == "LASF_Projection" for v in header.evlrs))
+        # CRS records stay where the source has them, with their bytes.
+        self.assertEqual(projection_record_list(header), projection_record_list(source.header))
         self.assertTrue(header.parse_crs().equals(source.header.parse_crs()))

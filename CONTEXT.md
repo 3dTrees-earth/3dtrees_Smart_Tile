@@ -115,10 +115,14 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
 - Index every prediction collection sequentially into a disk-backed
   `PointIndex`, then stream originals in bounded batches; no COPC spatial
   queries, no full cloud in memory.
-- One standardized WKT CRS record per LAS 1.4/COPC output; validation is
-  semantic. Resolve duplicate projection records with the reader's last-record
-  precedence (EVLRs after VLRs); repeated conversion must be idempotent. Do not
-  promise byte-identical VLRs after LAZ → COPC.
+- LAS/LAZ outputs written by SmartTile keep the source's CRS records byte for
+  byte (`crs_records.py`), and remap checks that for every enriched original.
+  COPC and PDAL products carry one WKT record from the writer; validation is
+  semantic there. Resolve duplicate projection records with the reader's
+  last-record precedence (EVLRs after VLRs); repeated conversion must be
+  idempotent. Do not promise byte-identical VLRs after LAZ → COPC.
+- An ExtraBytes column named like a standard LAS field keeps its name in LAS/LAZ
+  outputs and is `<name>_extra` in viewer products and COPCs.
 - Tiling CRS check (`tile_crs`): reads WKT in EVLRs; rejects geographic,
   geocentric, non-metre horizontal or vertical units, unreadable CRS records,
   differing CRSs and mixed with/without CRS.
