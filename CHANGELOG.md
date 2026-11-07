@@ -9,7 +9,7 @@
 - `rct_terrain.tif`: beside the terrain meshes, merge and remap write all originals' RCT terrain as one COG (float32, 0.5 m, each cell the mesh height at its centre), for the viewer's raster layers. `src/terrain_cog.py` also converts existing meshes.
 
 ### Visualization COPC (prototype)
-- `create_merged_file --visualization-copc` writes one viewer-optimised COPC per original with coloring IDs, and `--merged-resolutions none` skips the merged products. It keeps the source's WKT record and holds the whole cloud in memory, so it is not for large originals yet.
+- `create_merged_file --visualization-copc` writes one viewer-optimised COPC per original with coloring IDs, and `--merged-resolutions none` skips the merged products. It keeps the source's WKT record and streams: the source is read twice in chunks and nodes above `memory_points` (4 million) are split through scratch files, so memory does not grow with the point count (3753: 10.6 → 1.7 GB peak). A voxel keeps the point with the lowest hash of its record index instead of a random permutation of the whole cloud; scaled float ExtraBytes are copied raw.
 
 ## v2.4.3 - unreleased
 

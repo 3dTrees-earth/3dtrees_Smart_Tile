@@ -112,6 +112,31 @@ class WriteVisualizationCopcTests(unittest.TestCase):
                 self.assertTrue(reader.header.global_encoding.wkt)
         self.assertEqual(records, [wkt])
 
+    def test_nodes_split_through_files_give_the_same_file(self):
+        # memory_points below the cloud size sends the root and its large children through scratch files.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _write_cloud(tmp / "plot.laz", n=60_000)
+            whole = write_visualization_copc(tmp / "plot.laz", tmp / "whole.copc.laz", grid=16, leaf_points=1_000)
+            split = write_visualization_copc(tmp / "plot.laz", tmp / "split.copc.laz", grid=16, leaf_points=1_000,
+                                             memory_points=5_000, workers=3)
+            self.assertEqual((tmp / "whole.copc.laz").read_bytes(), (tmp / "split.copc.laz").read_bytes())
+            self.assertEqual(whole["points_per_level"], split["points_per_level"])
+            self.assertFalse([p for p in tmp.iterdir() if p.name.startswith(".")])
+
+    def test_float_extra_bytes_with_a_scale_keep_their_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.las"
+            header = laspy.LasHeader(version="1.4", point_format=6)
+            header.add_extra_dim(laspy.ExtraBytesParams(name="Range", type=np.float32, scales=[1.0], offsets=[0.0]))
+            las = laspy.LasData(header)
+            las.x, las.y, las.z = np.arange(100.0), np.arange(100.0), np.zeros(100)
+            las.points.array["Range"] = np.linspace(0.1, 9.9, 100).astype(np.float32)
+            las.write(str(source))
+            write_visualization_copc(source, Path(tmp) / "out.copc.laz")
+            out = laspy.read(str(Path(tmp) / "out.copc.laz"))
+            np.testing.assert_array_equal(np.sort(out.points.array["Range"]), las.points.array["Range"])
+
     def test_rejects_unknown_dimension_selection(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
