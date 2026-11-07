@@ -25,8 +25,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
+from laspy.vlrs.known import WktCoordinateSystemVlr
 import numpy as np
 
+import crs_records  # noqa: F401  (laspy then writes CRS records as read)
 from visualization_coloring import (
     COLOR_ATTRIBUTE_DTYPE,
     GROUND_COLOR_HEX,
@@ -173,8 +175,14 @@ def _viewer_las(source, dimensions: Optional[Sequence[str]]):
         header.add_extra_dim(laspy.ExtraBytesParams(
             name=name, type=dim.dtype, description=dim.description,
             scales=dim.scales, offsets=dim.offsets))
+    # COPC needs one WKT record: the source's bytes where it has one (last record wins, as readers do).
+    wkt = [vlr for vlr in [*source.header.vlrs, *(source.header.evlrs or [])]
+           if isinstance(vlr, WktCoordinateSystemVlr) and vlr.string]
     crs = source.header.parse_crs()
-    if crs is not None:
+    if wkt:
+        header.vlrs.append(copy.deepcopy(wkt[-1]))
+        header.global_encoding.wkt = True
+    elif crs is not None:
         header.add_crs(crs)
     las = laspy.LasData(header)
     las.points = laspy.ScaleAwarePointRecord.zeros(len(source.points), header=header)

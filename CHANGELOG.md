@@ -8,6 +8,9 @@
 - `merge --instance-manifest` (a mode of merge; it takes no segmented point collections): the RayCloudTools `--instance-dimension` outputs of all instance tiles, from `--qsm-folder` or the per-kind folders of the RCT merge, per original (`_trees.txt`, `_trees_info.txt`, `_trees_mesh.ply`, `_terrain_mesh.ply`), with the instance IDs and table rows unchanged and a tree shared by originals in each, plus `<original>_qsm_octree/`, the results viewer's QSM octree (3DT-2626; the viewer's builder, unchanged). Point clouds are not merged.
 - `rct_terrain.tif`: beside the terrain meshes, merge and remap write all originals' RCT terrain as one COG (float32, 0.5 m, each cell the mesh height at its centre), for the viewer's raster layers. `src/terrain_cog.py` also converts existing meshes.
 
+### Visualization COPC (prototype)
+- `create_merged_file --visualization-copc` writes one viewer-optimised COPC per original with coloring IDs, and `--merged-resolutions none` skips the merged products. It keeps the source's WKT record and holds the whole cloud in memory, so it is not for large originals yet.
+
 ## v2.4.3 - unreleased
 
 ### CRS records (3DT-2718)

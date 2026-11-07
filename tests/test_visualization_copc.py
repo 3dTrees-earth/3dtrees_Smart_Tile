@@ -97,6 +97,21 @@ class WriteVisualizationCopcTests(unittest.TestCase):
             self.assertTrue(all(c > 0 for c in counts))
             self.assertEqual(sum(counts), 30_000)
 
+    def test_keeps_the_source_wkt_record(self):
+        wkt = (Path(__file__).parent / "fixtures/crs/3805_epsg6678.2112.bin").read_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.las"
+            _write_cloud(source, n=5_000, point_format=6)
+            cloud = laspy.read(str(source))
+            cloud.header.vlrs.append(laspy.VLR(user_id="LASF_Projection", record_id=2112, record_data=wkt))
+            cloud.header.global_encoding.wkt = True
+            cloud.write(str(source))
+            write_visualization_copc(source, Path(tmp) / "out.copc.laz")
+            with laspy.open(Path(tmp) / "out.copc.laz") as reader:
+                records = [vlr.record_data_bytes() for vlr in reader.header.vlrs if vlr.record_id == 2112]
+                self.assertTrue(reader.header.global_encoding.wkt)
+        self.assertEqual(records, [wkt])
+
     def test_rejects_unknown_dimension_selection(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
