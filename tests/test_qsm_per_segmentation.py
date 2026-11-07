@@ -64,6 +64,11 @@ def rct_outputs(folder, label, trees):
     folder.mkdir(exist_ok=True)
     rows = "".join(f"{uid}, {x},{y},0,0.15,-1,0, {x},{y},1.3,0.12,0,1\n" for uid, (x, y) in trees.items())
     (folder / f"{label}_trees.txt").write_text(TREES_HEADER + rows)
+    if not trees:  # RCT writes an empty tile's tree-info table with the segment columns only
+        (folder / f"{label}_trees_info.txt").write_text(TREES_HEADER)
+        tree_mesh(folder / f"{label}_trees_mesh.ply", trees)
+        grid_terrain(folder / f"{label}_mesh.ply", 0 if label == "c00_r00" else 8, 12 if label == "c00_r00" else 20)
+        return
     info = "".join(f"{uid}.0000,8.0,1.5,0,0,0.24,0,0, {x},{y},0,0.15,-1,0,0.1,0.3,8,0,0,0,0,1, "
                    f"{x},{y},1.3,0.12,0,1,0.05,0.24,7,0,0,0,0,0\n" for uid, (x, y) in trees.items())
     (folder / f"{label}_trees_info.txt").write_text(INFO_HEADER + info)
@@ -141,6 +146,43 @@ def test_qsms_go_to_every_original_holding_their_points_with_ids_and_rows_kept(t
         assert (merged / f"{stem}_qsm_octree" / "hierarchy.json").is_file()
     hierarchy = json.loads((merged / "b_qsm_octree" / "hierarchy.json").read_text())
     assert hierarchy["trees"]["count"] == 2
+
+
+def test_a_tile_whose_instances_all_got_no_qsm_is_reported(tiled):
+    tmp_path, out, terrain = tiled
+    report = run_merge(tmp_path, out, terrain, {"c00_r00": {7: (9.0, 5.0)}, "c01_r00": {}})
+    assert [t["qsms"] for t in report["tiles"]] == [1, 0]
+    assert report["tiles"][1]["without_qsm"] == 1
+    assert table_ids(tmp_path / "merged" / "b_trees_info.txt") == [7]
+
+
+def test_only_empty_tiles_give_empty_tables(tiled):
+    tmp_path, out, terrain = tiled
+    report = run_merge(tmp_path, out, terrain, {"c00_r00": {}, "c01_r00": {}})
+    assert report["qsms"] == 0
+    assert table_ids(tmp_path / "merged" / "a_trees.txt") == []
+
+
+def test_an_empty_table_beside_a_mesh_with_trees_fails(tiled):
+    tmp_path, out, terrain = tiled
+    qsm = tmp_path / "qsm"
+    rct_outputs(qsm, "c00_r00", {7: (9.0, 5.0)})
+    rct_outputs(qsm, "c01_r00", {})
+    tree_mesh(qsm / "c01_r00_trees_mesh.ply", {8: (16.0, 5.0)})
+    with pytest.raises(ValueError, match="c01_r00: the tables list no QSM but the mesh holds 1 trees"):
+        merge_qsm(out / manifest_name(SAT), qsm, tmp_path / "merged", rct_terrain_folder=terrain)
+
+
+def test_a_tile_with_its_instances_but_no_files_fails(tiled):
+    tmp_path, out, terrain = tiled
+    qsm = tmp_path / "qsm"
+    rct_outputs(qsm, "c00_r00", {7: (9.0, 5.0)})
+    rct_outputs(qsm, "c01_r00", {})
+    for path in qsm.glob("c01_r00_*"):
+        if path.name != "c01_r00_mesh.ply":
+            path.unlink()
+    with pytest.raises(ValueError, match="c01_r00 owns 1 instances but has no RayCloudTools trees, info, mesh"):
+        merge_qsm(out / manifest_name(SAT), qsm, tmp_path / "merged", rct_terrain_folder=terrain)
 
 
 def test_an_instance_without_qsm_is_reported_not_written(tiled):

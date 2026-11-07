@@ -19,7 +19,10 @@ and once for all originals ``rct_terrain.tif``, their terrain as a COG (``terrai
 
 It fails on an instance in two tiles, on an instance its tile does not own, on
 missing tile files and on tables or meshes that disagree, and reports the
-instances that got no QSM (``qsm_merge_report.json``).
+instances that got no QSM (``qsm_merge_report.json``). A tile none of whose
+instances got a QSM is reported, not refused: RayCloudTools then still writes
+all three files, but its tables have no rows (and the tree-info table only the
+segment columns) and its mesh no tree (``rct_tree_count 0``).
 """
 
 from __future__ import annotations
@@ -101,6 +104,7 @@ def _write_table(path, description, heading, rows):
 
 
 def _same_header(kind, seen, header, path):
+    """The tables of all tiles must share their columns; a table without rows (an empty tile) has fewer."""
     if seen.setdefault(kind, (header, path))[0] != header:
         raise ValueError(f"{path.name}: {kind} header differs from {seen[kind][1].name}; "
                          "merge only outputs of one RayCloudTools version and parameter set")
@@ -152,7 +156,7 @@ def merge_qsm(manifest_path, qsm_folder, output_dir, *, dimension=None, rct_terr
         raise ValueError(f"RayCloudTools outputs for tiles the manifest does not list: {', '.join(unknown)}")
 
     rows = {"trees": {}, "info": {}}
-    tile_of, headers, report_tiles, meshes = {}, {}, [], []
+    tile_of, headers, empty_headers, report_tiles, meshes = {}, {}, {}, [], []
     for index, label in enumerate(labels):
         owned = {uid for uid, tile in owner_tile.items() if tile == index}
         tile = files.get(label, {})
@@ -165,7 +169,7 @@ def merge_qsm(manifest_path, qsm_folder, output_dir, *, dimension=None, rct_terr
         table_ids = {}
         for kind in ("trees", "info"):
             description, heading, table = read_table(tile[kind])
-            _same_header(kind, headers, (description, heading), tile[kind])
+            _same_header(kind, headers if table else empty_headers, (description, heading), tile[kind])
             table_ids[kind] = set(table)
             for uid, payload in table.items():
                 if uid in tile_of:
@@ -182,7 +186,10 @@ def merge_qsm(manifest_path, qsm_folder, output_dir, *, dimension=None, rct_terr
         mesh = TreeMesh.open(tile["mesh"])
         if mesh.scope != INSTANCE_SCOPE:
             raise ValueError(f"{tile['mesh'].name}: expected tree IDs of scope {INSTANCE_SCOPE}, found {mesh.scope}")
-        meshes.append((index, mesh, table_ids["trees"]))
+        if not table_ids["trees"] and (mesh.tree_count or len(mesh.faces)):
+            raise ValueError(f"Tile {label}: the tables list no QSM but the mesh holds {mesh.tree_count} trees")
+        if table_ids["trees"]:
+            meshes.append((index, mesh, table_ids["trees"]))
         report_tiles.append({"tile": label, "instances": len(owned), "qsms": len(table_ids["trees"]),
                              "without_qsm": len(owned - table_ids["trees"])})
 
@@ -206,6 +213,7 @@ def merge_qsm(manifest_path, qsm_folder, output_dir, *, dimension=None, rct_terr
     cores = _tile_cores(manifest)
 
     covered_ids = set(tile_of)
+    headers = {kind: headers.get(kind, empty_headers.get(kind)) for kind in ("trees", "info")}
     report_originals = []
     for o, stem in enumerate(originals):
         mine = sorted(uid for uid in tile_of if o in holders[uid])
