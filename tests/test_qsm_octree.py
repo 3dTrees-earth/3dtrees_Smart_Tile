@@ -28,7 +28,7 @@ def tree_records(out: Path) -> list[dict]:
 
 
 def test_each_tree_record_points_at_exactly_its_line_of_trees_info(tmp_path):
-    build(INFO, tmp_path, mesh=MESH)
+    build([(INFO, MESH)], tmp_path)
     lines = INFO.read_bytes().split(b'\n')[2:-1]
     by_id = {int(line.split(b',', 1)[0]): line + b'\n' for line in lines}
     info = INFO.read_bytes()
@@ -52,7 +52,7 @@ def mesh_body():
 
 
 def test_each_tree_record_points_at_exactly_its_faces_and_vertices_in_the_mesh(tmp_path):
-    build(INFO, tmp_path, mesh=MESH)
+    build([(INFO, MESH)], tmp_path)
     data, vertex_start, vertex_size, faces = mesh_body()
     for r in tree_records(tmp_path):
         own = [f for f in faces if f[4] == r['id']]
@@ -66,7 +66,7 @@ def test_each_tree_record_points_at_exactly_its_faces_and_vertices_in_the_mesh(t
 
 
 def test_tree_records_carry_treeinfo_attributes_and_the_originals_sizes(tmp_path):
-    hierarchy = build(INFO, tmp_path, mesh=MESH)
+    hierarchy = build([(INFO, MESH)], tmp_path)
     tree1 = next(r for r in tree_records(tmp_path) if r['id'] == 1)
     # From the fixture's line of tree 1: height, crown radius, DBH, then the first (base) segment.
     assert abs(tree1['height'] - 18.6547) < 1e-4
@@ -76,14 +76,14 @@ def test_tree_records_carry_treeinfo_attributes_and_the_originals_sizes(tmp_path
     assert abs(tree1['base_x'] + ox - 437150.4379) < 1e-3
     assert abs(tree1['base_y'] + oy - 5842032.9962) < 1e-3
     assert abs(tree1['base_z'] + oz - 1118.0640) < 1e-3
-    assert hierarchy['originals'] == {
+    assert hierarchy['originals'] == [{
         'info': {'name': '11505_trees_info.txt', 'size': INFO.stat().st_size},
         'mesh': {'name': '11505_trees_mesh.ply', 'size': MESH.stat().st_size},
-    }
+    }]
 
 
 def test_tree_records_carry_every_per_tree_value_and_the_root_segment_totals(tmp_path):
-    build(INFO, tmp_path, mesh=MESH)
+    build([(INFO, MESH)], tmp_path)
     # Tree 1's line: tree columns, then its first (root) segment, whose volume, diameter, dominance,
     # angle and children are the tree's total volume, maximum diameter and means (treeinfo's help).
     line = next(l for l in INFO.read_text().splitlines()[2:] if l.startswith('1,'))
@@ -99,8 +99,8 @@ def test_tree_records_carry_every_per_tree_value_and_the_root_segment_totals(tmp
 
 
 def test_a_result_without_mesh_builds_without_mesh_ranges(tmp_path):
-    hierarchy = build(INFO, tmp_path)
-    assert 'mesh' not in hierarchy['originals']
+    hierarchy = build([(INFO, None)], tmp_path)
+    assert 'mesh' not in hierarchy['originals'][0]
     for r in tree_records(tmp_path):
         assert (r['vertex_offset'], r['vertex_length'], r['face_offset'], r['face_length']) == (0, 0, 0, 0)
         assert r['info_length'] > 0
@@ -113,7 +113,7 @@ def test_a_mesh_whose_tree_faces_are_split_is_refused(tmp_path):
     broken = data[:face_start] + data[face_start + 20:] + data[face_start:face_start + 20]
     (tmp_path / 'mesh.ply').write_bytes(broken)
     try:
-        build(INFO, tmp_path / 'out', mesh=tmp_path / 'mesh.ply')
+        build([(INFO, tmp_path / "mesh.ply")], tmp_path / "out")
     except ValueError as error:
         assert 'one run' in str(error)
     else:
@@ -121,7 +121,7 @@ def test_a_mesh_whose_tree_faces_are_split_is_refused(tmp_path):
 
 
 def test_every_cylinder_of_the_originals_is_in_one_node(tmp_path):
-    hierarchy = build(INFO, tmp_path, mesh=MESH, capacity=100)
+    hierarchy = build([(INFO, MESH)], tmp_path, capacity=100)
     # Cylinders = segments with a parent (each line's segments after the first, which is the root here).
     lines = INFO.read_bytes().split(b'\n')[2:-1]
     expected = {int(line.split(b',', 1)[0]): line.count(b', ') - 1 for line in lines}
@@ -137,7 +137,7 @@ def test_every_cylinder_of_the_originals_is_in_one_node(tmp_path):
 
 
 def test_the_octree_names_the_columns_of_the_info_lines(tmp_path):
-    hierarchy = build(INFO, tmp_path)
+    hierarchy = build([(INFO, None)], tmp_path)
     # Header line 2 of the fixture: tree columns, then (after ", ") segment columns.
     assert hierarchy['info_columns']['tree'][:3] == ['predinstance', 'height', 'crown_radius']
     assert hierarchy['info_columns']['segment'][:5] == ['x', 'y', 'z', 'radius', 'parent_id']
@@ -146,7 +146,7 @@ def test_the_octree_names_the_columns_of_the_info_lines(tmp_path):
 
 def test_the_committed_fixture_octree_is_what_the_builder_writes(tmp_path):
     # The frontend tests read fixtures/rct-3753/octree: it must stay the builder's output.
-    fresh = build(INFO, tmp_path, mesh=MESH, capacity=100)
+    fresh = build([(INFO, MESH)], tmp_path, capacity=100)
     committed = json.loads((FIXTURE / 'octree' / 'hierarchy.json').read_text())
     fresh.pop('build_seconds')
     committed.pop('build_seconds')

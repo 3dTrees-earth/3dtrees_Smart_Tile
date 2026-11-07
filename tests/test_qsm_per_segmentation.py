@@ -143,9 +143,34 @@ def test_qsms_go_to_every_original_holding_their_points_with_ids_and_rows_kept(t
     assert report["terrain_cog"]["file"] == "rct_terrain.tif" and (tmp_path / "merged" / "rct_terrain.tif").is_file()
     for stem in ("a", "b"):
         assert (merged / f"{stem}_terrain_mesh.ply").read_bytes() == (terrain / f"{stem}_terrain_mesh.ply").read_bytes()
-        assert (merged / f"{stem}_qsm_octree" / "hierarchy.json").is_file()
-    hierarchy = json.loads((merged / "b_qsm_octree" / "hierarchy.json").read_text())
-    assert hierarchy["trees"]["count"] == 2
+        assert not (merged / f"{stem}_qsm_octree").exists()
+
+
+def octree_trees(folder):
+    from qsm_octree import TREE
+    hierarchy = json.loads((folder / "hierarchy.json").read_text())
+    table = (folder / "octree.bin").read_bytes()[hierarchy["trees"]["offset"]:]
+    return hierarchy, np.frombuffer(table, dtype=TREE)
+
+
+def test_one_octree_per_run_points_each_tree_into_the_first_original_holding_it(tiled):
+    tmp_path, out, terrain = tiled
+    report = run_merge(tmp_path, out, terrain, {"c00_r00": {7: (9.0, 5.0)}, "c01_r00": {8: (16.0, 5.0)}})
+    merged = tmp_path / "merged"
+    hierarchy, trees = octree_trees(merged / "octree")
+    assert hierarchy["contract"] == "3dtrees-qsm-octree-v2"
+    assert [o["info"]["name"] for o in hierarchy["originals"]] == ["a_trees_info.txt", "b_trees_info.txt"]
+    assert [o["mesh"]["name"] for o in hierarchy["originals"]] == ["a_trees_mesh.ply", "b_trees_mesh.ply"]
+    assert trees["id"].tolist() == [7, 8] and trees["original"].tolist() == [0, 1]  # 7 is in a and b: from a
+    assert hierarchy["totals"]["cylinders"] == 2 and report["octree"]["trees"] == 2
+    for tree in trees:
+        files = hierarchy["originals"][tree["original"]]
+        info = (merged / files["info"]["name"]).read_bytes()
+        line = info[tree["info_offset"]:tree["info_offset"] + tree["info_length"]].decode()
+        assert int(float(line.split(",", 1)[0])) == tree["id"]
+        mesh = (merged / files["mesh"]["name"]).read_bytes()
+        face = np.frombuffer(mesh[tree["face_offset"]:tree["face_offset"] + tree["face_length"]], dtype=TREE_FACE)
+        assert face["tree_id"].tolist() == [tree["id"]]
 
 
 def test_a_tile_whose_instances_all_got_no_qsm_is_reported(tiled):
@@ -159,8 +184,9 @@ def test_a_tile_whose_instances_all_got_no_qsm_is_reported(tiled):
 def test_only_empty_tiles_give_empty_tables(tiled):
     tmp_path, out, terrain = tiled
     report = run_merge(tmp_path, out, terrain, {"c00_r00": {}, "c01_r00": {}})
-    assert report["qsms"] == 0
+    assert report["qsms"] == 0 and report["octree"] is None
     assert table_ids(tmp_path / "merged" / "a_trees.txt") == []
+    assert not (tmp_path / "merged" / "octree").exists()
 
 
 def test_an_empty_table_beside_a_mesh_with_trees_fails(tiled):

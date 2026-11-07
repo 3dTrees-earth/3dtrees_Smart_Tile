@@ -13,9 +13,10 @@ task's ``qsm_manifest_<dimension>.json`` this task writes, per original:
   ``--rct-terrain-folder`` is given (the ground the QSMs were rooted on),
   otherwise the tiles' terrain triangles, each from the tile whose core holds
   its centroid, over the original's 1 m footprint (``qsm_footprints.npz``).
-- ``<original>_qsm_octree/``: the viewer's QSM octree (``qsm_octree``, 3DT-2626).
-
-and once for all originals ``rct_terrain.tif``, their terrain as a COG (``terrain_cog``).
+and once for all originals ``rct_terrain.tif``, their terrain as a COG
+(``terrain_cog``), and ``octree/``, the viewer's QSM octree of the whole run
+(``qsm_octree``, 3DT-2626): one per dataset and instance dimension, internal to
+the viewer, its ranges pointing into each original's files.
 
 It fails on an instance in two tiles, on an instance its tile does not own, on
 missing tile files and on tables or meshes that disagree, and reports the
@@ -43,6 +44,7 @@ from raycloud_tree_files import _tile_key, read_tree_header
 INSTANCE_SCOPE = "instance-dimension"  # RayCloudTools --instance-dimension: tree_id is the instance ID
 KINDS = {"_trees_info.txt": "info", "_trees.txt": "trees", "_trees_mesh.ply": "mesh", "_mesh.ply": "terrain"}
 REPORT = "qsm_merge_report.json"
+OCTREE = "octree"
 
 
 def tile_files(folder=None, kind_folders=None):
@@ -214,7 +216,7 @@ def merge_qsm(manifest_path, qsm_folder, output_dir, *, dimension=None, rct_terr
 
     covered_ids = set(tile_of)
     headers = {kind: headers.get(kind, empty_headers.get(kind)) for kind in ("trees", "info")}
-    report_originals = []
+    report_originals, octree_sources = [], []
     for o, stem in enumerate(originals):
         mine = sorted(uid for uid in tile_of if o in holders[uid])
         description, heading = headers["trees"][0]
@@ -237,11 +239,10 @@ def merge_qsm(manifest_path, qsm_folder, output_dir, *, dimension=None, rct_terr
             terrain = {"source": f"RCT terrain {source.name}"}
         else:
             terrain = _terrain_from_tiles(terrain_path, tile_terrain, cores, footprints[o], crs)
-        entry = {"original": stem, "trees": len(mine), "mesh_faces": int(faces),
-                 "trees_without_faces": sorted(wanted - per_tree.keys()), "terrain": terrain}
-        if octree and mine:
-            entry["octree"] = build_octree(info, output_dir / f"{stem}_qsm_octree", mesh=mesh_path)
-        report_originals.append(entry)
+        report_originals.append({"original": stem, "trees": len(mine), "mesh_faces": int(faces),
+                                 "trees_without_faces": sorted(wanted - per_tree.keys()), "terrain": terrain})
+        if mine:
+            octree_sources.append((info, mesh_path))
     del meshes, tile_terrain  # release the memory maps before the caller cleans up
 
     covered = covered_ids
@@ -253,6 +254,7 @@ def merge_qsm(manifest_path, qsm_folder, output_dir, *, dimension=None, rct_terr
         "tiles": report_tiles,
         "originals": report_originals,
         "terrain": "rct" if rct_terrain_folder else "instance tiles",
+        "octree": build_octree(octree_sources, output_dir / OCTREE)["totals"] if octree and octree_sources else None,
         "terrain_cog": write_terrain_cog([output_dir / f"{stem}_terrain_mesh.ply" for stem in originals],
                                          output_dir / TERRAIN_COG, crs=crs),
     }

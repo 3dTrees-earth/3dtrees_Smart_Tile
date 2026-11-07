@@ -1,11 +1,13 @@
-"""The QSM octree the viewer reads beside RayCloudTools files per original: the
+"""The QSM octree the viewer reads beside the RayCloudTools files of a run: the
 only file the viewer adds to the original outputs (3DT-2626). SmartTile writes
-it in `merge --instance-manifest` (QSMs for an existing segmentation); the code is the
-results viewer's `scripts/results_view/qsm_octree.py`, unchanged, so both build
-identical octrees.
+one per dataset and instance dimension in `merge --instance-manifest` (QSMs for
+an existing segmentation), internal to the viewer; the files per original stay
+the products. Derived from the results viewer's
+`scripts/results_view/qsm_octree.py` (contract v1, one original); v2 indexes
+several originals.
 
-Reads the original `_trees_info.txt` (and `_trees_mesh.ply` where there is one)
-as SmartTile stores them and writes into `--out`:
+Reads each original's `_trees_info.txt` (and `_trees_mesh.ply` where there is
+one) as SmartTile stores them and writes into `--out`:
 
 - `octree.bin`:
   - the octree's nodes, one after another (18 B per cylinder), so a node is one
@@ -23,17 +25,21 @@ as SmartTile stores them and writes into `--out`:
 
   - then the tree table, one record per tree, sorted by id (layout in
     hierarchy.json): the tree's attributes as treeinfo wrote them, its base and
-    QSM volume, its line in `_trees_info.txt` (byte offset and length, newline
-    included) and its vertex and face ranges in `_trees_mesh.ply`.
+    QSM volume, the original it is read from (`original`, an index into
+    `originals`), its line in that original's `_trees_info.txt` (byte offset and
+    length, newline included) and its vertex and face ranges in its
+    `_trees_mesh.ply`. A tree whose points lie in several originals is in each
+    of their files and once in the octree, from the first of them.
 - `hierarchy.json`: the nodes (name, level, cube, byte range, count, radii,
   child mask), the tree table's place and layout, the origin (absolute) the
-  cubes and bases are relative to, and the names and sizes of the originals the
-  ranges point into.
+  cubes and bases are relative to, and per original the names and sizes of
+  the files the ranges point into.
 
 A cylinder runs from a segment's parent to the segment, with the segment's
 radius (treetools convention). The originals are only read.
 
-    python3 qsm_octree.py --info 11172_trees_info.txt --mesh 11172_trees_mesh.ply --out octree
+    python3 qsm_octree.py --info a_trees_info.txt --mesh a_trees_mesh.ply \
+        --info b_trees_info.txt --mesh b_trees_mesh.ply --out octree
 """
 
 from __future__ import annotations
@@ -59,6 +65,8 @@ TREE_FIELDS = [
 TREE_VALUES = ['dimension', 'monocotal', 'bend', 'branch_slope']
 ROOT_VALUES = ['volume', 'diameter', 'dominance', 'angle', 'children']
 TREE_FIELDS += [(f'tree.{name}', 'f') for name in TREE_VALUES] + [(f'root.{name}', 'f') for name in ROOT_VALUES]
+TREE_FIELDS += [('original', 'I')]
+CONTRACT = '3dtrees-qsm-octree-v2'
 TREE = np.dtype([(name, '<' + {'I': 'u4', 'f': 'f4', 'Q': 'u8'}[kind]) for name, kind in TREE_FIELDS])
 
 
@@ -176,9 +184,28 @@ def index_mesh(path: Path) -> dict[int, tuple[int, int, int, int, int]]:
             for t, a, b, lo, hi in zip(run_tree, run_start, run_end, low, high)}
 
 
-def build(info: Path, out: Path, mesh: Path | None = None, capacity: int = 12000) -> dict:
+def read_originals(sources):
+    """read_info over several originals: each tree once, from the first original that holds it."""
+    columns, trees, parts, seen = None, [], [], set()
+    for index, (info, _) in enumerate(sources):
+        cols, found, p0, p1, r, ids = read_info(Path(info))
+        if columns is not None and cols != columns:
+            raise ValueError(f'{Path(info).name}: columns differ from {Path(sources[0][0]).name}')
+        columns = cols
+        new = [t for t in found if t['id'] not in seen]
+        keep = ~np.isin(ids, np.array(sorted(seen), dtype=np.uint32))
+        seen.update(t['id'] for t in new)
+        trees += [{**t, 'original': index} for t in new]
+        parts.append((p0[keep], p1[keep], r[keep], ids[keep]))
+    p0, p1, r, ids = (np.concatenate(column) for column in zip(*parts))
+    return columns, trees, p0, p1, r, ids
+
+
+def build(sources, out: Path, capacity: int = 12000) -> dict:
+    """The octree of one or more originals: ``sources`` holds (``_trees_info.txt``, ``_trees_mesh.ply`` or None)."""
     started = time.time()
-    columns, trees, p0, p1, r, ids = read_info(Path(info))
+    sources = [(Path(info), Path(mesh) if mesh else None) for info, mesh in sources]
+    columns, trees, p0, p1, r, ids = read_originals(sources)
     axis = p1 - p0
     length = np.linalg.norm(axis, axis=1)
     keep = length > 0
@@ -235,19 +262,23 @@ def build(info: Path, out: Path, mesh: Path | None = None, capacity: int = 12000
         offset += len(raw)
         queue.extend(children)
 
-    ranges = index_mesh(Path(mesh)) if mesh else {}
+    ranges = [index_mesh(mesh) if mesh else {} for _, mesh in sources]
     table = np.zeros(len(trees), dtype=TREE)
     for i, t in enumerate(sorted(trees, key=lambda t: t['id'])):
         base = t['base'] - origin
         table[i] = (t['id'], base[0], base[1], base[2], t['height'], t['dbh'], t['crown_radius'], t['volume'],
-                    t['cylinders'], t['info_offset'], t['info_length'], *ranges.get(t['id'], (0, 0, 0, 0, 0)), *t['values'])
+                    t['cylinders'], t['info_offset'], t['info_length'],
+                    *ranges[t['original']].get(t['id'], (0, 0, 0, 0, 0)), *t['values'], t['original'])
     tree_bytes = table.tobytes()
     (out / 'octree.bin').write_bytes(b''.join(chunks) + tree_bytes)
-    originals = {'info': {'name': Path(info).name, 'size': Path(info).stat().st_size}}
-    if mesh:
-        originals['mesh'] = {'name': Path(mesh).name, 'size': Path(mesh).stat().st_size}
+    originals = []
+    for info, mesh in sources:
+        files = {'info': {'name': info.name, 'size': info.stat().st_size}}
+        if mesh:
+            files['mesh'] = {'name': mesh.name, 'size': mesh.stat().st_size}
+        originals.append(files)
     hierarchy = {
-        'contract': '3dtrees-qsm-octree-v1', 'record_bytes': RECORD.itemsize,
+        'contract': CONTRACT, 'record_bytes': RECORD.itemsize,
         'record': [[n, RECORD.fields[n][0].str] for n in RECORD.names],
         'origin': [float(v) for v in origin], 'capacity': capacity,
         'originals': originals,
@@ -266,12 +297,14 @@ def build(info: Path, out: Path, mesh: Path | None = None, capacity: int = 12000
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--info', type=Path, required=True)
-    parser.add_argument('--mesh', type=Path)
+    parser.add_argument('--info', type=Path, action='append', required=True, help='once per original')
+    parser.add_argument('--mesh', type=Path, action='append', default=[], help='with every --info, or never')
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--capacity', type=int, default=12000)
     args = parser.parse_args()
-    hierarchy = build(args.info, args.out, mesh=args.mesh, capacity=args.capacity)
+    if args.mesh and len(args.mesh) != len(args.info):
+        parser.error('give a --mesh for every --info, or none')
+    hierarchy = build(list(zip(args.info, args.mesh or [None] * len(args.info))), args.out, capacity=args.capacity)
     print(json.dumps(hierarchy['totals']), hierarchy['build_seconds'], 's')
 
 

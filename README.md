@@ -274,7 +274,7 @@ qsm_sat/
 ├── 11505_trees_info.txt
 ├── 11505_trees_mesh.ply     # tree_id = the instance ID (scope instance-dimension)
 ├── 11505_terrain_mesh.ply   # the RCT terrain, else the tiles' terrain over the original's footprint
-├── 11505_qsm_octree/        # octree.bin + hierarchy.json: the viewer's QSM octree (3DT-2626)
+├── octree/                  # octree.bin + hierarchy.json: the viewer's QSM octree of all originals (3DT-2626)
 └── qsm_merge_report.json    # QSMs per tile and original, instances without a QSM
 ```
 

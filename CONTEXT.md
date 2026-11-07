@@ -27,8 +27,10 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
   (`qsm_tiles.py`); reads no points. IDs and table rows stay unchanged; a tree
   in several originals goes to each; terrain is the RCT original's
   (`--rct-terrain-folder`) or the core-owned tile triangles over the original's
-  footprint. Writes the viewer's QSM octree (`qsm_octree.py`, copied unchanged
-  from the results viewer). Never merge or rewrite point clouds here.
+  footprint. Writes one viewer QSM octree per run (`qsm_octree.py`, contract
+  v2: several originals, each tree from the first original holding it). A tile
+  whose instances all got no QSM is reported, not refused. Never merge or
+  rewrite point clouds here.
 
 ## Merge contract (3DT-2101)
 
