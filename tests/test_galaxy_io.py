@@ -49,10 +49,13 @@ def test_tile_collection_dir_holds_one_flat_folder_per_output(tmp_path):
         "--tiling-threshold", "1000", "--workers", "1", "--collection-dir", str(collections),
         "--tile-outputs", "0.25:copc.laz,1:laz,0.5:ply"]))
     # The task's own layout is unchanged; only the input name is cleaned.
-    assert {p for p in tree(products) if p.startswith("subsampled_res")} == {
+    # A PLY gets its sidecars (.crs.wkt only with a CRS) beside it.
+    assert {p for p in tree(products) if p.startswith("subsampled_res")} - {
+        "subsampled_res3/plot_A_subsampled_50cm.ply.crs.wkt"} == {
         "subsampled_res1/plot_A_subsampled_25cm.copc.laz",
         "subsampled_res2/plot_A_subsampled_100cm.laz",
-        "subsampled_res3/plot_A_subsampled_50cm.ply"}
+        "subsampled_res3/plot_A_subsampled_50cm.ply",
+        "subsampled_res3/plot_A_subsampled_50cm.ply.smarttile.json"}
     # Other test modules may stub the overview plot; publish it whenever it exists.
     preview = ["overview_copc_tiles.png"] if (products / "overview_copc_tiles.png").exists() else []
     assert tree(collections) == preview + [

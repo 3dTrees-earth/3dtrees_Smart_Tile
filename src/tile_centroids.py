@@ -31,6 +31,7 @@ import laspy
 import numpy as np
 
 from output_publication import publish_files, validate_output_paths
+from ply_crs import PLY_SIDECAR_SUFFIXES
 from output_names import file_stem
 from scratch import remove_tree, scratch_directory
 from voxel_grid import voxel_keys
@@ -500,7 +501,7 @@ def _assemble(directory, target, template, compress):
 def _assemble_ply(directory, target, template, expected):
     """Binary little-endian PLY of float64 XYZ, with the CRS as `comment crs:`."""
     from crs_records import crs_comment_value
-    from ply_crs import add_crs_comment_to_ply
+    from ply_crs import add_crs_comment_to_ply, write_ply_sidecars
 
     with laspy.open(template) as reader:
         header = reader.header
@@ -517,6 +518,7 @@ def _assemble_ply(directory, target, template, expected):
     if written != expected:
         raise ValueError(f"{Path(target).name}: wrote {written:,} of {expected:,} points")
     add_crs_comment_to_ply(target, crs)
+    write_ply_sidecars(target, header, task="tile")
     remove_tree(directory)
     return True
 
@@ -662,6 +664,8 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
                     if not future.result():
                         raise RuntimeError(f"COPC conversion failed for {final.name}")
                     staged.append((target, final))
+                    staged += [(Path(str(target) + suffix), Path(str(final) + suffix))
+                               for suffix in PLY_SIDECAR_SUFFIXES if Path(str(target) + suffix).exists()]
             finally:
                 finish.shutdown(wait=True)
         missing = [tile.label for index, tile in enumerate(tiles)

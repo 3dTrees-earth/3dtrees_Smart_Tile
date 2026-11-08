@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from ply_crs import add_crs_comment_to_ply, crs_comment_from_file
+from ply_crs import PLY_SIDECAR_SUFFIXES, add_crs_comment_to_ply, crs_comment_from_file, write_ply_sidecars
 
 from product_formats import parse_merged_output_formats
 from output_publication import OutputTransaction
@@ -804,6 +804,8 @@ def _finalize_product(output_file: Path, output_format: str, dimension_sources: 
             with laspy.open(str(source)) as reader:
                 names.update(reader.header.point_format.extra_dimension_names)
         add_crs_comment_to_ply(output_file, crs_comment_from_file(metadata_source), restore_names=sorted(names))
+        with laspy.open(str(metadata_source)) as reader:
+            write_ply_sidecars(output_file, reader.header, task="create_merged_file", sources=dimension_sources)
         return
     valid, message = _validate_preserved_product_dims(dimension_sources, output_file)
     if valid:
@@ -958,7 +960,7 @@ def create_chunked_prod_merged_files_for_resolution(
     _raise_open_file_limit()
     destinations = [Path(path) for path, _ in outputs]
     with OutputTransaction(destinations, inputs=copc_input_files,
-                           sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX,),
+                           sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX, *PLY_SIDECAR_SUFFIXES),
                            keep_failed=_keep_failed_chunk_work_dir()) as publication:
         outputs = [(publication.path(path), fmt) for path, fmt in outputs]
         chunk_bounds = _prod_merged_chunk_bounds(copc_input_files, resolution, num_spatial_chunks)
@@ -1045,7 +1047,7 @@ def create_prod_merged_files(
     validate_collection_extra_bytes([
         *raw_inputs, *(path for path in copc_inputs if source_key(path) not in raw_keys)])
     with OutputTransaction(destinations, inputs=inputs,
-                           sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX,),
+                           sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX, *PLY_SIDECAR_SUFFIXES),
                            keep_failed=_keep_failed_chunk_work_dir()) as publication:
         expected_dims = None
         if standardization_json:
