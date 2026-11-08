@@ -5,12 +5,11 @@ path; inserts invalidate an index's cached regions. No labels are reconciled her
 """
 from collections import OrderedDict
 import os
-from pathlib import Path
 
 import numpy as np
 from scipy.spatial import cKDTree
 
-from worker_budget import spatial_query_worker_count
+from worker_budget import memory_limit_bytes, spatial_query_worker_count
 
 REGION_SIZE = 4.0
 # Upper bound for one cKDTree point: contiguous XYZ copy, index and nodes.
@@ -21,30 +20,10 @@ def default_cache_bytes():
     requested = float(os.environ.get('SMARTTILE_SPATIAL_CACHE_MB', '512'))
     if not np.isfinite(requested) or requested < 0:
         raise ValueError('SMARTTILE_SPATIAL_CACHE_MB must be finite and nonnegative')
-    limits = []
-    root = Path('/sys/fs/cgroup')
-    groups = {root}
-    try:
-        for line in Path('/proc/self/cgroup').read_text().splitlines():
-            if line.startswith('0::') and '..' not in Path(line[3:]).parts:
-                group = root / line[3:].lstrip('/')
-                groups.update([group, *[p for p in group.parents if p == root or root in p.parents]])
-    except OSError:
-        pass
-    for path in [*(p / 'memory.max' for p in groups), root / 'memory/memory.limit_in_bytes']:
-        try:
-            value = int(path.read_text())
-            if value > 0:
-                limits.append(value)
-        except (OSError, ValueError):
-            pass
-    try:
-        limits.append(os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE'))
-    except (ValueError, OSError):
-        pass
+    limit = memory_limit_bytes()
     # Reserve at most a quarter of the allocation across parent + remap workers.
     processes = 1 + spatial_query_worker_count(os.cpu_count() or 1)
-    safe = min(limits) // (4 * processes) if limits else 64 * 1024**2
+    safe = limit // (4 * processes) if limit else 64 * 1024**2
     return min(int(requested * 1024**2), safe)
 
 

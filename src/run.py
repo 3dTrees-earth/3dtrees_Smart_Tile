@@ -20,8 +20,8 @@ import sys
 import argparse
 from pathlib import Path
 
-from worker_budget import (allocated_cpu_count, limit_native_threads, requested_workers,
-                           spatial_query_worker_count)
+from worker_budget import (MemoryBudgetError, allocated_cpu_count, failure_exit_code, limit_native_threads,
+                           memory_capped_workers, oom_kill_count, requested_workers, spatial_query_worker_count)
 
 # Cap native thread pools before numpy, laspy or lazrs load. Spawned worker
 # processes re-run this module as __mp_main__ and get one thread each.
@@ -258,7 +258,7 @@ def run_tile_task(params: Parameters):
             name: output_dir / name for name in ("tile_bounds_tindex.json", "overview_copc_tiles.png")})
     except Exception as exc:
         print(f"Error: {exc}")
-        sys.exit(1)
+        sys.exit(failure_exit_code(exc, OOM_KILLS_AT_START))
     print(f"Tile task complete: {output_dir}")
     return input_dir
 
@@ -396,7 +396,7 @@ def _write_tile_task(params: Parameters):
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
-        sys.exit(1)
+        sys.exit(failure_exit_code(e, OOM_KILLS_AT_START))
 
 
 def _run_merge_qsm(params: Parameters):
@@ -428,7 +428,7 @@ def _run_merge_qsm(params: Parameters):
         _publish_collections(params, original_collections(output_dir), {})
     except Exception as exc:
         print(f"Error: {exc}")
-        sys.exit(1)
+        sys.exit(failure_exit_code(exc, OOM_KILLS_AT_START))
     print(f"QSM merge {report['instance_dimension']}: {report['qsms']} QSMs of {report['instances']} instances "
           f"for {len(report['originals'])} originals ({report['instances_without_qsm']} instances without QSM); "
           f"terrain from {report['terrain']}: {output_dir}")
@@ -523,7 +523,7 @@ def run_merge_task(params: Parameters):
         print(f"Merge complete: {report['state']}; report: {output_tiles.parent / 'remap_first_report.json'}")
     except Exception as exc:
         print(f"Error: {exc}")
-        sys.exit(1)
+        sys.exit(failure_exit_code(exc, OOM_KILLS_AT_START))
     finally:
         if "names" in locals():
             names.cleanup()
@@ -590,7 +590,7 @@ def run_remap_task(params: Parameters):
         print(f"Strict original remap complete: {output}")
     except Exception as exc:
         print(f"Error: {exc}")
-        sys.exit(1)
+        sys.exit(failure_exit_code(exc, OOM_KILLS_AT_START))
     finally:
         if "names" in locals():
             names.cleanup()
@@ -671,7 +671,7 @@ def run_create_merged_file_task(params: Parameters):
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
-        sys.exit(1)
+        sys.exit(failure_exit_code(e, OOM_KILLS_AT_START))
     finally:
         if names is not None:
             names.cleanup()
@@ -907,6 +907,19 @@ def _print_cli_help() -> None:
         print()
 
 
+OOM_KILLS_AT_START = 0
+
+
+def _memory_tasks(params: Parameters) -> list[str]:
+    """The tasks whose memory this run needs: merge and remap also build prod-merged products."""
+    tasks = [params.task]
+    if params.task == "merge" and params.original_raw_input_dir:
+        tasks.append("remap")
+    if params.task in ("merge", "remap") and params.transfer_original_dims_to_merged:
+        tasks.append("create_merged_file")
+    return tasks
+
+
 def main():
     if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
         _print_cli_help()
@@ -976,6 +989,17 @@ def main():
         print("       python run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output")
         print("       python run.py --show-params")
         sys.exit(1)
+
+    global OOM_KILLS_AT_START
+    OOM_KILLS_AT_START = oom_kill_count()
+    try:
+        workers = memory_capped_workers(_memory_tasks(params), params.workers)
+    except MemoryBudgetError as exc:
+        print(f"Error: {exc}")
+        sys.exit(failure_exit_code(exc))
+    if workers < params.workers:
+        print(f"Workers: {workers} instead of {params.workers}, to fit the memory limit")
+        params.workers = workers
 
     # Route to appropriate task function
     if params.task == "tile":
