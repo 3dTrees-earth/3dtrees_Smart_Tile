@@ -299,7 +299,28 @@ def _run_pdal_pipeline(pipeline: dict, pipeline_file: Path) -> subprocess.Comple
 
 def _pdal_error(result: subprocess.CompletedProcess, limit: int = 2000) -> str:
     details = "\n".join(part for part in (result.stderr, result.stdout) if part)
+    if result.returncode < 0:
+        # A crash prints nothing; the signal is the only clue.
+        import signal
+        try:
+            name = signal.Signals(-result.returncode).name
+        except ValueError:
+            name = f"signal {-result.returncode}"
+        details = f"PDAL was killed by {name}" + (f"\n{details}" if details else "")
+    elif not details:
+        details = f"PDAL exited with code {result.returncode} and no message"
     return details[:limit]
+
+
+def _raise_open_file_limit() -> None:
+    """Raise the soft open-file limit to the hard limit for PDAL subprocesses."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if hard == resource.RLIM_INFINITY or soft < hard:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    except (ImportError, ValueError, OSError):
+        pass
 
 
 def _point_cloud_point_count(path: Path) -> int:
@@ -329,11 +350,19 @@ def _union_bounds(input_files: List[Path]) -> Tuple[float, float, float, float]:
             min(m[1] for m in mins), max(m[1] for m in maxs))
 
 
-# PDAL holds a whole chunk in memory (dataset 645: about 330 B per point with
-# prediction dimensions), and up to --workers chunks run at once. Target this
-# average point count when planning spatial strips. Uneven density can still
-# put more points in one strip; this is not a hard per-chunk memory limit.
-PRODUCT_CHUNK_POINTS = 2_000_000
+# Average points per spatial strip. Every strip is a separate COPC query that
+# decompresses each octree node it crosses, so thin strips read the same nodes
+# many times (3808, 1.1 B points: 522 strips of 0.4 m at 2 M points). The voxel
+# pick streams a strip from disk (SELECTION_POINTS), so the strip size does not
+# set the memory; up to --workers strips run at once.
+PRODUCT_CHUNK_POINTS = 20_000_000
+# Points the voxel pick holds at once (about 330 B per point with prediction
+# dimensions). Whole voxel columns are picked together; one denser column is
+# picked alone.
+SELECTION_POINTS = 2_000_000
+# Chunk files one PDAL merge opens at once. PDAL 2.10 keeps two descriptors per
+# LAZ reader and crashes without a message near the soft open-file limit (1024).
+MERGE_BATCH_FILES = 200
 
 
 def _prod_merged_chunk_bounds(
@@ -375,6 +404,22 @@ def _prod_merged_chunk_bounds(
     return bounds
 
 
+def record_order(records):
+    """Stable lexicographic order over all fields, as ``np.argsort(records, kind="stable")``.
+
+    Sorting a structured array compares records field by field under the GIL
+    (2 M records: 5.3 s, and threads run one at a time); one lexsort over the
+    field columns gives the same order in 0.6 s and runs in parallel. Fields
+    that are not plain numbers keep the structured sort.
+    """
+    import numpy as np
+
+    fields = [records.dtype.fields[name][0] for name in records.dtype.names]
+    if any(field.shape or field.kind not in "biuf" for field in fields):
+        return np.argsort(records, kind="stable")
+    return np.lexsort([records[name] for name in reversed(records.dtype.names)])
+
+
 def select_voxel_points(points, resolution: float):
     """Indices of one original point per voxel, in acquisition order.
 
@@ -393,7 +438,7 @@ def select_voxel_points(points, resolution: float):
 
     if len(points) == 0:
         return np.empty(0, dtype=np.int64)
-    canonical = np.argsort(points.array, kind="stable")  # all fields, lexicographic
+    canonical = record_order(points.array)  # all fields, lexicographic
     xyz = np.stack([points.array[axis] for axis in ("X", "Y", "Z")], axis=1)[canonical]
     keys = voxel_keys(xyz, points.scales, points.offsets, resolution)
     group = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))  # stable: canonical order within a voxel
@@ -472,25 +517,63 @@ def _select_chunk_points(raw_file: Path, chunk_file: Path, resolution: float,
                          lo: Optional[int] = None, hi: Optional[int] = None) -> bool:
     """Write the selected points of one raw chunk as LAZ; False when it is empty.
 
-    Only points in voxel columns ``[lo, hi)`` belong to this chunk.
+    Only points in voxel columns ``[lo, hi)`` belong to this chunk. The raw
+    chunk is uncompressed, so its records are memory-mapped and picked in
+    groups of whole voxel columns of up to SELECTION_POINTS points: a voxel
+    lies in one column, so each group picks exactly what the whole chunk
+    would. The kept points are then ordered as select_voxel_points orders
+    them (GPS time, then all fields).
     """
     import laspy
     import numpy as np
     from voxel_grid import voxel_keys
 
-    cloud = laspy.read(str(raw_file))
-    if lo is not None or hi is not None:
-        columns = voxel_keys(np.asarray(cloud.points.array["X"])[:, None], cloud.header.scales[:1],
-                             cloud.header.offsets[:1], resolution)[:, 0]
-        owned = np.ones(len(columns), dtype=bool)
-        if lo is not None:
-            owned &= columns >= lo
-        if hi is not None:
-            owned &= columns < hi
-        cloud.points = cloud.points[owned]
-    if len(cloud.points) == 0:
+    with laspy.open(str(raw_file)) as reader:
+        header, evlrs = reader.header, reader.evlrs
+    if header.point_format.size != header.point_format.dtype().itemsize:
+        raise ValueError(f"{raw_file.name}: point records are not {header.point_format.dtype().itemsize} bytes")
+    if header.point_count == 0:
         return False
-    cloud.points = cloud.points[select_voxel_points(cloud.points, resolution)]
+    records = np.memmap(raw_file, dtype=header.point_format.dtype(), mode="r",
+                        offset=header.offset_to_point_data, shape=(header.point_count,))
+
+    columns = np.empty(len(records), dtype=np.int64)
+    for start in range(0, len(records), SELECTION_POINTS):
+        x = np.asarray(records["X"][start:start + SELECTION_POINTS])
+        columns[start:start + len(x)] = voxel_keys(x[:, None], header.scales[:1], header.offsets[:1], resolution)[:, 0]
+    owned = np.ones(len(columns), dtype=bool)
+    if lo is not None:
+        owned &= columns >= lo
+    if hi is not None:
+        owned &= columns < hi
+    values, counts = np.unique(columns[owned], return_counts=True)
+    if len(values) == 0:
+        return False
+    # Group boundaries: the first column of each group of whole columns.
+    firsts, total = [0], 0
+    for position, count in enumerate(counts):
+        if total and total + count > SELECTION_POINTS:
+            firsts.append(position)
+            total = 0
+        total += count
+    group = np.searchsorted(values[firsts], columns, side="right").astype(np.int32) - 1
+    group[~owned] = -1
+    del columns
+
+    kept = []
+    for index in range(len(firsts)):
+        rows = np.flatnonzero(group == index)
+        points = laspy.ScaleAwarePointRecord(np.array(records[rows]), header.point_format,
+                                             header.scales, header.offsets)
+        kept.append(rows[select_voxel_points(points, resolution)])
+    del group
+    selected = np.array(records[np.sort(np.concatenate(kept))])
+    rank = np.empty(len(selected), dtype=np.int64)
+    rank[record_order(selected)] = np.arange(len(selected))
+    keys = (rank,) + ((selected["gps_time"],) if "gps_time" in header.point_format.dimension_names else ())
+    cloud = laspy.LasData(header=header, points=laspy.ScaleAwarePointRecord(
+        selected[np.lexsort(keys)], header.point_format, header.scales, header.offsets))
+    cloud.evlrs = evlrs
     cloud.write(str(chunk_file))
     return True
 
@@ -578,6 +661,31 @@ def _merge_chunk_files_pipeline(
         writer.update(scale_offset_options)
     stages.append(writer)
     return {"pipeline": stages}
+
+
+def _merge_in_batches(chunk_files: List[Path], work_dir: Path, scale_offset_options: dict) -> List[Path]:
+    """Concatenate chunk files, in order, into at most MERGE_BATCH_FILES uncompressed LAS files.
+
+    Point records and their order are unchanged, so the final merge writes the
+    same product while opening only a bounded number of files.
+    """
+    level = 0
+    while len(chunk_files) > MERGE_BATCH_FILES:
+        merged = []
+        for index in range(0, len(chunk_files), MERGE_BATCH_FILES):
+            batch = chunk_files[index:index + MERGE_BATCH_FILES]
+            target = work_dir / f"_merge_batch{level}_{index // MERGE_BATCH_FILES:04d}.las"
+            stages = [{"type": "readers.las", "filename": str(path)} for path in batch]
+            if len(stages) > 1:
+                stages.append({"type": "filters.merge"})
+            stages.append({"type": "writers.las", "filename": str(target), "compression": False, "minor_version": 4,
+                           "forward": "all", "extra_dims": "all", **scale_offset_options})
+            result = _run_pdal_pipeline({"pipeline": stages}, work_dir / f"_merge_batch{level}_{index:06d}.json")
+            if result.returncode != 0:
+                raise RuntimeError(f"PDAL prod-merged batch merge failed: {_pdal_error(result)}")
+            merged.append(target)
+        chunk_files, level = merged, level + 1
+    return chunk_files
 
 
 def _validate_expected_dims(
@@ -847,6 +955,7 @@ def create_chunked_prod_merged_files_for_resolution(
         return []
 
     validate_collection_extra_bytes(copc_input_files)
+    _raise_open_file_limit()
     destinations = [Path(path) for path, _ in outputs]
     with OutputTransaction(destinations, inputs=copc_input_files,
                            sidecar_suffixes=(VECTOR_SCHEMA_SIDECAR_SUFFIX,),
@@ -877,6 +986,7 @@ def create_chunked_prod_merged_files_for_resolution(
 
             if not chunk_files:
                 raise RuntimeError("No prod-merged chunks were created")
+            chunk_files = _merge_in_batches(chunk_files, work_dir, scale_offset_options)
 
             for output_file, output_format in outputs:
                 _merge_prod_chunks(
