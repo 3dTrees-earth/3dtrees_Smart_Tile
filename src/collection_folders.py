@@ -75,6 +75,9 @@ def original_collections(original_output: Path) -> dict[str, list[Path]]:
         collection = next((f"original_{TREE_FILES[suffix]}" for suffix in TREE_FILES if stem.endswith(suffix)), None)
         if collection is not None:
             collections.setdefault(collection, []).append(path)
+    octree = _files(original_output / "octree", (".json", ".bin"))
+    if octree:
+        collections["qsm_octree"] = octree  # the viewer's QSM octree of the run: hierarchy.json, octree.bin
     return collections
 
 

@@ -18,6 +18,7 @@ from ply_crs import crs_comment_from_file
 
 
 INSTANCE = "PredInstance_RCT"
+OCTREE = "octree"  # the viewer's QSM octree of the run, as qsm_merge writes it
 MAPPING_FILE = "rct_instance_mapping.json"
 
 
@@ -90,6 +91,8 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
     same compact IDs as its LAZ and tables. With ``terrain`` (core-filtered tile
     terrain meshes) and ``footprints`` (each original's 1 m cell keys), each
     original also gets ``<stem>_terrain_mesh.ply`` covering its footprint.
+    With treeinfo tables, the run gets ``octree/``, the viewer's QSM octree of
+    all originals (each tree once).
     """
     output_dir = Path(output_dir)
     stems = [file_stem(name).casefold() for name in ids_by_file]
@@ -145,6 +148,7 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
                                                           crs=crs_comment_from_file(file))
                 entry["sidecars"]["terrain_mesh"] = terrain_file.name
             metadata["files"].append(entry)
+        metadata["octree"] = _write_octree(output_dir, metadata["files"])
         if tile_terrain:
             metadata["terrain_cog"] = write_terrain_cog(
                 [output_dir / f["sidecars"]["terrain_mesh"] for f in metadata["files"]], output_dir / TERRAIN_COG)
@@ -153,4 +157,36 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
         db.close()
         database.unlink(missing_ok=True)
     return {"scope": "dataset", "tree_count": len(all_ids), "mapping": MAPPING_FILE,
-            "tree_meshes": bool(meshes), "terrain_meshes": bool(terrain), "files": metadata["files"]}
+            "tree_meshes": bool(meshes), "terrain_meshes": bool(terrain), "octree": metadata["octree"],
+            "files": metadata["files"]}
+
+
+def _write_octree(output_dir, files):
+    """The viewer's QSM octree of RCT's own trees, one per run (``qsm_octree``, as for an existing segmentation).
+
+    Built from each original's tree-info table (its tree table without
+    ``--treeinfo``) and tree mesh; a tree in several originals is in the octree
+    once. Tables without RayCloudTools' segment columns give no octree.
+    """
+    from qsm_octree import build as build_octree
+
+    sources = []
+    for f in files:
+        table = f["sidecars"].get("trees_info") or f["sidecars"].get("trees")
+        if f["tree_count"] and table:
+            mesh = f["sidecars"].get("trees_mesh")
+            sources.append((output_dir / table, output_dir / mesh if mesh else None))
+    if not sources or not all(_has_segments(info) for info, _ in sources):
+        return None
+    return build_octree(sources, output_dir / OCTREE)["totals"]
+
+
+def _has_segments(info):
+    """Whether a tree-info table has treeinfo's per-segment columns (x,y,z,radius,parent_id after ``, ``)."""
+    with Path(info).open("r", encoding="utf-8", errors="replace") as stream:
+        stream.readline()
+        heading = stream.readline()
+    if ", " not in heading:
+        return False
+    segment = [c.strip() for c in heading.split(", ", 1)[1].split(",")]
+    return {"x", "y", "z", "radius", "parent_id"} <= set(segment)

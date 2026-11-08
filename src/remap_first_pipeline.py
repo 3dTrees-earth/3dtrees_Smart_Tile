@@ -865,7 +865,8 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
                     sidecars, meshes=meshes, terrain=terrain, footprints=footprints)
             report["instance_finalization"] = compact_originals(work / "originals", final_ids)
             stack.close()
-            report["checksums"] = {f.name: digest(f) for f in sorted((work / "originals").iterdir())}
+            report["checksums"] = {f.relative_to(work / "originals").as_posix(): digest(f)
+                                   for f in sorted((work / "originals").rglob("*")) if f.is_file()}  # with octree/
             publish([(work / "originals", output)])
             report["state"] = "validated"
     except Exception as exc:
