@@ -188,3 +188,22 @@ def test_collection_names_must_be_unique_and_the_folder_new(tmp_path):
     with pytest.raises(FileExistsError):
         check_collection_dir(tmp_path / "used", tmp_path)
     check_collection_dir(tmp_path / "new", tmp_path)
+
+
+def test_qsm_products_get_collections_of_their_own(tmp_path):
+    from collection_folders import tile_collections
+    tiles = tmp_path / "tiles"
+    for name in ["subsampled_res1/c00_r00.laz", "subsampled_res1_terrain/c00_r00.ply",
+                 "qsm_manifest_PredInstance_SAT.json", "qsm_footprints.npz", "tile_bounds_tindex.json"]:
+        (tiles / name).parent.mkdir(parents=True, exist_ok=True)
+        (tiles / name).write_bytes(b"x")
+    found = {name: [p.name for p in paths] for name, paths in tile_collections(tiles).items()}
+    assert found == {"tiles_1": ["c00_r00.laz"], "tiles_1_terrain": ["c00_r00.ply"],
+                     "qsm_manifest": ["qsm_footprints.npz", "qsm_manifest_PredInstance_SAT.json"]}
+    originals = tmp_path / "originals"
+    (originals / "octree").mkdir(parents=True)
+    for name in ["a.laz", "rct_terrain.tif", "octree/hierarchy.json", "octree/octree.bin"]:
+        (originals / name).write_bytes(b"x")
+    found = {name: [p.name for p in paths] for name, paths in original_collections(originals).items()}
+    assert found == {"originals_with_predictions": ["a.laz"], "qsm_octree": ["hierarchy.json", "octree.bin"],
+                     "terrain_cog": ["rct_terrain.tif"]}
