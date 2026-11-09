@@ -338,3 +338,57 @@ def test_instance_dimension_names_are_data_not_scratch_paths(tmp_path):
     cloud = read(directory)["c00_r00"]
     np.testing.assert_array_equal(cloud[dimension], [70000])
     assert not (tmp_path / "escaped").exists()
+
+
+def test_center_of_mass_voxels_are_exact_instance_means(tmp_path):
+    a = tmp_path / "in" / "a.las"
+    a.parent.mkdir()
+    # Two trees and background in one 1 m voxel: each keeps the mean of its own points, never a blend.
+    xyz = np.array([[1.1, 1.1, 1.1], [1.2, 1.2, 1.2], [1.3, 1.3, 1.3], [1.4, 1.4, 1.4], [1.5, 1.5, 1.5]])
+    write_source(a, xyz, [3, 3, 4, 4, 0], [0] * 5, [1, 2, 3, 4, 5])
+    out = tmp_path / "out"
+    out.mkdir()
+    write_instance_tiles([a], tiles()[:1], ["PredInstance_SAT"], out, resolutions=[1.0], nearest=False)
+    cloud = read(out / "instance_tiles_PredInstance_SAT_100cm")["c00_r00"]
+    points = {int(i): (round(x, 3), round(y, 3), round(z, 3))
+              for i, x, y, z in zip(cloud.PredInstance_SAT, cloud.x, cloud.y, cloud.z)}
+    assert points == {3: (1.15, 1.15, 1.15), 4: (1.35, 1.35, 1.35), 0: (1.5, 1.5, 1.5)}
+
+
+@pytest.mark.parametrize("nearest", [True, False])
+def test_both_methods_keep_instances_whole_for_any_worker_count(tmp_path, nearest):
+    sources = inputs(tmp_path)
+    clouds = {}
+    for workers in (1, 3):
+        out = tmp_path / f"out{workers}"
+        out.mkdir()
+        write_instance_tiles(sources, tiles(), ["PredInstance_SAT"], out, resolutions=[0.5],
+                             attributes=["intensity"], workers=workers, nearest=nearest)
+        clouds[workers] = read(out / "instance_tiles_PredInstance_SAT_50cm")
+        for uid, label in {7: "c00_r00", 8: "c01_r00"}.items():
+            assert [n for n, c in clouds[workers].items() if np.any(c.PredInstance_SAT == uid)] == [label]
+    for name in clouds[1]:
+        assert np.array_equal(clouds[1][name].points.array, clouds[3][name].points.array)
+
+
+def test_tile_cli_instance_tiles_use_center_of_mass_only_when_asked(tmp_path):
+    import run
+    from parameters import Parameters
+    sources = inputs(tmp_path)
+    originals = {tuple(row) for s in sources for row in
+                 np.rint(np.c_[laspy.read(s).x, laspy.read(s).y, laspy.read(s).z] * 1000).astype(np.int64)}
+    found = {}
+    for method in (None, "center-of-mass"):
+        products = tmp_path / f"products_{method}"
+        args = ["--task", "tile", "--input-dir", str(sources[0].parent), "--output-dir", str(products),
+                "--tile-length", "10", "--tile-buffer", "2", "--workers", "2",
+                "--instance-tiles", "PredInstance_SAT", "--instance-resolutions", "1"]
+        if method:
+            args.extend(["--subsampling-method", method])
+        run.run_tile_task(Parameters(_cli_parse_args=args))
+        points = set()
+        for cloud in read(products / "instance_tiles_PredInstance_SAT_100cm").values():
+            points |= {tuple(row) for row in np.rint(np.c_[cloud.x, cloud.y, cloud.z] * 1000).astype(np.int64)}
+        found[method] = points
+    assert found[None] <= originals  # the default keeps real points
+    assert not found["center-of-mass"] <= originals  # voxel means are new points

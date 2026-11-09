@@ -11,6 +11,28 @@
 ### Visualization COPC (prototype)
 - `create_merged_file --visualization-copc` writes one viewer-optimised COPC per original with coloring IDs, and `--merged-resolutions none` skips the merged products. It keeps the source's WKT record and streams: the source is read twice in chunks and nodes above `memory_points` (4 million) are split through scratch files, so memory does not grow with the point count (3753: 10.6 → 1.7 GB peak). A voxel keeps the point with the lowest hash of its record index instead of a random permutation of the whole cloud; scaled float ExtraBytes are copied raw.
 
+### Instance tiles (3DT-2799)
+- Instance tiles honour `--subsampling-method` when it is given: `center-of-mass` writes each (instance, voxel) as the exact mean of its points, as tile outputs do; ID and carried attributes come from the point nearest that mean. Without the option they keep `nearest-to-centroid`, so existing runs are unchanged (3753 at 10 cm: byte-identical, 18 s with either method).
+
+### Merged products (3DT-2846)
+- `create_merged_file` cuts the 10 cm product into strips of 20 M points instead of 2 M and picks voxels from a memory-mapped strip in groups of whole voxel columns, so a strip is never held whole. Thin strips made every COPC query decompress the same octree nodes many times (3808, 1.1 B points: 522 strips of 0.4 m). Records are ordered with one lexsort over their fields, which runs in parallel across strips; the structured sort held the GIL. 3808: 298 s and 9.7 GB instead of about 5,900 s and 18 GB; changing only the strip size would have needed 95 GB. Products byte-identical.
+- The soft open-file limit is raised to the hard limit and chunk files are merged in batches of at most 200: PDAL 2.10 keeps two descriptors per LAZ reader and crashed without a message above about 509 readers (3808, 3820, 3827). A PDAL crash now names its signal.
+
+### Memory and Galaxy (3DT-1896, 3DT-2469)
+- Workers are capped by the memory limit, the smallest of `GALAXY_MEMORY_MB`, the cgroup limits and physical memory: per task a fixed 0.5 GB plus 0.6 (tile), 0.15 (merge), 0.35 (remap) or 0.95 GB (create_merged_file) per worker, measured with about 40 % margin. When one worker does not fit, the task stops with an error that names memory. A failure from lack of memory exits 137 with `out of memory`, so Galaxy can resubmit with more. 2548 (2 GB grant), Brandenburg 1129 (3.06 GB) and 1134 (3.55 GB) pass with 2, 4 and 5 workers; outputs equal the 10-worker runs.
+- `--collection-dir` also publishes `qsm_manifest` (manifests and footprints), `tiles_<i>_terrain` (the RCT terrain per tile) and `terrain_cog` (`rct_terrain.tif`).
+
+### PLY sidecars (3DT-1898)
+- Every point-cloud PLY (tiles and merged products) gets `<file>.crs.wkt`, the source CRS record verbatim, and `<file>.smarttile.json` with task, sources, point count, properties, CRS and the source's LAS scale and offset, published with it.
+
+### Cross-tile matching (3DT-1899)
+- A mutual-best pair of instances in neighbouring tiles also needs at least `--min-match-points` shared points (10), centroids of their points inside the tiles' shared overlap within `--max-centroid-distance` (5 m), and, with semantics, the same label on most matched points. Groups join strongest match first, and a group joins another only if all members lie on overlapping tiles within the cap. The report lists rejected candidates by reason. Merge output unchanged on 3753, 2779 and 1341 with SAT and ForestMamba labels.
+
+### Remap on dense scans (3DT-2849)
+- The query cache reserves a region's read against its whole budget and the kept search tree against half; a region that still does not fit is cached per 2 m query cell instead of being queried from SQLite on every batch. The budget is a third of the memory limit across the run's processes.
+- Regions go to workers by point count, largest first onto the least-loaded worker; dense regions are placed as their 2 m cells. Eight batches per worker are in flight. The report records cache hits, builds, disk fallbacks and points per worker.
+- 1919 (65.5 M terrestrial points), first 12 M points: 1,072 → 39 s at 10 workers, 1,523 → 57 s at its 2.5 GB Galaxy grant; the whole cloud at 10 workers in 303 s. Outputs byte-identical; 3753, 2779 and 2030 unchanged in output and speed.
+
 ## v2.4.3 - unreleased
 
 ### CRS records (3DT-2718)

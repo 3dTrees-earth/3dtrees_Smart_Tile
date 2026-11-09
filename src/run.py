@@ -367,7 +367,10 @@ def _write_tile_task(params: Parameters):
                 attributes=_parse_csv(params.instance_tile_dims) if params.instance_tile_dims else [],
                 check_ids=not params.allow_reused_instance_ids, workers=spatial_query_worker_count(workers),
                 publish_occupancy=not tile_outputs, qsm_manifest=params.qsm_manifest,
-                rct_terrain=params.rct_terrain_folder, **instance_options)
+                rct_terrain=params.rct_terrain_folder,
+                # Instance tiles keep real points unless a method is chosen explicitly.
+                nearest="subsampling_method" not in params.model_fields_set or not center_of_mass,
+                **instance_options)
 
         # Step 7: Update tile_bounds_tindex.json with actual bounds from created tiles
         # (so remap/merge matching uses file extent instead of nominal grid)

@@ -21,7 +21,9 @@ For each requested instance dimension:
    to every voxel grid (several resolutions share the read, as in tiling).
    Voxels are keyed by (instance, voxel), so touching trees are never
    blended; each voxel keeps its original point nearest the voxel mean, so
-   instance ID and carried attributes stay real values. Original resolution
+   instance ID and carried attributes stay real values. With center of mass
+   (``nearest=False``) the voxel's XYZ is the exact mean instead, as for tile
+   outputs; ID and attributes still come from that nearest point. Original resolution
    bypasses this reduction and retains every owned point, including duplicates.
 4. Each tile is written as ``instance_tiles_<dimension>_<resolution>/<label>.<format>``
    (LAZ by default): XYZ, the instance dimension and any requested attributes. A tile extends
@@ -43,7 +45,7 @@ import laspy
 import numpy as np
 
 from tile_centroids import (CHUNK_POINTS, Tile, _block_key, _init_worker, _nearest_to_mean,
-                            _raw_xyz, _write_blocks, block_cells, choose_block_size, route, sample_xy,
+                            _raw_xyz, _round_half_even, _write_blocks, block_cells, choose_block_size, route, sample_xy,
                             tile_offsets)
 from output_names import file_stem
 from voxel_grid import voxel_keys
@@ -330,7 +332,8 @@ def _point_records(chosen, point_format, scales, offsets, instance_field, attrib
 
 def _reduce(task):
     """Keep all original records at zero; otherwise select per-instance voxel representatives."""
-    block, resolutions, scales, offsets, attribute_dtypes, point_format, instance_field, attributes, fragments = task
+    block, resolutions, scales, offsets, attribute_dtypes, point_format, instance_field, attributes, fragments, *rest = task
+    nearest = bool(rest[0]) if rest else True
     dtype = _record_dtype(attribute_dtypes)
     paths = sorted(Path(block).glob("*.bin"))
     if resolutions == (0.0,):
@@ -363,6 +366,11 @@ def _reduce(task):
                 counts = np.diff(np.r_[starts, len(records)]).astype(np.int64)
                 sums = np.add.reduceat(xyz, starts, axis=0)
                 chosen = records[_nearest_to_mean(xyz, starts, counts, sums, scales)]
+                if not nearest:
+                    chosen = chosen.copy()
+                    means = _round_half_even(sums, counts[:, None])
+                    for axis, name in enumerate(("X", "Y", "Z")):
+                        chosen[name] = means[:, axis]
             _point_records(chosen, point_format, scales, offsets, instance_field, attributes).tofile(fragment)
             results.append((len(chosen), len(records)))
     remove_tree(block)
@@ -425,7 +433,7 @@ def _output_directories(output_dir, dimensions, resolutions, selections):
 
 def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions, attributes=(),
                          check_ids=True, wide=WIDE_INSTANCE, workers=1, formats=None, output_directories=None,
-                         qsm_manifest=False, rct_terrain=None):
+                         qsm_manifest=False, rct_terrain=None, nearest=True):
     """Write ``instance_tiles_<dimension>_<resolution>/<label>.laz`` per dimension and resolution.
 
     Zero resolution retains every owned source point, including coincident points.
@@ -529,7 +537,7 @@ def write_instance_tiles(sources, tiles, dimensions, output_dir, *, resolutions,
                 for folder in fragments:
                     folder.mkdir(parents=True)
                 jobs = [(b, resolutions, tile.scales, tile.offsets, attribute_dtypes, out_header.point_format, d,
-                         tuple(attributes), [str(folder / f"{n:09d}.bin") for folder in fragments])
+                         tuple(attributes), [str(folder / f"{n:09d}.bin") for folder in fragments], nearest)
                         for n, b in enumerate(sorted(tile_dir.iterdir(), key=_block_key))]
                 kept = [0] * len(resolutions)
                 used = [0] * len(resolutions)
@@ -616,7 +624,8 @@ def _stage_qsm_inputs(scratch, output_dir, dimension, sources, tiles, tile_bound
 
 def instance_tiles_from_plan(plan, output_dir, dimensions, *, resolutions, attributes=(),
                              check_ids=True, wide=WIDE_INSTANCE, workers=1, publish_occupancy=True,
-                             formats=None, output_directories=None, qsm_manifest=False, rct_terrain=None):
+                             formats=None, output_directories=None, qsm_manifest=False, rct_terrain=None,
+                             nearest=True):
     """Tile-task entry: the planned grid's cores own instances and background.
 
     ``publish_occupancy`` writes the occupied tiles into the layout; leave it to
@@ -650,7 +659,7 @@ def instance_tiles_from_plan(plan, output_dir, dimensions, *, resolutions, attri
     results = write_instance_tiles(sources, tiles, dimensions, Path(output_dir), resolutions=resolutions,
                                    attributes=attributes, check_ids=check_ids, wide=wide, workers=workers,
                                    formats=formats, output_directories=output_directories,
-                                   qsm_manifest=qsm_manifest, rct_terrain=rct_terrain)
+                                   qsm_manifest=qsm_manifest, rct_terrain=rct_terrain, nearest=nearest)
     if publish_occupancy and not plan.skip_tiling:
         occupied = set()
         for d in dimensions:
