@@ -44,7 +44,7 @@ def test_batch_queries_are_ordered_bounded_and_match_serial(tmp_path):
                 nonlocal produced
                 for i in range(13):
                     produced += 1
-                    assert produced - consumed <= 2 * workers
+                    assert produced - consumed <= 8 * workers
                     yield i, np.array([[0., 0., 0.], [.01, 0., 0.], [1., 0., 0.]])
             result = []
             with RemapBatchQueries([index], [index], workers=workers, radius=.01) as queries:

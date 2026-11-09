@@ -16,6 +16,7 @@ Usage:
     python src/run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output
 """
 
+import os
 import sys
 import argparse
 from pathlib import Path
@@ -1002,6 +1003,8 @@ def main():
     if workers < params.workers:
         print(f"Workers: {workers} instead of {params.workers}, to fit the memory limit")
         params.workers = workers
+    # Spawned workers size their query caches by the run's worker count.
+    os.environ["SMARTTILE_WORKERS"] = str(spatial_query_worker_count(params.workers))
 
     # Route to appropriate task function
     if params.task == "tile":

@@ -179,7 +179,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
     report['parallelism'].update(
         enrichment_processes=process_workers,
         enrichment_query_workers=1 if process_workers > 1 else query_workers,
-        max_pending_batches=2 * process_workers,
+        max_pending_batches=8 * process_workers,
         enrichment_scope='bounded process-parallel original remap; ordered writer')
     selected = []
     ids_by_dimension = {}
@@ -300,6 +300,8 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                     ids_by_dimension.setdefault(dimension, {})[file.name] = ids
     report.setdefault("timings", {})["enrichment_seconds"] = time.monotonic() - enrichment_start
     report["timings"]["enrichment_phase_seconds"] = phases
+    if queries.cache_stats is not None:
+        report["parallelism"]["enrichment_query_cache"] = queries.cache_stats
     report["background_assigned_points"] = sum(m.get("background_assigned", 0) for m in metrics)
     failures = [m for m in metrics if m["matched"] != m["total"]
                 and m.get("unmatched_policy") != "background_zero"]

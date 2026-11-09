@@ -10,6 +10,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from collections import Counter
+
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -66,6 +68,9 @@ class PointIndex:
         self._cache_owner = object()
         self._cache_ready = read_only
         self._cache_tiles = set()
+        # Points per 2 m cell of everything added here (None once shards are
+        # appended): balances remap workers without scanning the index.
+        self.cell_points = None if read_only else Counter()
         self.query_workers = spatial_query_worker_count(query_workers)
         self.dimensions = dimensions
         self.path = Path(path).resolve()
@@ -135,6 +140,7 @@ class PointIndex:
             self.query_cache.discard(self._cache_owner)
         self._cache_ready = False
         self._cache_tiles.add(int(tile))
+        starts, sizes = [], []
         for group in spatial_batches(xyz):
             pts = xyz[group]
             payload = np.empty(len(group), dtype=self._storage_dtype())
@@ -144,9 +150,14 @@ class PointIndex:
                 payload[f"value_{i}"] = values[name][group]
             row = self.db.execute("INSERT INTO batches(tile,data) VALUES (?,?)",
                                   (int(tile), payload.tobytes())).lastrowid
+            starts.append(group[0])
+            sizes.append(len(group))
             lo, hi = pts.min(axis=0), pts.max(axis=0)
             self.db.execute("INSERT INTO bounds VALUES (?,?,?,?,?,?,?)",
                             (row, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]))
+        if self.cell_points is not None and starts:
+            cells = np.floor(xyz[starts, :2] / CELL_SIZE).astype(np.int64)
+            self.cell_points.update(dict(zip(map(tuple, cells.tolist()), sizes)))
 
     def flush(self):
         self.db.commit()
@@ -161,6 +172,7 @@ class PointIndex:
         if self._cache_ready:
             self.query_cache.discard(self._cache_owner)
         self._cache_ready = False
+        self.cell_points = None
         self.db.commit()
         self.db.execute("ATTACH DATABASE ? AS shard", (str(path),))
         failed = True
@@ -213,17 +225,17 @@ class PointIndex:
         Baseline validation needs only geometric coverage. Avoid resolving source
         identity for coincident unfiltered copies from neighboring tiles.
         """
-        from spatial_query_cache import REGION_SIZE, region_entry
+        from spatial_query_cache import query_cells, region_entry
         distances = np.full(len(xyz), np.inf)
         for group in spatial_batches(xyz):
             points = xyz[group]
             limit = distance_limit(points, radius)
-            cell = tuple(np.floor(points[0, :2] / REGION_SIZE).astype(np.int64))
+            cell, subcell = query_cells(points)
             best = np.full(len(points), np.inf)
             for tile in sorted(self._cache_tiles):
                 entry = None
                 if self._cache_ready and self.query_cache.max_bytes:
-                    entry = region_entry(self, tile, cell, limit, None, None)
+                    entry = region_entry(self, tile, cell, limit, None, None, subcell=subcell)
                 if entry is not None:
                     tree, _ = entry
                     trees = () if tree is None else (tree,)
@@ -384,8 +396,8 @@ class PointIndex:
             roundoff = distance_roundoff(xyz[group])
 
             def candidates():
-                from spatial_query_cache import REGION_SIZE, region_entry
-                cell = tuple(np.floor(points[0, :2] / REGION_SIZE).astype(np.int64))
+                from spatial_query_cache import query_cells, region_entry
+                cell, subcell = query_cells(points)
                 sources = [tile] if tile is not None else sorted(self._cache_tiles)
                 for source in sources:
                     if before_tile is not None and source >= before_tile:
@@ -399,7 +411,7 @@ class PointIndex:
                     entry = None
                     if self._cache_ready and self.query_cache.max_bytes:
                         entry = region_entry(self, source, cell, limit, positive_dimension, bounds,
-                                             matching=matching)
+                                             matching=matching, subcell=subcell)
                     if entry is not None:
                         tree, payload = entry
                         if tree is not None:
