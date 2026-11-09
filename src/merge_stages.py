@@ -4,7 +4,7 @@ from __future__ import annotations
 import multiprocessing
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import laspy
@@ -262,23 +262,87 @@ def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, repo
     return files, counts
 
 
-def _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics):
+@dataclass
+class MatchLimits:
+    """Guards on cross-tile instance matches (3DT-1899).
+
+    A mutual-best pair also needs ``min_points`` matched points, and the 3D
+    centroids of the two instances' points inside the tiles' shared overlap
+    within ``max_centroid_distance`` metres (0 disables): a tree cut by a tile
+    edge keeps its overlap part, whatever lies outside. With semantics, most
+    matched points must carry the same label on both sides. Groups join in
+    descending match count; a group joins another only if every pair of their
+    members lies on overlapping tiles and keeps the centroid limit in that
+    overlap, so no chain of matches bridges distant trees.
+    """
+    max_centroid_distance: float = 5.0
+    min_points: int = 10
+
+
+class InstanceShapes:
+    """XYZ sums and point counts of a tile's instances inside each shared overlap, by neighbor tile.
+
+    ``agree`` counts, per neighbor and instance pair, the matched points whose
+    semantic labels agree on both sides.
+    """
+
+    def __init__(self, slabs):
+        self.slabs = slabs  # {neighbor tile: (lo, hi)} XY bounds of the shared overlap
+        self.sums = {other: {} for other in slabs}
+        self.count = {other: Counter() for other in slabs}
+        self.agree, self.semantics = {}, Counter()
+
+    def add(self, ids, xyz, semantics=None):
+        if semantics is not None:
+            keep = ids > 0
+            pairs, n = np.unique(np.column_stack((ids[keep], semantics[keep])), axis=0, return_counts=True)
+            self.semantics.update({(int(a), int(b)): int(k) for (a, b), k in zip(pairs, n)})
+        for other, box in self.slabs.items():
+            keep = (ids > 0) & inside_xy(xyz, box)
+            if not np.any(keep):
+                continue
+            labels, inverse = np.unique(ids[keep], return_inverse=True)
+            sums = np.stack([np.bincount(inverse, weights=xyz[keep][:, axis], minlength=len(labels))
+                             for axis in range(3)], axis=1)
+            for label, total, n in zip(labels.tolist(), sums, np.bincount(inverse, minlength=len(labels)).tolist()):
+                self.sums[other][label] = self.sums[other].get(label, 0) + total
+                self.count[other][label] += n
+
+    def majority_semantic(self, label):
+        """The instance's most frequent semantic label (smallest on ties); None without semantics."""
+        votes = [(-n, value) for (instance, value), n in self.semantics.items() if instance == label]
+        return min(votes)[1] if votes else None
+
+    def centroid(self, other, label):
+        """Centroid of the instance's points in the overlap with ``other``; None if it has none there."""
+        n = self.count.get(other, {}).get(label, 0)
+        return self.sums[other][label] / n if n else None
+
+
+def _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics, shapes=None):
     """Read a query tile once and accumulate all earlier-neighbor matches.
 
     Prune whole XY query groups only. Retaining every point in a selected group
     preserves its numerical distance allowance, even when background/high-Z
     points set that allowance. Source background remains a nearest candidate.
+    With ``shapes`` (an InstanceShapes) the read also collects the tile's
+    instance centroids in each shared overlap and the semantic agreement of the
+    matched points, so a tile without earlier neighbors is read too.
     """
     neighbors = [other for other in range(tile)
                  if overlaps is None or other in overlaps[tile]]
     counters = {other: Counter() for other in neighbors}
-    if not neighbors:
+    if not neighbors and shapes is None:
         return counters
     metrics['files_read'] += 1
     with laspy.open(file) as reader:
         for record in reader.chunk_iterator(MAX_BATCH_POINTS):
             xyz = coordinates(record, reader.header, origin)
             left = np.asarray(record[model.instance])
+            if shapes is not None:
+                shapes.add(left, xyz, np.asarray(record[model.semantic]) if model.semantic else None)
+            if not neighbors:
+                continue
             groups = list(spatial_batches(xyz))
             metrics['points_read'] += len(record)
             for other in neighbors:
@@ -300,18 +364,26 @@ def _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, me
                     ids, sizes = np.unique(np.column_stack((labels[matched], right[matched])),
                                            axis=0, return_counts=True)
                     counters[other].update({tuple(map(int, pair)): int(n) for pair, n in zip(ids, sizes)})
+                    if shapes is not None and model.semantic:
+                        same = matched & (np.asarray(record[model.semantic])[positions] == values[model.semantic])
+                        if np.any(same):
+                            ids, sizes = np.unique(np.column_stack((labels[same], right[same])), axis=0, return_counts=True)
+                            agree = shapes.agree.setdefault(other, Counter())
+                            agree.update({tuple(map(int, pair)): int(n) for pair, n in zip(ids, sizes)})
     return counters
 
 
-def _count_tile_pairs(model, file, tile, index_path, dimensions, origin, radius, overlaps):
-    """Worker: pair counts of one tile against a read-only copy of the finished index."""
+def _count_tile_pairs(model, file, tile, index_path, dimensions, origin, radius, overlaps, slabs=None):
+    """Worker: pair counts (and instance shapes) of one tile against a read-only copy of the finished index."""
     metrics = dict(files_read=0, points_read=0, query_points=0, skipped_query_points=0)
+    shapes = InstanceShapes(slabs) if slabs is not None else None
     with PointIndex(index_path, dimensions, query_workers=1, read_only=True) as index:
-        return _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics), metrics
+        counters = _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics, shapes)
+    return counters, metrics, shapes
 
 
 def reconcile_instances(model, files, index, origin, counts, overlap_threshold, radius, report, *,
-                        enabled=True, overlaps=None, normal_keys=None, workers=1):
+                        enabled=True, overlaps=None, normal_keys=None, workers=1, limits=None):
     """Match mutual-best instance pairs, then form consistent cross-tile groups.
 
     Each pair needs the configured overlap fraction of the smaller instance.
@@ -321,6 +393,8 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
     establish normal groups first and forbid a recovered path from joining two
     groups that were distinct before recovery. Accepted groups retain every
     member's geometry; shared-point ownership chooses only duplicate records.
+    ``limits`` (MatchLimits) adds the support, two-way coverage, centroid and
+    semantic guards and joins groups in descending match count.
     """
     parent = {key: key for key in sorted(counts)}
     members = {key: {key[0]: key[1]} for key in parent}
@@ -332,22 +406,27 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
             key = parent[key]
         return key
 
-    edges = []
+    edges, shapes, rejected, rejected_examples = [], {}, {}, []
     metrics = dict(files_read=0, points_read=0, query_points=0, skipped_query_points=0)
     if enabled:
         index.flush()
         processes = min(max(1, int(workers)), len(files))
         report.setdefault("parallelism", {})["reconciliation_processes"] = processes
-        jobs = [(model, file, tile, index.path, index.dimensions, origin, radius, overlaps)
+        slabs = [_overlap_slabs(overlaps, tile, len(files)) if limits is not None else None
+                 for tile in range(len(files))]
+        jobs = [(model, file, tile, index.path, index.dimensions, origin, radius, overlaps, slabs[tile])
                 for tile, file in enumerate(files)]
         def count_here(tile, file):
             part = dict.fromkeys(metrics, 0)
-            return _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, part), part
+            tile_shapes = InstanceShapes(slabs[tile]) if limits is not None else None
+            return (_count_instance_pairs(model, file, tile, index, origin, radius, overlaps, part, tile_shapes),
+                    part, tile_shapes)
 
         results = (map_tiles(_count_tile_pairs, jobs, processes=processes,
                              sizes=[Path(file).stat().st_size for file in files])
                    if processes > 1 else (count_here(tile, file) for tile, file in enumerate(files)))
-        for tile, (counters, part) in enumerate(results):
+        for tile, (counters, part, tile_shapes) in enumerate(results):
+            shapes[tile] = tile_shapes
             for name, value in part.items():
                 metrics[name] += value
             for other, pairs in counters.items():
@@ -361,8 +440,20 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
                         (len(left_best) > 1 and left_best[1][0] == n) or
                         (len(right_best) > 1 and right_best[1][0] == n)):
                         continue
-                    if n / min(counts[(tile, a)], counts[(other, b)]) >= overlap_threshold:
+                    if n / min(counts[(tile, a)], counts[(other, b)]) < overlap_threshold:
+                        continue
+                    reason = None if limits is None else _match_rejection(
+                        limits, shapes, model, (tile, a), (other, b), n)
+                    if reason is None:
                         edges.append((tile, a, other, b, n))
+                    else:
+                        rejected[reason] = rejected.get(reason, 0) + 1
+                        if len(rejected_examples) < 200:
+                            rejected_examples.append({"tiles": [tile, other], "instances": [a, b],
+                                                      "matches": n, "reason": reason})
+    if limits is not None and normal_keys is None:
+        # Strongest correspondences first; ties in tile and instance order.
+        edges.sort(key=lambda edge: (-edge[4], edge[:4]))
     if normal_keys is not None:
         # Preserve the original normal/normal edge order. Recovery edges then
         # take stronger mutual-best correspondences first, with stable ties.
@@ -378,6 +469,12 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
         if left != right:
             if any(t in members[right] and members[right][t] != label for t, label in members[left].items()):
                 continue
+            if limits is not None and not _groups_compatible(limits, shapes, overlaps, members[left], members[right]):
+                rejected["group_limits"] = rejected.get("group_limits", 0) + 1
+                if len(rejected_examples) < 200:
+                    rejected_examples.append({"tiles": [tile, other], "instances": [a, b], "matches": n,
+                                              "reason": "group_limits"})
+                continue
             if (normal_component is not None and normal_component[left] and normal_component[right]
                     and not ((tile, a) in normal_keys and (other, b) in normal_keys)):
                 rejected_bridge_count += 1
@@ -390,7 +487,14 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
             members[survivor].update(members[removed])
             if normal_component is not None:
                 normal_component[survivor] |= normal_component[removed]
-        accepted.append({"tiles": [tile, other], "instances": [a, b], "matches": n})
+        entry = {"tiles": [tile, other], "instances": [a, b], "matches": n}
+        if limits is not None:
+            entry["overlap_centroid_distance_m"] = _overlap_distance(limits, shapes, (tile, a), (other, b))
+            if model.semantic:
+                # Diagnostic: would comparing the instances' majority labels have kept this match?
+                entry["majority_semantic_equal"] = (shapes[tile].majority_semantic(a)
+                                                    == shapes[other].majority_semantic(b))
+        accepted.append(entry)
     roots = {key: i + 1 for i, key in enumerate(sorted({root(key) for key in parent}))}
     mapping = {key: roots[root(key)] for key in parent}
     if len(roots) > np.iinfo(np.uint32).max:
@@ -400,9 +504,55 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
                                 "groups": len(roots), "accepted_pairs": accepted,
                                 "rejected_recovery_bridge_count": rejected_bridge_count,
                                 "rejected_recovery_bridges": rejected_bridges,
+                                "limits": None if limits is None else asdict(limits),
+                                "rejected_candidates": rejected, "rejected_candidate_examples": rejected_examples,
                                 "ids": [[tile, local, final] for (tile, local), final in mapping.items()]}
     report["reconciliation"].update(metrics)
     return mapping
+
+
+def _overlap_slabs(overlaps, tile, tiles):
+    """{neighbor: shared-overlap XY bounds} of ``tile``; without a layout every tile overlaps all of it."""
+    if overlaps is None:
+        everywhere = (np.full(2, -1e15), np.full(2, 1e15))
+        return {other: everywhere for other in range(tiles) if other != tile}
+    slabs = dict(overlaps[tile])
+    slabs.update({other: overlaps[other][tile] for other in range(tile + 1, tiles) if tile in overlaps[other]})
+    return slabs
+
+
+def _overlap_distance(limits, shapes, left, right):
+    """Distance of two instances' centroids in their tiles' shared overlap; None if either has no point there."""
+    a = shapes[left[0]].centroid(right[0], left[1])
+    b = shapes[right[0]].centroid(left[0], right[1])
+    return None if a is None or b is None else float(np.linalg.norm(a - b))
+
+
+def _match_rejection(limits, shapes, model, left, right, n):
+    """Why a mutual-best pair above the overlap threshold is not a match, or None."""
+    if n < limits.min_points:
+        return "support"
+    distance = _overlap_distance(limits, shapes, left, right)
+    if limits.max_centroid_distance and distance is not None and distance > limits.max_centroid_distance:
+        return "centroid_distance"
+    if model.semantic:
+        agree = shapes[left[0]].agree.get(right[0], {}).get((left[1], right[1]), 0)
+        if 2 * agree < n:
+            return "semantic"
+    return None
+
+
+def _groups_compatible(limits, shapes, overlaps, left, right):
+    """Whether each member of group ``left`` lies on a tile overlapping each member of ``right``,
+    with their centroids in that overlap within the cap."""
+    for tile, label in left.items():
+        for other, other_label in right.items():
+            if overlaps is not None and min(tile, other) not in overlaps[max(tile, other)]:
+                return False
+            distance = _overlap_distance(limits, shapes, (tile, label), (other, other_label))
+            if limits.max_centroid_distance and distance is not None and distance > limits.max_centroid_distance:
+                return False
+    return True
 
 
 def mapped_values(model, values, tile, mapping):

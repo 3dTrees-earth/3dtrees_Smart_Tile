@@ -549,6 +549,19 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("overlap-threshold", "overlap_threshold"),
     )
 
+    max_centroid_distance: float = Field(
+        5.0, ge=0, allow_inf_nan=False,
+        description="Merge: instances of two tiles match only if their 3D centroids are at most this many metres "
+                    "apart, and a matched group only if all its members are (0 disables the cap)",
+        validation_alias=AliasChoices("max-centroid-distance", "max_centroid_distance"),
+    )
+
+    min_match_points: int = Field(
+        10, ge=1,
+        description="Merge: points two instances of neighboring tiles must share to match",
+        validation_alias=AliasChoices("min-match-points", "min_match_points"),
+    )
+
     max_volume_for_merge: Optional[float] = Field(
         4.0,
         description="Small-instance reassignment: maximum axis-aligned bounding-box volume in m³",

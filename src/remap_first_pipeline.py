@@ -420,7 +420,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                       ready=False, matching=True, target_dims=None,
                       instance_dimension="PredInstance", filter_anchor="centroid", workers=1,
                       resolution_1=0.01, remap_tolerance=None, small_instances=None,
-                      keep_unfiltered=True, rct_folders=None):
+                      keep_unfiltered=True, rct_folders=None, match_limits=None):
     """The sole remap-first merge path for one or more independent models.
 
     ``small_instances`` (a SmallInstancePolicy) reassigns small final instances
@@ -607,7 +607,8 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                              None if keep_unfiltered else dense_dir / suffix, live=owned_files)
                     mapping = timed_stage(model_report, 'reconciliation', reconcile_instances, model, owned_files, owned, origin, counts, overlap_threshold,
                                                   CORRESPONDENCE_RADIUS, model_report, enabled=matching,
-                                                  overlaps=overlaps, normal_keys=normal_keys if admitted else None, workers=query_workers)
+                                                  overlaps=overlaps, normal_keys=normal_keys if admitted else None, workers=query_workers,
+                                                  limits=match_limits)
                     # 3DT-2209: a reconciled ID does not imply identical geometry.
                     # Keep every member here; selecting one whole-instance owner
                     # discards recovered tips before shared-point ownership runs.

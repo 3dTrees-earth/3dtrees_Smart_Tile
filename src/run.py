@@ -450,6 +450,7 @@ def run_merge_task(params: Parameters):
     """
     if params.instance_manifest:
         return _run_merge_qsm(params)
+    from merge_stages import MatchLimits
     from remap_first_pipeline import merge_collections
 
     modes = [bool(params.subsampled_10cm_folder), bool(params.segmented_folders),
@@ -505,6 +506,7 @@ def run_merge_task(params: Parameters):
             resolution_1=params.resolution_1, remap_tolerance=params.remap_tolerance,
             transfer_radius=params.prediction_transfer_tolerance,
             overlap_threshold=params.overlap_threshold, matching=not params.disable_matching,
+            match_limits=MatchLimits(params.max_centroid_distance, params.min_match_points),
             ready=ready, instance_dimension=params.instance_dimension, filter_anchor=params.filter_anchor,
             target_dims={names.name(d) for d in _parse_csv(params.remap_dims)} if params.remap_dims else None,
             small_instances=_small_instance_policy(params),
