@@ -39,7 +39,7 @@ from instance_tiles import _core_index
 from qsm_tiles import FOOTPRINTS_FILE, read_footprints
 from raycloud_meshes import TreeMesh, write_tree_mesh
 from raycloud_terrain import ORIGINAL_SCOPE, TerrainMesh, _faces, _header, _select_and_weld, _write, cell_keys
-from raycloud_tree_files import _tile_key, read_tree_header
+from raycloud_tree_files import _tile_key, instance_heading, read_tree_header
 
 INSTANCE_SCOPE = "instance-dimension"  # RayCloudTools --instance-dimension: tree_id is the instance ID
 KINDS = {"_trees_info.txt": "info", "_trees.txt": "trees", "_trees_mesh.ply": "mesh", "_mesh.ply": "terrain"}
@@ -76,13 +76,14 @@ def tile_files(folder=None, kind_folders=None):
 def read_table(path):
     """(description, heading, {instance ID: row}) of an RCT tree or tree-info table; rows stay unchanged.
 
-    The first column is ``predinstance``; treeinfo writes it as a decimal (``12.0000``).
+    The first column holds the instance IDs (``predinstance`` from RayCloudTools);
+    treeinfo writes them as decimals (``12.0000``).
     """
     rows = {}
     with path.open("r", encoding="utf-8", newline="") as stream:
         description, heading, explicit = read_tree_header(stream, path)
         if not explicit:
-            raise ValueError(f"{path.name}: no predinstance column; run RayCloudTools with --instance-dimension")
+            raise ValueError(f"{path.name}: no instance ID column; run RayCloudTools with --instance-dimension")
         for number, line in enumerate(stream, start=1):
             if not line.strip():
                 continue
@@ -219,11 +220,13 @@ def merge_qsm(manifest_path, qsm_folder, output_dir, *, dimension=None, rct_terr
     report_originals, octree_sources = [], []
     for o, stem in enumerate(originals):
         mine = sorted(uid for uid in tile_of if o in holders[uid])
+        # The ID column is named after the instance dimension the QSMs were built from (3DT-2625).
         description, heading = headers["trees"][0]
-        _write_table(output_dir / f"{stem}_trees.txt", description, heading, {u: rows["trees"][u] for u in mine})
+        _write_table(output_dir / f"{stem}_trees.txt", description, instance_heading(heading, True, dimension),
+                     {u: rows["trees"][u] for u in mine})
         description, heading = headers["info"][0]
         info = output_dir / f"{stem}_trees_info.txt"
-        _write_table(info, description, heading, {u: rows["info"][u] for u in mine})
+        _write_table(info, description, instance_heading(heading, True, dimension), {u: rows["info"][u] for u in mine})
         wanted = set(mine)
         sources = [(mesh, {u: u for u in sorted(known & wanted)}) for _, mesh, known in meshes]
         mesh_path = output_dir / f"{stem}_trees_mesh.ply"

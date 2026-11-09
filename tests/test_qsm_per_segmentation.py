@@ -137,8 +137,13 @@ def test_qsms_go_to_every_original_holding_their_points_with_ids_and_rows_kept(t
     assert table_ids(merged / "a_trees.txt") == [7]
     assert table_ids(merged / "b_trees.txt") == [7, 8]
     assert table_ids(merged / "b_trees_info.txt") == [7, 8]
-    source = (tmp_path / "qsm" / "c00_r00_trees_info.txt").read_text().splitlines()[2]
-    assert (merged / "a_trees_info.txt").read_text().splitlines()[2] == source  # rows unchanged
+    source = (tmp_path / "qsm" / "c00_r00_trees_info.txt").read_text().splitlines()
+    assert (merged / "a_trees_info.txt").read_text().splitlines()[2] == source[2]  # rows unchanged
+    # The ID column is named after the segmentation the QSMs were built from (3DT-2625).
+    for kind in ("trees", "trees_info"):
+        heading = (merged / f"b_{kind}.txt").read_text().splitlines()[1]
+        assert heading.split(",", 1)[0] == SAT and source[1].split(",", 1)[0].strip() == "predinstance"
+        assert heading.split(",", 1)[1] == (tmp_path / "qsm" / f"c00_r00_{kind}.txt").read_text().splitlines()[1].split(",", 1)[1]
     assert report["qsms"] == 2 and report["instances_without_qsm"] == 0
     assert report["terrain_cog"]["file"] == "rct_terrain.tif" and (tmp_path / "merged" / "rct_terrain.tif").is_file()
     for stem in ("a", "b"):

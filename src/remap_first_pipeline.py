@@ -574,7 +574,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                     }
                     model_report["tree_sidecars"] = filter_tree_sidecars(
                         pairs, sidecars_by_collection[i], model_report["instance_ownership"],
-                        work / "tree_files", id_mapping=mapping)
+                        work / "tree_files", id_mapping=mapping, instance_dimension=model.instance)
                     source_meshes = meshes_by_collection[i]
                     if source_meshes:
                         model_report["tree_meshes"] = timed_stage(model_report, 'tree_mesh_filter', filter_tree_meshes,

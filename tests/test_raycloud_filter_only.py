@@ -61,7 +61,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                 for suffix in ("trees", "trees_info"):
                     sidecar = root / "segmented_filtered" / f"c{tile:02d}_r00_filtered_{suffix}.txt"
                     self.assertEqual(sidecar.read_text(),
-                                     f"# RCT tree table\npredinstance,header\n{(tile + 1) * 100000 + 1},tree-1\n")
+                                     f"# RCT tree table\nPredInstance_RCT,header\n{(tile + 1) * 100000 + 1},tree-1\n")
 
     def test_supplied_tree_files_bypass_merging_and_point_ownership(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -277,7 +277,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                 for suffix in ("trees", "trees_info"):
                     sidecar = root / "segmented_filtered" / f"c{tile:02d}_r00_filtered_{suffix}.txt"
                     self.assertEqual(sidecar.read_text(),
-                                     f"# RCT tree table\npredinstance,header\n{(tile + 1) * 100000 + 1},tree-1\n")
+                                     f"# RCT tree table\nPredInstance_RCT,header\n{(tile + 1) * 100000 + 1},tree-1\n")
             output = laspy.read(root / "original_with_predictions" / "raw.las")
             original = laspy.read(originals / "raw.las")
             self.assertEqual(output.X.tolist(), original.X.tolist())
@@ -354,7 +354,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
                 self.assertEqual(read_tile_namespace(file)["tile_id"], tile + 1)
                 for suffix in ("trees", "trees_info"):
                     table = second.parent / "segmented_filtered" / f"c{tile:02d}_r00_filtered_{suffix}.txt"
-                    self.assertEqual(table.read_text(), f"# RCT tree table\npredinstance,header\n{expected},tree-3\n")
+                    self.assertEqual(table.read_text(), f"# RCT tree table\nPredInstance_RCT,header\n{expected},tree-3\n")
 
     def test_subset_uses_declared_tile_id_not_collection_position(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -517,7 +517,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             saved = table.read_text()
             for content, error in [(None, "Missing RayCloudTools"),
                                    ("# RCT\npredinstance,header\n", "instance IDs differ"),
-                                   (saved.replace("predinstance,header", "predinstance,incompatible"), "incompatible")]:
+                                   (saved.replace("PredInstance_RCT,header", "PredInstance_RCT,incompatible"), "incompatible")]:
                 with self.subTest(error=error):
                     if content is None:
                         table.unlink()
@@ -554,7 +554,7 @@ class RayCloudFilterOnlyTests(unittest.TestCase):
             final = root / "original_with_predictions"
             self.assertEqual(laspy.read(final / "raw.las").PredInstance_RCT.tolist(), [1, 0, 2])
             self.assertEqual((final / "raw_trees_info.txt").read_text().splitlines()[1:],
-                             ["predinstance,info columns", "1,info-1", "2,info-2"])
+                             ["PredInstance_RCT,info columns", "1,info-1", "2,info-2"])
 
     def test_unencoded_multiple_tiles_cannot_publish_ambiguous_originals(self):
         with tempfile.TemporaryDirectory() as tmp:

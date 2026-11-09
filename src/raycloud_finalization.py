@@ -126,7 +126,7 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
                 table = file.with_name(f"{file_stem(file)}_{kind}.txt")
                 with table.open("w", encoding="utf-8", newline="") as stream:
                     stream.write(description)
-                    stream.write(f"predinstance,{heading}\n")
+                    stream.write(f"{INSTANCE},{heading}\n")
                     for uid in kept:
                         payload, = db.execute("SELECT payload FROM trees WHERE kind=? AND id=?", (kind, uid)).fetchone()
                         stream.write(f"{mapping[uid]},{payload}")
@@ -138,7 +138,8 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
                 wanted = {uid: mapping[uid] for uid in kept}
                 vertices, faces, per_tree = write_tree_mesh(
                     mesh_file, [(mesh, wanted) for mesh in tile_meshes], scope=DATASET_SCOPE,
-                    tree_count=len(kept), crs=crs_comment_from_file(file), allowed_ids=provenance.keys())
+                    tree_count=len(kept), crs=crs_comment_from_file(file), allowed_ids=provenance.keys(),
+                    comments=[f"rct_instance_dimension {INSTANCE}"])
                 entry["sidecars"]["trees_mesh"] = mesh_file.name
                 entry["mesh"] = {"vertices": vertices, "faces": faces, "trees_with_faces": len(per_tree),
                                  "trees_without_faces": sorted(set(wanted.values()) - per_tree.keys())}

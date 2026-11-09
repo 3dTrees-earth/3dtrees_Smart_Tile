@@ -14,6 +14,9 @@
 ### Instance tiles (3DT-2799)
 - Instance tiles honour `--subsampling-method` when it is given: `center-of-mass` writes each (instance, voxel) as the exact mean of its points, as tile outputs do; ID and carried attributes come from the point nearest that mean. Without the option they keep `nearest-to-centroid`, so existing runs are unchanged (3753 at 10 cm: byte-identical, 18 s with either method).
 
+### Tree table ID column (3DT-2625)
+- The ID column of the RayCloudTools tree tables SmartTile writes is named after the instance dimension it refers to, not `predinstance`: `PredInstance_RCT` for RayCloudTools' own trees (merge and remap) and the segmentation's dimension, such as `PredInstance_SAT`, for QSMs merged with `--instance-manifest`. Values and the other columns are unchanged. Tables with `predinstance` are still read. The tree meshes name the dimension in `comment rct_instance_dimension`. Readers of the old name need updating; the results viewer's `products_to_parquet.py` takes either.
+
 ### Merged products (3DT-2846)
 - `create_merged_file` cuts the 10 cm product into strips of 20 M points instead of 2 M and picks voxels from a memory-mapped strip in groups of whole voxel columns, so a strip is never held whole. Thin strips made every COPC query decompress the same octree nodes many times (3808, 1.1 B points: 522 strips of 0.4 m). Records are ordered with one lexsort over their fields, which runs in parallel across strips; the structured sort held the GIL. 3808: 298 s and 9.7 GB instead of about 5,900 s and 18 GB; changing only the strip size would have needed 95 GB. Products byte-identical.
 - The soft open-file limit is raised to the hard limit and chunk files are merged in batches of at most 200: PDAL 2.10 keeps two descriptors per LAZ reader and crashed without a message above about 509 readers (3808, 3820, 3827). A PDAL crash now names its signal.

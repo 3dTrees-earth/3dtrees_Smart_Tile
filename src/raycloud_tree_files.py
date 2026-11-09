@@ -109,11 +109,24 @@ def _prediction_key(path):
 
 
 def read_tree_header(stream, source):
+    """(description, heading, explicit): whether the first column holds the tree IDs.
+
+    The ID column is ``predinstance`` (RayCloudTools, SmartTile before 2.5) or
+    the instance dimension it refers to (``PredInstance_RCT``, ``PredInstance_SAT``).
+    """
     description, heading = stream.readline(), stream.readline()
     if not description or not heading:
         raise ValueError(f"{source.name}: expected two header lines followed by tree rows")
-    explicit = heading.split(",", 1)[0].strip().lower() == "predinstance"
+    first = heading.split(",", 1)[0].strip().lower()
+    explicit = first == "predinstance" or first.startswith("predinstance_")
     return description, heading, explicit
+
+
+def instance_heading(heading, explicit, dimension):
+    """``heading`` with its first column named after ``dimension``, added when the IDs were implicit (3DT-2625)."""
+    newline = "\r\n" if heading.endswith("\r\n") else "\n"
+    rest = (heading.split(",", 1)[1] if explicit else heading).rstrip("\r\n")
+    return f"{dimension},{rest}{newline}"
 
 
 def tree_rows(stream, source, explicit):
@@ -135,7 +148,8 @@ def tree_rows(stream, source, explicit):
         yield uid, payload
 
 
-def filter_tree_sidecars(pairs, sidecars, ownership, output_dir: Path, *, id_mapping=None):
+def filter_tree_sidecars(pairs, sidecars, ownership, output_dir: Path, *, id_mapping=None,
+                         instance_dimension="PredInstance_RCT"):
     """Filter implicit or explicit tree IDs and apply the LAZ's ID mapping."""
     sources = [Path(source) for source, _, _ in pairs]
     paired = pair_tree_sidecars(sources, sidecars)
@@ -152,9 +166,8 @@ def filter_tree_sidecars(pairs, sidecars, ownership, output_dir: Path, *, id_map
             output = output_dir / f"{_prediction_key(sources[tile])}_filtered_{kind}.txt"
             with source.open("r", encoding="utf-8") as input_stream, output.open("w", encoding="utf-8") as output_stream:
                 description, heading, explicit_ids = read_tree_header(input_stream, source)
-                newline = "\r\n" if heading.endswith("\r\n") else "\n"
                 output_stream.write(description)
-                output_stream.write(("" if explicit_ids else "predinstance,") + heading.rstrip("\r\n") + newline)
+                output_stream.write(instance_heading(heading, explicit_ids, instance_dimension))
                 seen = set()
                 for uid, payload in tree_rows(input_stream, source, explicit_ids):
                     seen.add(uid)
