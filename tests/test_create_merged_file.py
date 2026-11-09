@@ -507,6 +507,8 @@ class CreateMergedFileTests(unittest.TestCase):
         self.assertIn("dropped dimensions", message)
         self.assertFalse(output.exists())
 
+    # Fake COPC bytes have no LAS header to count.
+    @mock.patch("main_create_merged_file._require_all_points", mock.Mock())
     def test_prepare_copc_inputs_uses_tiling_converter(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -553,6 +555,8 @@ class CreateMergedFileTests(unittest.TestCase):
             self.assertEqual(outputs, [copc])
             convert.assert_not_called()
 
+    # Fake COPC bytes have no LAS header to count.
+    @mock.patch("main_create_merged_file._require_all_points", mock.Mock())
     def test_prepare_copc_inputs_rebuilds_existing_copc_without_fresh_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -597,6 +601,8 @@ class CreateMergedFileTests(unittest.TestCase):
 
             self.assertEqual(outputs, [copc])
 
+    # Fake COPC bytes have no LAS header to count.
+    @mock.patch("main_create_merged_file._require_all_points", mock.Mock())
     def test_prepare_copc_inputs_keeps_raw_and_copc_only_sources(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -698,6 +704,8 @@ class CreateMergedFileTests(unittest.TestCase):
             self.assertNotIn(unrelated, outputs)
             convert.assert_not_called()
 
+    # Fake COPC bytes have no LAS header to count.
+    @mock.patch("main_create_merged_file._require_all_points", mock.Mock())
     def test_prepare_copc_inputs_ignores_unreadable_staged_copc(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -886,3 +894,52 @@ def test_record_order_matches_the_structured_sort():
     vector["X"] = rng.integers(0, 4, len(vector))
     vector["normal"] = rng.integers(0, 3, (len(vector), 3))
     assert np.array_equal(record_order(vector), np.argsort(vector, kind="stable"))
+
+
+def _write_points(path, count):
+    import laspy
+    import numpy as np
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales, header.offsets = np.full(3, 0.01), np.zeros(3)
+    las = laspy.LasData(header)
+    las.x = las.y = las.z = np.arange(count, dtype=float)
+    las.write(str(path))
+
+
+def test_prepare_copc_inputs_rejects_a_copc_short_of_its_source(tmp_path):
+    import pytest
+    input_dir, output_dir = tmp_path / "input", tmp_path / "out"
+    input_dir.mkdir()
+    _write_points(input_dir / "original.laz", 5)
+    convert = mock.Mock(side_effect=lambda _, output, **__: _write_points(output, 4) or True)
+    with mock.patch.dict(sys.modules, {"tile_copc": mock.Mock(convert_laz_to_copc=convert)}), \
+            mock.patch("main_create_merged_file.write_copc_stage_manifest_entry") as manifest:
+        with pytest.raises(RuntimeError, match="COPC holds 4 of 5 points"):
+            prepare_copc_inputs(input_dir, output_dir)
+    assert not (output_dir / "original_with_predictions_copc/original.copc.laz").exists()
+    manifest.assert_not_called()
+
+
+def test_chunk_merge_laz_fallback_rejects_a_copc_short_of_its_chunks(tmp_path):
+    import pytest
+    output = tmp_path / "prod_merged_1cm.copc.laz"
+
+    def run_pipeline(pipeline, *_):
+        target = Path(pipeline["pipeline"][-1]["filename"])
+        if target.suffix != ".laz" or target.name.endswith(".copc.laz"):
+            return mock.Mock(returncode=1, stdout="", stderr="direct COPC merge failed")
+        _write_points(target, 5)
+        return mock.Mock(returncode=0, stdout="", stderr="")
+
+    convert = mock.Mock(side_effect=lambda _, target, **__: _write_points(target, 4) or True)
+    with mock.patch("main_create_merged_file._untwine_chunk_files_to_copc", return_value=(False, "untwine failed")), \
+            mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline), \
+            mock.patch("main_create_merged_file._select_chunk_points", side_effect=_copy_raw_chunk), \
+            mock.patch("subsample_outputs.convert_laz_output_to_copc", convert), \
+            mock.patch("main_create_merged_file._finalize_product") as finalize:
+        (tmp_path / "work").mkdir()
+        with pytest.raises(RuntimeError, match="COPC holds 4 of 5 points"):
+            _merge_prod_chunks([tmp_path / "chunk.laz"], output, "copc.laz", tmp_path / "work",
+                               tmp_path / "source.copc.laz", {"scale_x": 0.01})
+    assert not output.exists()
+    finalize.assert_not_called()

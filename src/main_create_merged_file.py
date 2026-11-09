@@ -225,6 +225,7 @@ def prepare_copc_inputs(
             converter = convert_laz_to_copc
         if not converter(input_file, output_copc, preserve_extra_dims=True):
             raise RuntimeError(f"LAZ/LAS -> COPC conversion failed: {input_file}")
+        _require_all_points(input_file, output_copc)
         write_copc_stage_manifest_entry(input_file, output_copc)
         selected_by_source[key] = output_copc
 
@@ -331,6 +332,17 @@ def _point_cloud_point_count(path: Path) -> int:
 
     with laspy.open(str(path), laz_backend=laspy_laz_backend()) as reader:
         return int(reader.header.point_count)
+
+
+def _require_all_points(source: Path, copc: Path) -> None:
+    """Remove ``copc`` and raise unless it holds every point of ``source``.
+
+    Untwine can exit 0 with points missing (docker/untwine/README.md).
+    """
+    expected, actual = _point_cloud_point_count(source), _point_cloud_point_count(copc)
+    if actual != expected:
+        copc.unlink(missing_ok=True)
+        raise RuntimeError(f"{copc.name}: COPC holds {actual:,} of {expected:,} points")
 
 
 def _union_bounds(input_files: List[Path]) -> Tuple[float, float, float, float]:
@@ -936,6 +948,7 @@ def _merge_prod_chunks(
         preserve_extra_dims=True,
     ):
         raise RuntimeError(f"Prod-merged COPC conversion failed: {output_file}")
+    _require_all_points(temp_laz, output_file)
     _finalize_product(output_file, normalized_format, chunk_files, source_metadata_file)
     try:
         temp_laz.unlink()
