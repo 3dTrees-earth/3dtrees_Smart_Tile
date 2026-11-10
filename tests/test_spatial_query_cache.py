@@ -162,3 +162,31 @@ def test_regions_go_to_workers_by_point_count(tmp_path):
         # The dense spot gets a worker of its own; the three medium regions share the other.
         owners = region_owners(np.array([[rx * 4 + 1., 1., 0.] for rx in range(5)] + [[401., 1., 0.]]), 2, assigned)
         assert owners[0] != owners[1] and owners[1] == owners[2] == owners[3] and owners[5] in (0, 1)
+
+
+def test_tiles_out_of_reach_are_skipped_with_identical_results(tmp_path):
+    # Six tiles in a grid; each query group can reach only its neighbours.
+    rng = np.random.default_rng(2802)
+    for budget in (0, 1, 8 * 1024**2):
+        pool = SpatialQueryCache(budget)
+        with PointIndex(tmp_path / f'{budget}.db', {'id': np.uint32}, query_cache=pool) as idx:
+            clouds = []
+            for tile in (4, 1, 0, 5, 3, 2):
+                x0, y0 = 10.0 * (tile % 3), 10.0 * (tile // 3)
+                xyz = rng.uniform([x0 - 2, y0 - 2, 0], [x0 + 12, y0 + 12, 3], (300, 3))
+                xyz[:2] = [[x0 + 10, y0 + 10, 1], [x0 + 10, y0 + 10, 1]]  # coincident corners across tiles
+                labels = rng.integers(0, 4, len(xyz), dtype=np.uint32)
+                for start in range(0, len(xyz), 60):
+                    idx.add(tile, xyz[start:start + 60], {'id': labels[start:start + 60]}, np.arange(start, start + 60))
+                clouds.append(xyz)
+            idx.flush()
+            q = np.concatenate(clouds + [rng.uniform([-5, -5, 0], [35, 25, 3], (200, 3))]) + rng.uniform(-.006, .006, (2000, 3))
+            for kw in ({}, {'tile': 4}, {'before_tile': 3}, {'positive_dimension': 'id'},
+                       {'overlaps': {0: (np.array([8., -2.]), np.array([12., 12.])), 2: (np.array([18., 8.]), np.array([22., 12.]))}}):
+                actual, expected = idx.nearest(q, .01, **kw), idx._nearest_batches(q, .01, **kw)
+                np.testing.assert_array_equal(actual[0], expected[0])
+                np.testing.assert_array_equal(actual[1]['id'], expected[1]['id'])
+                np.testing.assert_array_equal(actual[2], expected[2])
+            distances = idx.nearest_distances(q, .01)
+            np.testing.assert_array_equal(np.isfinite(distances), np.isfinite(idx._nearest_batches(q, .01)[0]))
+            assert pool.bytes_used <= pool.max_bytes

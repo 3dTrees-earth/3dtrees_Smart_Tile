@@ -115,7 +115,7 @@ def _area_entry(index, tile, cell, size, radius, positive_dimension, bounds, *,
                 selection_key=None, select_points=None, matching=None):
     bound_key = None if bounds is None else tuple(np.asarray(bounds).ravel())
     key = (index._cache_owner, tile, size, *cell, radius, positive_dimension, bound_key,
-           repr(index._storage_dtype().descr), selection_key, matching)
+           index.storage_key(), selection_key, matching)
     cached = index.query_cache.get(key)
     if cached is not None:
         return cached
@@ -204,8 +204,12 @@ def nearest_region(index, xyz, radius, *, tile=None, before_tile=None, overlaps=
     refs = np.full((len(xyz), 2), -1, dtype=np.int64)
     values = {name: np.zeros(len(xyz), dtype=dtype) for name, dtype in index.dimensions.items()}
     numerical_ties = np.zeros(len(xyz), dtype=bool)
+    # A tile out of reach of the group holds no candidate; skipping it changes no answer.
+    reachable = set(index.search_order(xyz, radius))
     tiles = [tile] if tile is not None else sorted(index._cache_tiles)
     for source in tiles:
+        if source not in reachable:
+            continue
         if before_tile is not None and source >= before_tile:
             continue
         if overlaps is not None and source not in overlaps:

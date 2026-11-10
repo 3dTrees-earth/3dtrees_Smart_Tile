@@ -241,6 +241,8 @@ def ownership_candidates(index, pts, tile, competitors, regions, origin, model,
     from spatial_query_cache import REGION_SIZE, region_entry
     cell = tuple(np.floor(pts[0, :2] / REGION_SIZE).astype(np.int64))
     limit = distance_limit(pts, DUPLICATE_RADIUS)
+    reachable = set(index.search_order(pts, DUPLICATE_RADIUS if block_limit is None else block_limit)
+                    if index._cache_ready else competitors)
     for other, bounds in sorted(competitors.items()):
         allowed = inside_xy(pts, bounds)
         if not background_only:
@@ -248,6 +250,9 @@ def ownership_candidates(index, pts, tile, competitors, regions, origin, model,
         if not np.any(allowed):
             continue
         if occupancy is not None and not occupancy.may_contain(other, pts[allowed], limit):
+            continue
+        # After the occupancy check, so its skip counts in the report stay the same.
+        if other not in reachable:
             continue
         select = None if background_only else lambda xyz: preferred_core(
             xyz, other, tile, regions, origin)

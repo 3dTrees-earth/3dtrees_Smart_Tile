@@ -69,6 +69,7 @@ class PointIndex:
         self._cache_ready = read_only
         self._cache_tiles = set()
         self._extents = None
+        self._layout = None
         # Points per 2 m cell of everything added here (None once shards are
         # appended): balances remap workers without scanning the index.
         self.cell_points = None if read_only else Counter()
@@ -132,8 +133,21 @@ class PointIndex:
         # layout avoids ZIP/NPY parsing and array copies for every spatial query.
         # Derive it from current dimensions: survivor schemas may be narrowed
         # before their first insertion.
-        return np.dtype([("xyz", np.float64, (3,)), ("indices", np.int64)] +
-                        [(f"value_{i}", dtype) for i, dtype in enumerate(self.dimensions.values())])
+        return self._storage_layout()[0]
+
+    def storage_key(self):
+        """A hashable name of the record layout, for cache keys."""
+        return self._storage_layout()[1]
+
+    def _storage_layout(self):
+        # Queries ask for the layout once per 2 m group; rebuild it only when
+        # the dimensions change.
+        dims = tuple((name, np.dtype(dtype).str) for name, dtype in self.dimensions.items())
+        if self._layout is None or self._layout[0] != dims:
+            dtype = np.dtype([("xyz", np.float64, (3,)), ("indices", np.int64)] +
+                             [(f"value_{i}", dtype) for i, dtype in enumerate(self.dimensions.values())])
+            self._layout = (dims, (dtype, repr(dtype.descr)))
+        return self._layout[1]
 
     def add(self, tile, xyz, values, point_indices):
         if len(xyz) > MAX_BATCH_POINTS:
@@ -236,7 +250,7 @@ class PointIndex:
             limit = distance_limit(points, radius)
             cell, subcell = query_cells(points)
             best = np.full(len(points), np.inf)
-            for tile in sorted(self._cache_tiles):
+            for tile in self.search_order(points, radius):
                 entry = None
                 if self._cache_ready and self.query_cache.max_bytes:
                     entry = region_entry(self, tile, cell, limit, None, None, subcell=subcell)
