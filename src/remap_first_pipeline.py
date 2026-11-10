@@ -559,7 +559,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                         survivors, origin, final_tile_dir, instance_statistics=statistics)
                     model_report["rct_instance_ids"] = namespace
                     # RCT trees are never merged across tiles; check the one-tile contract.
-                    verify_distinct_instances(final_files, model.instance)
+                    verify_distinct_instances(final_files, model.instance, workers=query_workers)
                     validate_recovered_geometry(survivors, model, admitted, claims_path, model_report, origin)
                     for stage in (owned, admitted_index):
                         _release(stage)
@@ -645,12 +645,14 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                     # pre-reassignment labels and compaction folds them (aliases).
                     if small_instances is not None:
                         reassigned = timed_stage(model_report, 'small_instance_reassignment', reassign_small_instances,
-                                                 statistics, small_instances, final_files, model.instance, model_report)
+                                                 statistics, small_instances, final_files, model.instance, model_report,
+                                                 workers=query_workers)
                     mapping = {key: reassigned.get(value, value) for key, value in mapping.items()}
                     reassignments[model.instance] = reassigned
                     # One tile per instance, so per-tile tools see every tree once and whole.
                     timed_stage(model_report, 'instance_consolidation', consolidate_instances,
-                                final_files, model.instance, regions, work / "consolidation" / suffix, model_report)
+                                final_files, model.instance, regions, work / "consolidation" / suffix, model_report,
+                                workers=query_workers)
                     with (final_dir / suffix / "instance_metadata.csv").open("w", newline="", encoding="utf-8") as stream:
                         writer = csv.writer(stream)
                         writer.writerow([model.instance, "has_added_clusters"])

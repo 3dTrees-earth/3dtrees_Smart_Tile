@@ -20,6 +20,7 @@ from scipy.spatial import cKDTree
 
 from bounded_point_index import MAX_BATCH_POINTS
 from instance_statistics import InstanceStatistics
+from parallel_tiles import map_tiles
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
 
 SEARCH_RADIUS_M = 5.0
@@ -67,39 +68,46 @@ def plan_reassignment(stats: InstanceStatistics, policy: SmallInstancePolicy):
     return mapping, report
 
 
-def relabel_tiles(files, instance_dimension, mapping):
-    """Rewrite instance IDs in place; each file is replaced only after a complete write."""
+def _relabel_tile(file, instance_dimension, source, target):
+    """Rewrite one tile's instance IDs in place; returns the number of relabelled points."""
+    file = Path(file)
+    temporary = file.with_name(f".{file.name}.relabel")
+    points = 0
+    with laspy.open(file) as reader:
+        header = copy_single_source_header(reader.header)
+        # laspy picks compression from the name; ".relabel" would write plain LAS into a .laz.
+        with laspy.open(temporary, mode="w", header=header,
+                        do_compress=file.suffix.lower() == ".laz") as writer:
+            for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+                labels = np.asarray(record[instance_dimension])
+                hit = np.isin(labels, source)
+                if np.any(hit):
+                    relabeled = labels.copy()
+                    relabeled[hit] = target[np.searchsorted(source, labels[hit])]
+                    record[instance_dimension] = relabeled.astype(labels.dtype)
+                    points += int(hit.sum())
+                writer.write_points(record)
+            write_retained_evlrs(writer, header)
+    os.replace(temporary, file)
+    return points
+
+
+def relabel_tiles(files, instance_dimension, mapping, *, workers=1):
+    """Rewrite instance IDs in place; each file is replaced only after a complete write.
+
+    Tiles are independent, so up to ``workers`` are rewritten in processes.
+    """
     source = np.fromiter(sorted(mapping), dtype=np.int64)
     target = np.fromiter((mapping[s] for s in sorted(mapping)), dtype=np.int64)
-    changed = []
-    for file in files:
-        file = Path(file)
-        temporary = file.with_name(f".{file.name}.relabel")
-        points = 0
-        with laspy.open(file) as reader:
-            header = copy_single_source_header(reader.header)
-            # laspy picks compression from the name; ".relabel" would write plain LAS into a .laz.
-            with laspy.open(temporary, mode="w", header=header,
-                            do_compress=file.suffix.lower() == ".laz") as writer:
-                for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-                    labels = np.asarray(record[instance_dimension])
-                    hit = np.isin(labels, source)
-                    if np.any(hit):
-                        relabeled = labels.copy()
-                        relabeled[hit] = target[np.searchsorted(source, labels[hit])]
-                        record[instance_dimension] = relabeled.astype(labels.dtype)
-                        points += int(hit.sum())
-                    writer.write_points(record)
-                write_retained_evlrs(writer, header)
-        os.replace(temporary, file)
-        changed.append(points)
-    return changed
+    jobs = [(file, instance_dimension, source, target) for file in files]
+    sizes = [Path(file).stat().st_size for file in files]
+    return list(map_tiles(_relabel_tile, jobs, processes=max(1, int(workers)), sizes=sizes))
 
 
-def reassign_small_instances(stats, policy, files, instance_dimension, report):
+def reassign_small_instances(stats, policy, files, instance_dimension, report, *, workers=1):
     """Plan, record and apply the reassignment; returns ``{source: target}``."""
     mapping, report["small_instance_reassignment"] = plan_reassignment(stats, policy)
     if mapping:
         report["small_instance_reassignment"]["relabeled_points_per_tile"] = relabel_tiles(
-            files, instance_dimension, mapping)
+            files, instance_dimension, mapping, workers=workers)
     return mapping

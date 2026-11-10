@@ -62,7 +62,7 @@ def spatial_batches(xyz):
 
 class PointIndex:
     def __init__(self, path: Path, dimensions: dict[str, np.dtype], *, query_workers: int = 1,
-                 read_only: bool = False, query_cache=None):
+                 read_only: bool = False, query_cache=None, shared_thread: bool = False):
         from spatial_query_cache import shared_cache
         self.query_cache = shared_cache() if query_cache is None else query_cache
         self._cache_owner = object()
@@ -74,8 +74,9 @@ class PointIndex:
         self.query_workers = spatial_query_worker_count(query_workers)
         self.dimensions = dimensions
         self.path = Path(path).resolve()
+        # ``shared_thread``: the caller hands the index to one other thread at a time.
         self.db = (sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)
-                   if read_only else sqlite3.connect(self.path))
+                   if read_only else sqlite3.connect(self.path, check_same_thread=not shared_thread))
         self.db.execute("PRAGMA cache_size=-16384")
         self.db.execute("PRAGMA temp_store=FILE")
         if read_only:

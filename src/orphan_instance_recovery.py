@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
+from pathlib import Path
 from time import perf_counter
 
 import laspy
 import numpy as np
-from bounded_point_index import MAX_BATCH_POINTS, coordinates
+from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates
 from merge_stages import DUPLICATE_RADIUS, index_file
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
-from orphan_claims import select_claims
+from orphan_claims import claim_coordinates, select_claims
+from parallel_tiles import map_tiles
 from parallel_index_queries import IndexQueries
 
 
@@ -34,6 +36,44 @@ def _core_union_mask(xyz, tile, regions, overlaps, origin):
         result |= ((xyz[:, 0] >= x0) & (xyz[:, 0] <= x1) &
                    (xyz[:, 1] >= y0) & (xyz[:, 1] <= y1))
     return result
+
+
+# Claims are buffered and inserted sorted by key: SQLite then appends to its
+# B-trees instead of touching a random page per point.
+CLAIM_BUFFER_ROWS = 4_000_000
+CLAIMS_CACHE_KIB = 131_072
+
+
+class _ClaimRows:
+    """``INSERT OR IGNORE INTO claims`` for whole batches, in ``(tile, instance, loc)`` order.
+
+    ``loc`` is the little-endian float64 XYZ of the sample, as before; the rows
+    and therefore the table are the same as with one insert per point.
+    """
+
+    def __init__(self, db):
+        self.db, self.tiles, self.labels, self.locs, self.rows = db, [], [], [], 0
+
+    def add(self, tile, labels, xyz):
+        self.tiles.append(np.full(len(labels), tile, dtype=np.int64))
+        self.labels.append(np.asarray(labels, dtype=np.int64))
+        self.locs.append(np.ascontiguousarray(xyz, dtype='<f8'))
+        self.rows += len(labels)
+        if self.rows >= CLAIM_BUFFER_ROWS:
+            self.flush()
+
+    def flush(self):
+        if not self.rows:
+            return
+        tiles, labels = np.concatenate(self.tiles), np.concatenate(self.labels)
+        locs = np.concatenate(self.locs)
+        # Big-endian words of the loc bytes order like SQLite's memcmp on the blob.
+        words = locs.view('>u8').reshape(-1, 3)
+        order = np.lexsort((words[:, 2], words[:, 1], words[:, 0], labels, tiles))
+        blobs = locs[order].view('V24').ravel().tolist()
+        self.db.executemany('INSERT OR IGNORE INTO claims VALUES (?,?,?)',
+                            zip(tiles[order].tolist(), labels[order].tolist(), blobs))
+        self.tiles, self.labels, self.locs, self.rows = [], [], [], 0
 
 
 def _claim_candidates(model, dense_files, rejected, regions, overlaps, origin):
@@ -81,6 +121,7 @@ def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
         db.execute('PRAGMA journal_mode=OFF')
         db.execute('PRAGMA synchronous=OFF')
         db.execute('PRAGMA temp_store=FILE')
+        db.execute(f'PRAGMA cache_size=-{CLAIMS_CACHE_KIB}')
         db.execute('CREATE TABLE claims (tile INTEGER, instance INTEGER, loc BLOB, '
                    'PRIMARY KEY(tile,instance,loc)) WITHOUT ROWID')
         db.execute('CREATE INDEX claims_loc ON claims(loc)')
@@ -91,13 +132,13 @@ def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
         # their content (not insertion order) matters.
         with IndexQueries(owned_index, DUPLICATE_RADIUS, method='covered', positive_dimension=model.instance,
                           workers=max(1, int(workers)) if any(rejected) else 1) as queries:
+            claims = _ClaimRows(db)
             for (tile, labels), xyz, covered in queries.map(
                     _claim_candidates(model, dense_files, rejected, regions, overlaps, origin)):
                 uncovered = ~covered
                 if np.any(uncovered):
-                    db.executemany('INSERT OR IGNORE INTO claims VALUES (?,?,?)',
-                        ((tile, int(label), point.astype('<f8').tobytes())
-                         for label, point in zip(labels[uncovered], xyz[uncovered])))
+                    claims.add(tile, labels[uncovered], xyz[uncovered])
+            claims.flush()
         db.commit()
         metric['claim_seconds'] = perf_counter() - started
         metric['candidates'] = db.execute(
@@ -126,40 +167,67 @@ def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
             decision['disposition'] = 'recovered_orphan'
             decision['recovered'] = True
             counts[tile, uid] = decision['points']
+        # Tiles are independent: rewrite and index them in processes; their
+        # index shards join in tile order, as one writer would have added them.
+        index_dimensions = None if recovered_index is None else recovered_index.dimensions
+        jobs = [(model, tile, dense, owned, output_dir,
+                 None if tile not in by_tile else rejected[tile] - by_tile[tile],
+                 regions[tile], origin, index_dimensions)
+                for tile, (dense, owned) in enumerate(zip(dense_files, owned_files))]
+        sizes = [Path(dense).stat().st_size if tile in by_tile else Path(owned).stat().st_size
+                 for tile, (dense, owned) in enumerate(zip(dense_files, owned_files))]
         outputs = []
-        for tile, (dense, owned) in enumerate(zip(dense_files, owned_files)):
-            if tile not in by_tile:
-                output = owned
-            else:
-                output = output_dir / dense.name
-                original_rejected = rejected[tile] - by_tile[tile]
-                with laspy.open(dense) as reader:
-                    header = copy_single_source_header(reader.header)
-                    with laspy.open(output, mode='w', header=header) as writer:
-                        for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-                            labels = np.asarray(record[model.instance])
-                            keep = ~np.isin(labels, list(original_rejected))
-                            background = labels == 0
-                            if np.any(background):
-                                from dense_instance_ownership import owned_background
-                                xy = coordinates(record, reader.header, origin)[background, :2] + origin[:2]
-                                keep[background] = owned_background(xy, regions[tile])
-                            writer.write_points(record[keep])
-                        write_retained_evlrs(writer, header)
-                with laspy.open(output) as reader:
-                    revised = int(reader.header.point_count)
+        for tile, (output, revised, shard_path) in enumerate(
+                map_tiles(_recovered_tile, jobs, processes=max(1, int(workers)), sizes=sizes)):
+            if revised is not None:
                 decisions[tile]['surviving'] = revised
                 decisions[tile]['removed'] = decisions[tile]['input'] - revised
                 decisions[tile]['kept_instances'] += len(by_tile[tile])
                 decisions[tile]['removed_instances'] -= len(by_tile[tile])
                 decisions[tile]['recovered_instances'] = sorted(by_tile[tile])
             outputs.append(output)
-            if recovered_index is not None:
-                index_file(recovered_index, output, tile, origin, model)
+            if shard_path is not None:
+                recovered_index.append_index(shard_path)
+                shard_path.unlink()
+        if recovered_index is not None:
+            recovered_index.flush()
         metric['final_support'] = 'pending'
         return outputs, counts, selected, db_path
     finally:
         db.close()
+
+
+def _recovered_tile(model, tile, dense, owned, output_dir, original_rejected, region, origin, index_dimensions):
+    """One tile's recovery output: ``(file, surviving points or None, index shard or None)``.
+
+    A tile with admitted instances is rewritten from its dense file without the
+    instances that stay rejected; any other tile keeps its owned file.
+    """
+    output = owned
+    revised = None
+    if original_rejected is not None:
+        output = output_dir / dense.name
+        with laspy.open(dense) as reader:
+            header = copy_single_source_header(reader.header)
+            with laspy.open(output, mode='w', header=header) as writer:
+                for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+                    labels = np.asarray(record[model.instance])
+                    keep = ~np.isin(labels, list(original_rejected))
+                    background = labels == 0
+                    if np.any(background):
+                        from dense_instance_ownership import owned_background
+                        xy = coordinates(record, reader.header, origin)[background, :2] + origin[:2]
+                        keep[background] = owned_background(xy, region)
+                    writer.write_points(record[keep])
+                write_retained_evlrs(writer, header)
+        with laspy.open(output) as reader:
+            revised = int(reader.header.point_count)
+    shard_path = None
+    if index_dimensions is not None:
+        shard_path = output_dir / f".recovered_{tile:05d}.sqlite"
+        with PointIndex(shard_path, index_dimensions, query_workers=1) as shard:
+            index_file(shard, output, tile, origin, model)
+    return output, revised, shard_path
 
 
 def validate_recovered_geometry(index, model, selected, claims_path, report, origin):
@@ -171,7 +239,7 @@ def validate_recovered_geometry(index, model, selected, claims_path, report, ori
         for tile, uid in selected:
             cursor = db.execute('SELECT loc FROM claims WHERE tile=? AND instance=?', (tile, uid))
             while rows := cursor.fetchmany(MAX_BATCH_POINTS):
-                xyz = np.array([np.frombuffer(row[0], dtype='<f8') for row in rows])
+                xyz = claim_coordinates(rows)
                 supported = _positive_support(index, xyz, model.instance)
                 checked += len(xyz)
                 missing += int(np.count_nonzero(~supported))

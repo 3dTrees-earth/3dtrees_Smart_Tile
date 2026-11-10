@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import multiprocessing
+import queue
+import threading
 from collections import Counter, defaultdict, deque
-from concurrent.futures import ProcessPoolExecutor
+from contextlib import ExitStack, closing
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -651,7 +654,7 @@ def deduplicate(model, files, dense_index, survivor_index, origin, mapping, outp
         tile_overlaps = None if overlaps is None else overlaps[tile]
         with laspy.open(file) as reader:
             header = target_header(reader.header, model, ready=True)
-            parallel = processes > 1 and tile > 0 and reader.header.point_count > 2 * MAX_BATCH_POINTS
+            parallel = processes > 1 and reader.header.point_count > 2 * MAX_BATCH_POINTS
         shard_path = output_dir / f".survivors_{tile:05d}.sqlite"
         pool = None
         if parallel:
@@ -666,12 +669,19 @@ def deduplicate(model, files, dense_index, survivor_index, origin, mapping, outp
             query = _DedupQueries(model, mapping, tile, dense_index, survivor_index, tile_overlaps,
                                   background_semantics_owned, rule)
         try:
+            # The stack exits first: the reading and writing threads stop before
+            # the files and the shard they use are closed.
             with laspy.open(file) as reader, laspy.open(output, mode="w", header=header) as writer, \
-                    PointIndex(shard_path, survivor_index.dimensions, query_workers=1) as shard:
+                    PointIndex(shard_path, survivor_index.dimensions, query_workers=1, shared_thread=True) as shard, \
+                    ExitStack() as stack:
                 chunks = ((record, coordinates(record, reader.header, origin)) for record in reader.chunk_iterator(MAX_BATCH_POINTS))
                 chunks = ((record, xyz, mapped_values(model, prediction_values(record, model.dimensions), tile, mapping))
                           for record, xyz in chunks)
-                for record, xyz, values, (conflict, nearest) in _ordered(chunks, pool, query, processes):
+                # Reading, the queries and writing overlap; each runs in chunk order.
+                sink = _OrderedSink(_keep_survivors, writer, shard, instance_statistics, model, tile)
+                stack.callback(sink.abandon)
+                prefetched = stack.enter_context(closing(_prefetched(chunks)))
+                for record, xyz, values, (conflict, nearest) in _ordered(prefetched, pool, query, processes):
                     if conflict is not None:
                         pos = conflict.pop("query_index")
                         conflict.update(model=model.name, query_tile=tile, query_point=offset + pos,
@@ -690,18 +700,12 @@ def deduplicate(model, files, dense_index, survivor_index, origin, mapping, outp
                     for pos in np.flatnonzero(~keep)[:5 - len(metric["removal_examples"])]:
                         metric["removal_examples"].append({"point": int(offset + pos),
                             "survivor": refs[pos].tolist(), "distance_m": float(distances[pos])})
-                    out = copy_record(record[keep], header)
-                    for name, data in values.items():
-                        out.array[name] = data[keep]
-                    writer.write_points(out)
-                    shard.add(tile, xyz[keep], {n: v[keep] for n, v in values.items()},
-                              np.flatnonzero(keep) + offset)
-                    if instance_statistics is not None:
-                        instance_statistics.add(values[model.instance][keep], xyz[keep])
+                    sink.submit(record, header, xyz, values, keep, offset)
                     metric["input"] += len(record)
                     metric["surviving"] += int(np.count_nonzero(keep))
                     metric["removed"] += int(np.count_nonzero(~keep))
                     offset += len(record)
+                sink.close()
                 write_retained_evlrs(writer, header)
                 shard.flush()
         finally:
@@ -713,6 +717,87 @@ def deduplicate(model, files, dense_index, survivor_index, origin, mapping, outp
         survivor_index.flush()
         outputs.append(output)
     return outputs
+
+
+def _keep_survivors(writer, shard, instance_statistics, model, tile, record, header, xyz, values, keep, offset):
+    """Write one chunk's surviving records and index them, as deduplicate always has."""
+    out = copy_record(record[keep], header)
+    for name, data in values.items():
+        out.array[name] = data[keep]
+    writer.write_points(out)
+    shard.add(tile, xyz[keep], {n: v[keep] for n, v in values.items()}, np.flatnonzero(keep) + offset)
+    if instance_statistics is not None:
+        instance_statistics.add(values[model.instance][keep], xyz[keep])
+
+
+class _OrderedSink:
+    """One thread applying ``function`` to each submitted chunk, in submission order.
+
+    At most ``depth`` chunks wait; the writer, shard and statistics are touched
+    only by that thread until ``close`` returns.
+    """
+
+    def __init__(self, function, *bound, depth=4):
+        self.function, self.bound, self.depth = function, bound, depth
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.pending = deque()
+
+    def submit(self, *args):
+        while len(self.pending) >= self.depth:
+            self.pending.popleft().result()
+        self.pending.append(self.executor.submit(self.function, *self.bound, *args))
+
+    def close(self):
+        while self.pending:
+            self.pending.popleft().result()
+        self.executor.shutdown(wait=True)
+
+    def abandon(self):
+        """Stop after the running chunk; a no-op after ``close``."""
+        for future in self.pending:
+            future.cancel()
+        self.executor.shutdown(wait=True)
+
+
+def _prefetched(items, depth=2):
+    """Yield ``items`` in order while a thread produces up to ``depth`` ahead."""
+    buffer = queue.Queue(maxsize=depth)
+    done = object()
+    stop = threading.Event()
+
+    def produce():
+        try:
+            for item in items:
+                while not stop.is_set():
+                    try:
+                        buffer.put((item, None), timeout=1)
+                        break
+                    except queue.Full:
+                        continue
+                if stop.is_set():
+                    return
+            buffer.put((done, None))
+        except BaseException as exc:  # handed to the consumer
+            buffer.put((done, exc))
+
+    thread = threading.Thread(target=produce, daemon=True)
+    thread.start()
+    try:
+        while True:
+            item, error = buffer.get()
+            if item is done:
+                if error is not None:
+                    raise error
+                return
+            yield item
+    finally:
+        stop.set()
+        while thread.is_alive():
+            try:
+                buffer.get(timeout=0.1)
+            except queue.Empty:
+                pass
+        thread.join()
 
 
 def _ordered(chunks, pool, query, processes):

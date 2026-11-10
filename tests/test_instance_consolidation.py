@@ -72,3 +72,27 @@ def test_nothing_to_move_leaves_files_untouched(tmp_path):
     metric = consolidate_instances([a, b], "PredInstance", regions(), tmp_path / "work", {})
     assert metric["split_instances"] == 0
     assert [f.stat().st_mtime_ns for f in (a, b)] == stamp
+
+
+def test_processes_give_the_same_files_and_report_as_one_process(tmp_path):
+    from small_instance_reassignment import relabel_tiles
+
+    rng = np.random.default_rng(4)
+    three = [{"core": [[0.0, 10.0], [0.0, 10.0]]}, {"core": [[10.0, 20.0], [0.0, 10.0]]},
+             {"core": [[20.0, 30.0], [0.0, 10.0]]}]
+    runs = {}
+    for workers in (1, 3):
+        run = tmp_path / f"w{workers}"
+        run.mkdir()
+        files = [run / f"c{t:02d}_r00.laz" for t in range(3)]
+        for t, file in enumerate(files):
+            # Instances 1..6 straddle the tile edges, so points move into and out of every tile.
+            xyz = np.c_[rng.uniform(10 * t - 2, 10 * t + 12, 400), rng.uniform(0, 10, 400), rng.uniform(0, 5, 400)]
+            write_tile(file, xyz, rng.integers(0, 7, 400), (10.0 * t, 5.0, 0.0))
+        report = {}
+        relabel_tiles(files, "PredInstance", {6: 5}, workers=workers)
+        consolidate_instances(files, "PredInstance", three, run / "work", report, workers=workers)
+        runs[workers] = ([f.read_bytes() for f in files], report)
+        rng = np.random.default_rng(4)
+    assert runs[1][1]["instance_consolidation"]["moved_points"] > 0
+    assert runs[1] == runs[3]

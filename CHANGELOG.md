@@ -17,6 +17,12 @@
 ### Tree table ID column (3DT-2625)
 - The ID column of the RayCloudTools tree tables SmartTile writes is named after the instance dimension it refers to, not `predinstance`: `PredInstance_RCT` for RayCloudTools' own trees (merge and remap) and the segmentation's dimension, such as `PredInstance_SAT`, for QSMs merged with `--instance-manifest`. Values and the other columns are unchanged. Tables with `predinstance` are still read. The tree meshes name the dimension in `comment rct_instance_dimension`. Readers of the old name need updating; the results viewer's `products_to_parquet.py` takes either.
 
+### Merge speed: orphan recovery, deduplication, consolidation (2585)
+- Outputs are byte-identical to before (3753 and 2779, SAT and FM; 2585 9-tile subset); only the work is spread differently.
+- Orphan recovery buffers the uncovered claims and inserts them sorted by key, with a 128 MB SQLite cache, instead of one insert per point; claim coordinates are decoded vectorised. Tiles with admitted instances are rewritten, and every tile is re-indexed, in up to `workers` processes, joining the index in tile order.
+- Deduplication also queries tile 0 in the process pool, and overlaps reading, the queries and writing: one thread decodes the next chunks, one writes the survivors, their index shard and the instance statistics in chunk order.
+- Instance consolidation and small-instance relabelling handle tiles in up to `workers` processes. Sums are accumulated in tile and chunk order and departing points are joined in tile order, so the files equal a one-process run.
+
 ### Untwine point loss (1924)
 - The image builds untwine 1.5.1 from source with `docker/untwine/0001-reprocess-at-least-one-level-deeper.patch` and reports `untwine version (1.5.1+3dtrees.1)` (label `org.3dtrees.untwine.version`). Unpatched untwine reprocessed a first-pass cell of exactly 100,000 points with zero extra levels, re-binned it into its own file and deleted that file, so the COPC lost part of the cell while untwine exited 0: 1924 (4.26 B points) lost 49,401 points in the full-resolution merge, which failed on its count check. The patch always splits such a cell one level deeper.
 - The two untwine paths without a point-count check now have one: COPC staging of the originals and the chunk-merge LAZ fallback remove a COPC short of its source and stop with `COPC holds X of Y points`, as the full-resolution merge does.
