@@ -68,6 +68,7 @@ class PointIndex:
         self._cache_owner = object()
         self._cache_ready = read_only
         self._cache_tiles = set()
+        self._extents = None
         # Points per 2 m cell of everything added here (None once shards are
         # appended): balances remap workers without scanning the index.
         self.cell_points = None if read_only else Counter()
@@ -140,6 +141,7 @@ class PointIndex:
         if self._cache_ready:
             self.query_cache.discard(self._cache_owner)
         self._cache_ready = False
+        self._extents = None
         self._cache_tiles.add(int(tile))
         starts, sizes = [], []
         for group in spatial_batches(xyz):
@@ -173,6 +175,7 @@ class PointIndex:
         if self._cache_ready:
             self.query_cache.discard(self._cache_owner)
         self._cache_ready = False
+        self._extents = None
         self.cell_points = None
         self.db.commit()
         self.db.execute("ATTACH DATABASE ? AS shard", (str(path),))
@@ -248,12 +251,14 @@ class PointIndex:
             distances[group] = best
         return distances
 
-    def covered(self, xyz, radius, *, positive_dimension):
+    def covered(self, xyz, radius, *, positive_dimension, cores=None):
         """Whether any positive tree lies within radius of each query point.
 
         Coverage needs neither winning attributes nor nearest-point tie breaks.
         Preserve each original XY group's inclusive numerical distance bound,
-        including when previously supported queries are skipped.
+        including when previously supported queries are skipped. ``cores``
+        ({tile: ((x0, x1), (y0, y1))} in index coordinates) only orders the
+        tiles searched: coverage is an OR over tiles, so the answer is the same.
         """
         from spatial_query_cache import covered_region
         found = np.zeros(len(xyz), dtype=bool)
@@ -261,11 +266,39 @@ class PointIndex:
             points = xyz[group]
             result = None
             if self._cache_ready and self.query_cache.max_bytes:
-                result = covered_region(self, points, radius, positive_dimension)
+                result = covered_region(self, points, radius, positive_dimension,
+                                        tiles=self.search_order(points, radius, cores))
             if result is None:
                 result = self._covered_batch(points, radius, positive_dimension)
             found[group] = result
         return found
+
+    def tile_extents(self):
+        """{tile: (x0, x1, y0, y1)} of everything indexed, read once per finished index."""
+        if self._extents is None:
+            rows = self.db.execute("SELECT b.tile, MIN(r.x0), MAX(r.x1), MIN(r.y0), MAX(r.y1) "
+                                   "FROM bounds r JOIN batches b ON b.id=r.id GROUP BY b.tile").fetchall()
+            self._extents = {tile: extent for tile, *extent in rows}
+        return self._extents
+
+    def search_order(self, xyz, radius, cores=None):
+        """Tiles that can hold a point within ``radius`` of ``xyz``: core owners first, then by tile.
+
+        A tile whose indexed extent is farther than the group's distance bound
+        cannot hold a match, so skipping it changes no answer.
+        """
+        limit = distance_limit(xyz, radius)
+        lo, hi = xyz[:, :2].min(axis=0) - limit, xyz[:, :2].max(axis=0) + limit
+        extents = self.tile_extents()
+        reachable = [tile for tile in sorted(self._cache_tiles)
+                     if tile in extents and extents[tile][0] <= hi[0] and extents[tile][1] >= lo[0]
+                     and extents[tile][2] <= hi[1] and extents[tile][3] >= lo[1]]
+        if cores is None:
+            return reachable
+        x, y = xyz[0, 0], xyz[0, 1]
+        owners = [tile for tile in reachable if tile in cores
+                  and cores[tile][0][0] <= x <= cores[tile][0][1] and cores[tile][1][0] <= y <= cores[tile][1][1]]
+        return owners + [tile for tile in reachable if tile not in owners]
 
     def _covered_batch(self, xyz, radius, positive_dimension):
         """Bounded fallback for one XY group; skip already supported queries."""

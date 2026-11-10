@@ -167,17 +167,18 @@ def _area_entry(index, tile, cell, size, radius, positive_dimension, bounds, *,
     return entry
 
 
-def covered_region(index, xyz, radius, positive_dimension):
+def covered_region(index, xyz, radius, positive_dimension, *, tiles=None):
     """Positive-tree support for one XY group, without labels or tie resolution.
 
     Reuse the same bounded region trees as nearest queries. None requests the
-    bounded disk fallback when a region exceeds the cache budget.
+    bounded disk fallback when a region exceeds the cache budget. ``tiles``
+    (default: all, by tile) is the search order; support is an OR over tiles.
     """
     cell, subcell = query_cells(xyz)
     from bounded_point_index import distance_limit
     limit = distance_limit(xyz, radius)
     found = np.zeros(len(xyz), dtype=bool)
-    for tile in sorted(index._cache_tiles):
+    for tile in (sorted(index._cache_tiles) if tiles is None else tiles):
         entry = region_entry(index, tile, cell, limit, positive_dimension, None, subcell=subcell)
         if entry is None:
             return None

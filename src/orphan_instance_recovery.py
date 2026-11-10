@@ -130,8 +130,11 @@ def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
         # Support checks are GIL-bound per-cell searches on the finished owned
         # index: answer them in worker processes; claims form a set, so only
         # their content (not insertion order) matters.
+        # Rejected copies are usually covered by the tile whose core holds them: search it first.
+        cores = {tile: tuple((lo - o, hi - o) for (lo, hi), o in zip(region['core'], origin[:2]))
+                 for tile, region in enumerate(regions)}
         with IndexQueries(owned_index, DUPLICATE_RADIUS, method='covered', positive_dimension=model.instance,
-                          workers=max(1, int(workers)) if any(rejected) else 1) as queries:
+                          cores=cores, workers=max(1, int(workers)) if any(rejected) else 1) as queries:
             claims = _ClaimRows(db)
             for (tile, labels), xyz, covered in queries.map(
                     _claim_candidates(model, dense_files, rejected, regions, overlaps, origin)):
