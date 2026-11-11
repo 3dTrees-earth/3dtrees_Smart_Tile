@@ -111,12 +111,14 @@ def spatial_query_worker_count(requested_workers: int) -> int:
 # reclaimable): a fixed part plus each worker's share, measured on 8 Nov 2026
 # with v2.5 and about 40 % margin. Tile keeps one block of up to 4 M points per
 # worker (Brandenburg 1129/1134 at 10 workers: 4.3/4.7 GB);
-# merge sizes its query caches to the limit (3753 passes in 2 GB); remap
+# merge sizes its query caches to the limit, and its block-query and index
+# processes each hold about 0.3 GB of libraries and one block (11 Nov, 10
+# workers, no limit: 3753 3.8, 2779 3.0, 2585 2-tile 5.3 GB); remap
 # streams 32 k-point batches (3753: fails in 2 GB, passes in 4 GB);
 # create_merged_file picks up to 2 M points per worker (3808: 9.7 GB).
 TASK_MEMORY_GB = {
     "tile": (0.5, 0.6),
-    "merge": (0.5, 0.15),
+    "merge": (0.5, 0.35),
     "remap": (0.5, 0.35),
     "create_merged_file": (0.5, 0.95),
 }

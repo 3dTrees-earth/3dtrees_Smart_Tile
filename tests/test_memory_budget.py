@@ -47,3 +47,9 @@ def test_out_of_memory_failures_exit_137(monkeypatch, capsys):
     # A broken pool without a kernel OOM kill, and ordinary errors, stay exit 1.
     assert failure_exit_code(BrokenProcessPool("abrupt"), oom_kills_before=2) == 1
     assert failure_exit_code(ValueError("bad input")) == 1
+
+
+@pytest.mark.parametrize("grant_gb, workers", [(2.0, 4), (4.0, 10)])
+def test_merge_workers_fit_a_small_grant(grant_gb, workers):
+    # 3753 merge at 10 workers: 3.8 GB; in a 2 GB container it was killed for memory, with 4 it passes (1.8 GB).
+    assert memory_capped_workers(["merge"], 10, limit=int(grant_gb * GB)) == workers
