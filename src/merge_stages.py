@@ -296,10 +296,16 @@ class InstanceShapes:
         self.agree, self.semantics = {}, Counter()
 
     def add(self, ids, xyz, semantics=None):
+        self.apply(self.terms(ids, xyz, semantics))
+
+    def terms(self, ids, xyz, semantics=None):
+        """One chunk's contribution: semantic counts and, per neighbor, labels, XYZ sums and counts."""
+        votes = None
         if semantics is not None:
             keep = ids > 0
             pairs, n = np.unique(np.column_stack((ids[keep], semantics[keep])), axis=0, return_counts=True)
-            self.semantics.update({(int(a), int(b)): int(k) for (a, b), k in zip(pairs, n)})
+            votes = {(int(a), int(b)): int(k) for (a, b), k in zip(pairs, n)}
+        per_neighbor = []
         for other, box in self.slabs.items():
             keep = (ids > 0) & inside_xy(xyz, box)
             if not np.any(keep):
@@ -307,9 +313,19 @@ class InstanceShapes:
             labels, inverse = np.unique(ids[keep], return_inverse=True)
             sums = np.stack([np.bincount(inverse, weights=xyz[keep][:, axis], minlength=len(labels))
                              for axis in range(3)], axis=1)
-            for label, total, n in zip(labels.tolist(), sums, np.bincount(inverse, minlength=len(labels)).tolist()):
+            per_neighbor.append((other, labels.tolist(), sums, np.bincount(inverse, minlength=len(labels)).tolist()))
+        return votes, per_neighbor
+
+    def apply(self, terms):
+        """Add one chunk's terms; applying them in chunk order equals reading the tile in one pass."""
+        votes, per_neighbor = terms
+        if votes is not None:
+            self.semantics.update(votes)
+        for other, labels, sums, counts in per_neighbor:
+            for label, total, n in zip(labels, sums, counts):
                 self.sums[other][label] = self.sums[other].get(label, 0) + total
                 self.count[other][label] += n
+
 
     def majority_semantic(self, label):
         """The instance's most frequent semantic label (smallest on ties); None without semantics."""
@@ -322,7 +338,18 @@ class InstanceShapes:
         return self.sums[other][label] / n if n else None
 
 
-def _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics, shapes=None):
+class ChunkTerms(InstanceShapes):
+    """Records each chunk's terms instead of adding them, for a tile read in parts."""
+
+    def __init__(self, slabs):
+        super().__init__(slabs)
+        self.log = []
+
+    def add(self, ids, xyz, semantics=None):
+        self.log.append(self.terms(ids, xyz, semantics))
+
+
+def _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics, shapes=None, chunks=None):
     """Read a query tile once and accumulate all earlier-neighbor matches.
 
     Prune whole XY query groups only. Retaining every point in a selected group
@@ -337,9 +364,14 @@ def _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, me
     counters = {other: Counter() for other in neighbors}
     if not neighbors and shapes is None:
         return counters
-    metrics['files_read'] += 1
+    first, stop, size = (0, None, MAX_BATCH_POINTS) if chunks is None else chunks
+    metrics['files_read'] += int(first == 0)
     with laspy.open(file) as reader:
-        for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+        if first:
+            reader.seek(first * size)
+        for number, record in enumerate(reader.chunk_iterator(size), start=first):
+            if stop is not None and number >= stop:
+                break
             xyz = coordinates(record, reader.header, origin)
             left = np.asarray(record[model.instance])
             if shapes is not None:
@@ -376,13 +408,55 @@ def _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, me
     return counters
 
 
-def _count_tile_pairs(model, file, tile, index_path, dimensions, origin, radius, overlaps, slabs=None):
-    """Worker: pair counts (and instance shapes) of one tile against a read-only copy of the finished index."""
+def _count_tile_pairs(model, file, tile, index_path, dimensions, origin, radius, overlaps, slabs=None, chunks=None):
+    """Worker: pair counts (and per-chunk shape terms) of a tile's chunk range against the finished index."""
     metrics = dict(files_read=0, points_read=0, query_points=0, skipped_query_points=0)
-    shapes = InstanceShapes(slabs) if slabs is not None else None
+    shapes = ChunkTerms(slabs) if slabs is not None else None
     with PointIndex(index_path, dimensions, query_workers=1, read_only=True) as index:
-        counters = _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics, shapes)
-    return counters, metrics, shapes
+        counters = _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics, shapes, chunks)
+    return counters, metrics, None if shapes is None else (shapes.log, shapes.agree)
+
+
+def _tile_parts(files, processes):
+    """``[(tile, (first chunk, stop chunk, chunk size))]`` in tile and chunk order, about two parts per process.
+
+    Large tiles are split so no single tile holds the stage; every chunk keeps
+    the boundaries of a one-pass read.
+    """
+    chunks = []
+    for file in files:
+        with laspy.open(file) as reader:
+            chunks.append(max(1, -(-int(reader.header.point_count) // MAX_BATCH_POINTS)))
+    share = max(1, -(-sum(chunks) // (2 * processes)))
+    return [(tile, (first, min(first + share, n), MAX_BATCH_POINTS)) for tile, n in enumerate(chunks)
+            for first in range(0, n, share)]
+
+
+def _combine_parts(parts, results, slabs, metrics):
+    """Yield ``(counters, metrics, shapes)`` per tile from its chunk-range parts, in tile order."""
+    current, counters, part_metrics, shapes = None, None, None, None
+    for (tile, _), (part_counters, part_values, log) in zip(parts, results):
+        if tile != current:
+            if current is not None:
+                yield counters, part_metrics, shapes
+            current = tile
+            counters, part_metrics = None, dict.fromkeys(metrics, 0)
+            shapes = InstanceShapes(slabs[tile]) if log is not None else None
+        if counters is None:
+            counters = part_counters
+        else:
+            for other, pairs in part_counters.items():
+                counters[other].update(pairs)
+        for name, value in part_values.items():
+            part_metrics[name] += value
+        if log is not None:
+            terms_log, agree = log
+            for terms in terms_log:
+                shapes.apply(terms)
+            for other, pairs in agree.items():
+                shapes.agree.setdefault(other, Counter()).update(pairs)
+    if current is not None:
+        yield counters, part_metrics, shapes
 
 
 def reconcile_instances(model, files, index, origin, counts, overlap_threshold, radius, report, *,
@@ -417,17 +491,24 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
         report.setdefault("parallelism", {})["reconciliation_processes"] = processes
         slabs = [_overlap_slabs(overlaps, tile, len(files)) if limits is not None else None
                  for tile in range(len(files))]
-        jobs = [(model, file, tile, index.path, index.dimensions, origin, radius, overlaps, slabs[tile])
-                for tile, file in enumerate(files)]
         def count_here(tile, file):
             part = dict.fromkeys(metrics, 0)
             tile_shapes = InstanceShapes(slabs[tile]) if limits is not None else None
             return (_count_instance_pairs(model, file, tile, index, origin, radius, overlaps, part, tile_shapes),
                     part, tile_shapes)
 
-        results = (map_tiles(_count_tile_pairs, jobs, processes=processes,
-                             sizes=[Path(file).stat().st_size for file in files])
-                   if processes > 1 else (count_here(tile, file) for tile, file in enumerate(files)))
+        if processes > 1:
+            # Tiles are read in chunk ranges across all processes; each tile's
+            # counters and shape terms are then combined in chunk order.
+            parts = _tile_parts(files, max(1, int(workers)))
+            report["parallelism"]["reconciliation_parts"] = len(parts)
+            jobs = [(model, files[tile], tile, index.path, index.dimensions, origin, radius, overlaps, slabs[tile], chunks)
+                    for tile, chunks in parts]
+            sizes = [chunks[1] - chunks[0] for _, chunks in parts]
+            results = _combine_parts(parts, map_tiles(_count_tile_pairs, jobs, processes=max(1, int(workers)),
+                                                      sizes=sizes), slabs, metrics)
+        else:
+            results = (count_here(tile, file) for tile, file in enumerate(files))
         for tile, (counters, part, tile_shapes) in enumerate(results):
             shapes[tile] = tile_shapes
             for name, value in part.items():

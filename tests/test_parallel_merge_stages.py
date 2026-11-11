@@ -310,3 +310,36 @@ class ParallelDenseTransferTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReconciliationPartsTests(unittest.TestCase):
+    def test_tiles_read_in_chunk_parts_equal_one_pass(self):
+        """Small chunks split every tile into several parts; pairs, shapes and the report stay identical."""
+        from dense_instance_ownership import filter_owned_instances, ownership_regions
+        from merge_stages import MatchLimits, reconcile_instances
+        from remap_first_pipeline import tile_overlaps
+        runs = []
+        for workers in (1, 3):
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            root = Path(tmp.name)
+            files, _, report, _ = transfer(root, 1)
+            source, target, bounds = root / "source", root / "target", root / "tile_bounds.json"
+            pairs = [(s, t, s.name) for s, t in zip(sorted(source.iterdir()), sorted(target.iterdir()))]
+            report["tile_sources"] = [{"tile": n, "prediction": p[0].name} for n, p in enumerate(pairs)]
+            model = describe_model(source, "PredInstance")
+            dims = {n: p.type for n, p in model.dimensions.items()}
+            regions, overlaps = ownership_regions(pairs, bounds), tile_overlaps(pairs, bounds, np.zeros(3))
+            with PointIndex(root / "owned.sqlite", dims) as owned:
+                owned_files, counts = filter_owned_instances(model, files, regions, root / "owned", owned,
+                                                             np.zeros(3), report, workers=1)
+                with mock.patch.object(merge_stages, "MAX_BATCH_POINTS", 997):
+                    mapping = reconcile_instances(model, owned_files, owned, np.zeros(3), counts, .01, .05, report,
+                                                  overlaps=overlaps, workers=workers,
+                                                  limits=MatchLimits(max_centroid_distance=50.0, min_points=1))
+            runs.append((mapping, report["reconciliation"], report["parallelism"]))
+        (m1, rec1, _), (m3, rec3, par3) = runs
+        self.assertGreater(par3["reconciliation_parts"], 3)
+        self.assertEqual(m1, m3)
+        self.assertEqual(rec1, rec3)
+        self.assertGreater(len(rec3["accepted_pairs"]), 0)
