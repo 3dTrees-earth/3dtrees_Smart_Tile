@@ -31,6 +31,7 @@ import laspy
 import numpy as np
 
 from output_publication import publish_files, validate_output_paths
+from point_ranges import seekable
 from ply_crs import PLY_SIDECAR_SUFFIXES
 from output_names import file_stem
 from scratch import remove_tree, scratch_directory
@@ -109,12 +110,36 @@ def sample_xy(sources, points=2_000_000, run=20_000):
     for source, count in zip(sources, counts):
         runs = max(1, math.ceil(points * count / max(total, 1) / run))
         kwargs = {"laz_backend": backend} if str(source).lower().endswith(".laz") and backend is not None else {}
+        starts = np.linspace(0, max(count - run, 0), runs).astype(np.int64)
         with laspy.open(source, **kwargs) as reader:
-            for start in np.linspace(0, max(count - run, 0), runs).astype(np.int64):
-                reader.seek(int(start))
-                chunk = reader.read_points(min(run, count - int(start)))
-                parts.append(np.c_[np.asarray(chunk.x), np.asarray(chunk.y)])
+            if seekable(source):
+                for start in starts:
+                    reader.seek(int(start))
+                    chunk = reader.read_points(min(run, count - int(start)))
+                    parts.append(np.c_[np.asarray(chunk.x), np.asarray(chunk.y)])
+            else:
+                parts.extend(_runs_in_order(reader, starts, run, count))
     return np.concatenate(parts) if parts else np.empty((0, 2))
+
+
+def _runs_in_order(reader, starts, run, count):
+    """XY of the runs ``[start, start + run)``, read front to back (point_ranges: no seek)."""
+    wanted = [(int(start), min(int(start) + run, count)) for start in starts]
+    pieces = [[] for _ in wanted]
+    offset = 0
+    for chunk in reader.chunk_iterator(CHUNK_POINTS):
+        end = offset + len(chunk)
+        xy = None
+        for piece, (first, stop) in zip(pieces, wanted):
+            low, high = max(first, offset), min(stop, end)
+            if low < high:
+                if xy is None:
+                    xy = np.c_[np.asarray(chunk.x), np.asarray(chunk.y)]
+                piece.append(xy[low - offset:high - offset])
+        offset = end
+        if offset >= wanted[-1][1]:
+            break
+    return [np.concatenate(piece) if piece else np.empty((0, 2)) for piece in pieces]
 
 
 def route(raw_xyz, masks, resolutions, cells, *, scales, offsets):
@@ -379,8 +404,10 @@ def _range_tasks(sources, tiles, resolutions, cells, spill_dir, workers):
     size = max(CHUNK_POINTS, math.ceil(sum(counts) / max(1, 2 * workers)))
     tasks = []
     for source, total in zip(sources, counts):
-        for start in range(0, total, size):
-            tasks.append((len(tasks), str(source), start, min(size, total - start),
+        # A range after the first seeks (point_ranges): a variable-chunk source is one range.
+        step = size if seekable(source) else max(total, 1)
+        for start in range(0, total, step):
+            tasks.append((len(tasks), str(source), start, min(step, total - start),
                           tiles, resolutions, cells, str(spill_dir)))
     return tasks, sum(counts), area
 

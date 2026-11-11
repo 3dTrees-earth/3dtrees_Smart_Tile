@@ -48,6 +48,7 @@ from tile_centroids import (CHUNK_POINTS, Tile, _block_key, _init_worker, _neare
                             _raw_xyz, _round_half_even, _write_blocks, block_cells, choose_block_size, route, sample_xy,
                             tile_offsets)
 from output_names import file_stem
+from point_ranges import seekable
 from voxel_grid import voxel_keys
 from point_cloud_metadata import extra_bytes_metadata_equal, extra_bytes_params_from_dimension_info
 from scratch import remove_tree, scratch_directory
@@ -125,8 +126,10 @@ def _ranges(sources, workers):
         with laspy.open(source) as reader:
             counts.append(int(reader.header.point_count))
     size = max(CHUNK_POINTS, math.ceil(sum(counts) / max(1, 2 * workers)))
-    return [(str(source), start, min(size, total - start))
-            for source, total in zip(sources, counts) for start in range(0, total, size)], counts
+    # A range after the first seeks (point_ranges): a variable-chunk source is one range.
+    steps = [size if seekable(source) else max(total, 1) for source, total in zip(sources, counts)]
+    return [(str(source), start, min(step, total - start))
+            for source, total, step in zip(sources, counts, steps) for start in range(0, total, step)], counts
 
 
 def _chunks(source, start, count):
