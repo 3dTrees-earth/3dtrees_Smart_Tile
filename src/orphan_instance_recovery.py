@@ -13,7 +13,7 @@ from time import perf_counter
 
 import laspy
 import numpy as np
-from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates
+from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates, read_chunks
 from merge_stages import DUPLICATE_RADIUS, index_file
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
 from orphan_claims import claim_coordinates, select_claims
@@ -79,7 +79,7 @@ class _ClaimRows:
 def _claim_candidates(model, tile, file, rejected, regions, overlaps, origin):
     """Yield ``(labels, xyz)`` per chunk for the tile's rejected-instance points inside any relevant core."""
     with laspy.open(file) as reader:
-        for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+        for record in read_chunks(reader, MAX_BATCH_POINTS):
             labels = np.asarray(record[model.instance])
             eligible = np.isin(labels, list(rejected))
             if not np.any(eligible):
@@ -227,7 +227,7 @@ def _recovered_tile(model, tile, dense, owned, output_dir, original_rejected, re
         with laspy.open(dense) as reader:
             header = copy_single_source_header(reader.header)
             with laspy.open(output, mode='w', header=header) as writer:
-                for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+                for record in read_chunks(reader, MAX_BATCH_POINTS):
                     labels = np.asarray(record[model.instance])
                     keep = ~np.isin(labels, list(original_rejected))
                     background = labels == 0

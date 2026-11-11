@@ -20,7 +20,7 @@ from pathlib import Path
 import laspy
 import numpy as np
 
-from bounded_point_index import MAX_BATCH_POINTS
+from bounded_point_index import MAX_BATCH_POINTS, read_chunks
 from merge_stages import copy_record
 from parallel_tiles import map_tiles
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
@@ -30,7 +30,7 @@ def _tile_chunk_sums(file, instance_dimension):
     """Per chunk of one tile: positive instance IDs, their point counts and XY sums."""
     chunks = []
     with laspy.open(file) as reader:
-        for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+        for record in read_chunks(reader, MAX_BATCH_POINTS):
             ids = np.asarray(record[instance_dimension])
             positive = ids > 0
             if not np.any(positive):
@@ -111,7 +111,7 @@ def _send_departing(tile, file, instance_dimension, ids, owner_of, headers, work
     writers, moved = {}, []
     try:
         with laspy.open(file) as reader, laspy.open(temporary, mode="w", header=header) as writer:
-            for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+            for record in read_chunks(reader, MAX_BATCH_POINTS):
                 labels = np.asarray(record[instance_dimension]).astype(np.uint64)
                 out = np.isin(labels, leave)
                 writer.write_points(record[~out] if np.any(out) else record)
@@ -151,14 +151,14 @@ def _receive_incoming(owner, file, header, sources, work_dir):
         for tile in sources:
             part = _incoming(work_dir, owner, tile)
             with laspy.open(part) as reader:
-                for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+                for record in read_chunks(reader, MAX_BATCH_POINTS):
                     writer.write_points(record)
             part.unlink()
     temporary = file.with_name(file.stem + ".consolidating.laz")
     with laspy.open(temporary, mode="w", header=header) as writer:
         for source in (file, joined):
             with laspy.open(source) as reader:
-                for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+                for record in read_chunks(reader, MAX_BATCH_POINTS):
                     writer.write_points(record)
         write_retained_evlrs(writer, header)
     os.replace(temporary, file)

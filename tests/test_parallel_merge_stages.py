@@ -89,15 +89,18 @@ class ParallelDenseTransferTests(unittest.TestCase):
             serial, parallel = Path(a), Path(b)
             files_1, counts_1, report_1, _ = transfer(serial, 1)
             files_3, counts_3, report_3, _ = transfer(parallel, 3)
-            self.assertEqual(report_1["parallelism"], {"dense_transfer_processes": 1, "dense_query_processes": [1, 1, 1]})
-            self.assertEqual(report_3["parallelism"], {"dense_transfer_processes": 3, "dense_query_processes": [1, 1, 1]})
+            self.assertEqual(report_1["parallelism"], {"dense_transfer_processes": 1, "dense_query_processes": [1, 1, 1],
+                                                       "dense_blockwise_tiles": [0, 1, 2]})
+            self.assertEqual(report_3["parallelism"], {"dense_transfer_processes": 3, "dense_query_processes": [1, 1, 1],
+                                                       "dense_blockwise_tiles": [0, 1, 2]})
             self.assertEqual([f.name for f in files_1], [f.name for f in files_3])
             for f1, f3 in zip(files_1, files_3):
                 p1, p3 = laspy.read(f1).points.array, laspy.read(f3).points.array
                 self.assertEqual(p1.dtype, p3.dtype)
                 np.testing.assert_array_equal(p1, p3)
             self.assertEqual(list(counts_1.items()), list(counts_3.items()))
-            strip = lambda r: [{k: v for k, v in m.items() if k not in ("source", "target")} for m in r["transfer"]]
+            strip = lambda r: [{k: v for k, v in m.items() if k not in ("source", "target") and not k.endswith("_seconds")}
+                               for m in r["transfer"]]
             self.assertEqual(strip(report_1), strip(report_3))
             self.assertEqual(index_rows(serial / "dense.sqlite"), index_rows(parallel / "dense.sqlite"))
             self.assertEqual(sorted(p.name for p in (parallel / "dense").iterdir()), [f.name for f in files_3])
@@ -171,7 +174,8 @@ class ParallelDenseTransferTests(unittest.TestCase):
                 mock.patch.object(merge_stages, "MAX_BATCH_POINTS", 2048):
             files_1, counts_1, report_1, _ = transfer(Path(a), 1, count=1)
             files_4, counts_4, report_4, _ = transfer(Path(b), 4, count=1)
-            self.assertEqual(report_4["parallelism"], {"dense_transfer_processes": 1, "dense_query_processes": [4]})
+            self.assertEqual(report_4["parallelism"], {"dense_transfer_processes": 1, "dense_query_processes": [4],
+                                                       "dense_blockwise_tiles": [0]})
             np.testing.assert_array_equal(laspy.read(files_1[0]).points.array, laspy.read(files_4[0]).points.array)
             self.assertEqual(list(counts_1.items()), list(counts_4.items()))
             self.assertEqual(index_rows(Path(a) / "dense.sqlite"), index_rows(Path(b) / "dense.sqlite"))

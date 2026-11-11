@@ -19,7 +19,18 @@ from worker_budget import spatial_query_worker_count
 
 
 MAX_BATCH_POINTS = 32_768
+# lazrs decodes the LAZ chunks (50,000 points) of one read in parallel; a
+# 32,768-point read is less than one chunk, so reads take this many at a time.
+READ_POINTS = 32 * MAX_BATCH_POINTS
 CELL_SIZE = 2.0
+
+
+def read_chunks(reader, chunk_points=MAX_BATCH_POINTS):
+    """The records of ``reader.chunk_iterator(chunk_points)``, decoded ``READ_POINTS`` at a time."""
+    step = chunk_points * max(1, READ_POINTS // chunk_points)
+    for block in reader.chunk_iterator(step):
+        for start in range(0, len(block), chunk_points):
+            yield block[start:start + chunk_points]
 
 
 def coordinates(points, header, origin):

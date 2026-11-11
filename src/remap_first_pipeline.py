@@ -540,7 +540,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                                                     transfer_radius, model_report, ready=ready, workers=query_workers)
                 owned_files, counts = timed_stage(model_report, 'core_filter_and_index', filter_owned_instances,
                     model, dense_files, regions, work / "owned" / suffix, owned, origin, model_report,
-                    anchor=filter_anchor, workers=query_workers)
+                    anchor=filter_anchor, workers=query_workers, source=dense)
                 if tree_mode:
                     admitted_index = stack.enter_context(PointIndex(work / f"rct_admitted_{i}.sqlite",
                         {model.instance: np.uint32}, query_workers=query_workers))

@@ -18,7 +18,7 @@ import laspy
 import numpy as np
 from scipy.spatial import cKDTree
 
-from bounded_point_index import MAX_BATCH_POINTS
+from bounded_point_index import MAX_BATCH_POINTS, read_chunks
 from instance_statistics import InstanceStatistics
 from parallel_tiles import map_tiles
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
@@ -78,7 +78,7 @@ def _relabel_tile(file, instance_dimension, source, target):
         # laspy picks compression from the name; ".relabel" would write plain LAS into a .laz.
         with laspy.open(temporary, mode="w", header=header,
                         do_compress=file.suffix.lower() == ".laz") as writer:
-            for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+            for record in read_chunks(reader, MAX_BATCH_POINTS):
                 labels = np.asarray(record[instance_dimension])
                 hit = np.isin(labels, source)
                 if np.any(hit):
