@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.5.0 - unreleased
+## v2.5.0 - 2026-11-11
 
 ### QSMs per segmentation (Linear: SmartTile v2.5)
 - RayCloudTools QSMs for every segmentation (SAT, ForestMamba, ...) at any size. The tile task's `--qsm-manifest` writes beside the instance tiles what a QSM merge needs without reading points: `qsm_manifest_<dimension>.json` (originals, tiles, every instance with its tile and the originals holding its points) and `qsm_footprints.npz`. The per-instance statistics read collects both; nothing else is read.
@@ -42,7 +42,7 @@
 - The soft open-file limit is raised to the hard limit and chunk files are merged in batches of at most 200: PDAL 2.10 keeps two descriptors per LAZ reader and crashed without a message above about 509 readers (3808, 3820, 3827). A PDAL crash now names its signal.
 
 ### Memory and Galaxy (3DT-1896, 3DT-2469)
-- Workers are capped by the memory limit, the smallest of `GALAXY_MEMORY_MB`, the cgroup limits and physical memory: per task a fixed 0.5 GB plus 0.6 (tile), 0.15 (merge), 0.35 (remap) or 0.95 GB (create_merged_file) per worker, measured with about 40 % margin. When one worker does not fit, the task stops with an error that names memory. A failure from lack of memory exits 137 with `out of memory`, so Galaxy can resubmit with more. 2548 (2 GB grant), Brandenburg 1129 (3.06 GB) and 1134 (3.55 GB) pass with 2, 4 and 5 workers; outputs equal the 10-worker runs.
+- Workers are capped by the memory limit, the smallest of `GALAXY_MEMORY_MB`, the cgroup limits and physical memory: per task a fixed 0.5 GB plus 0.6 (tile), 0.35 (merge), 0.35 (remap) or 0.95 GB (create_merged_file) per worker, measured with about 40 % margin. The merge's share covers its block-query and index processes: at 10 workers 3753 merge needs 3.8 GB, and in a 2 GB grant it runs 4 workers (90 s, byte-identical) instead of being killed. When one worker does not fit, the task stops with an error that names memory. A failure from lack of memory exits 137 with `out of memory`, so Galaxy can resubmit with more. 2548 (2 GB grant), Brandenburg 1129 (3.06 GB) and 1134 (3.55 GB) pass with 2, 4 and 5 workers; outputs equal the 10-worker runs.
 - `--collection-dir` also publishes `qsm_manifest` (manifests and footprints), `tiles_<i>_terrain` (the RCT terrain per tile) and `terrain_cog` (`rct_terrain.tif`).
 
 ### PLY sidecars (3DT-1898)
@@ -56,7 +56,7 @@
 - Regions go to workers by point count, largest first onto the least-loaded worker; dense regions are placed as their 2 m cells. Eight batches per worker are in flight. The report records cache hits, builds, disk fallbacks and points per worker.
 - 1919 (65.5 M terrestrial points), first 12 M points: 1,072 → 39 s at 10 workers, 1,523 → 57 s at its 2.5 GB Galaxy grant; the whole cloud at 10 workers in 303 s. Outputs byte-identical; 3753, 2779 and 2030 unchanged in output and speed.
 
-## v2.4.3 - unreleased
+## v2.4.3 - not released separately; included in v2.5.0
 
 ### CRS records (3DT-2718)
 - LAS/LAZ outputs keep the source's CRS records byte for byte, in VLRs and EVLRs, with the WKT flag. `copy_single_source_header` no longer rewrites them as WKT1_GDAL from the local EPSG database. That rewrite dropped the axis order of northing-first CRSs (3805, EPSG:6678) and renamed CRSs between PROJ versions (3827, EPSG:3067 became EUREF-FIN), so the sidecar check rejected the member.
