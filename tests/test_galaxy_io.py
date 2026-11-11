@@ -49,10 +49,13 @@ def test_tile_collection_dir_holds_one_flat_folder_per_output(tmp_path):
         "--tiling-threshold", "1000", "--workers", "1", "--collection-dir", str(collections),
         "--tile-outputs", "0.25:copc.laz,1:laz,0.5:ply"]))
     # The task's own layout is unchanged; only the input name is cleaned.
-    assert {p for p in tree(products) if p.startswith("subsampled_res")} == {
+    # A PLY gets its sidecars (.crs.wkt only with a CRS) beside it.
+    assert {p for p in tree(products) if p.startswith("subsampled_res")} - {
+        "subsampled_res3/plot_A_subsampled_50cm.ply.crs.wkt"} == {
         "subsampled_res1/plot_A_subsampled_25cm.copc.laz",
         "subsampled_res2/plot_A_subsampled_100cm.laz",
-        "subsampled_res3/plot_A_subsampled_50cm.ply"}
+        "subsampled_res3/plot_A_subsampled_50cm.ply",
+        "subsampled_res3/plot_A_subsampled_50cm.ply.smarttile.json"}
     # Other test modules may stub the overview plot; publish it whenever it exists.
     preview = ["overview_copc_tiles.png"] if (products / "overview_copc_tiles.png").exists() else []
     assert tree(collections) == preview + [
@@ -188,3 +191,22 @@ def test_collection_names_must_be_unique_and_the_folder_new(tmp_path):
     with pytest.raises(FileExistsError):
         check_collection_dir(tmp_path / "used", tmp_path)
     check_collection_dir(tmp_path / "new", tmp_path)
+
+
+def test_qsm_products_get_collections_of_their_own(tmp_path):
+    from collection_folders import tile_collections
+    tiles = tmp_path / "tiles"
+    for name in ["subsampled_res1/c00_r00.laz", "subsampled_res1_terrain/c00_r00.ply",
+                 "qsm_manifest_PredInstance_SAT.json", "qsm_footprints.npz", "tile_bounds_tindex.json"]:
+        (tiles / name).parent.mkdir(parents=True, exist_ok=True)
+        (tiles / name).write_bytes(b"x")
+    found = {name: [p.name for p in paths] for name, paths in tile_collections(tiles).items()}
+    assert found == {"tiles_1": ["c00_r00.laz"], "tiles_1_terrain": ["c00_r00.ply"],
+                     "qsm_manifest": ["qsm_footprints.npz", "qsm_manifest_PredInstance_SAT.json"]}
+    originals = tmp_path / "originals"
+    (originals / "octree").mkdir(parents=True)
+    for name in ["a.laz", "rct_terrain.tif", "octree/hierarchy.json", "octree/octree.bin"]:
+        (originals / name).write_bytes(b"x")
+    found = {name: [p.name for p in paths] for name, paths in original_collections(originals).items()}
+    assert found == {"originals_with_predictions": ["a.laz"], "qsm_octree": ["hierarchy.json", "octree.bin"],
+                     "terrain_cog": ["rct_terrain.tif"]}

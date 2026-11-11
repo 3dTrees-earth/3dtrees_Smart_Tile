@@ -157,7 +157,7 @@ class CopcCrsValidationTests(unittest.TestCase):
             ok, message = validate_single_crs_record(source, output)
 
             self.assertFalse(ok)
-            self.assertIn("exactly one standardized WKT record", message)
+            self.assertIn("a rewritten CRS must be exactly one WKT record", message)
 
     def test_rejects_changed_projection_vlr(self):
         with tempfile.TemporaryDirectory() as tmpdir:

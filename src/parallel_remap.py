@@ -3,17 +3,20 @@
 Workers keep a cache of 4 m region search trees. Consecutive batches of an
 original file revisit the same regions, so each batch is split by region and a
 region always goes to the same worker: its tree is built once, not once per
-worker, and every batch still spreads over all workers. Regions contain whole
+worker, and every batch still spreads over all workers. Regions are assigned by
+their indexed point count, largest first onto the least-loaded worker, since
+dense terrestrial scans hold millions of points in a few regions. Regions contain whole
 2 m query cells, so each point's query group, and with it the result, equals a
 one-process run.
 """
 from collections import deque
+import heapq
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 import numpy as np
 
 from bounded_point_index import PointIndex
-from spatial_query_cache import REGION_SIZE
+from spatial_query_cache import REGION_SIZE, SUBCELL_SIZE
 
 
 _worker_indices = None
@@ -64,15 +67,98 @@ def _initialize_worker(index_specs, baseline_specs, radius, matches=None, prefer
     _worker_prefer_rct_trees = prefer_rct_trees
 
 
+def _worker_stats():
+    from spatial_query_cache import shared_cache
+    return shared_cache().stats()
+
+
 def _worker_query(xyz, labels=None):
     return _query(xyz, _worker_indices, _worker_baselines, _worker_radius, _worker_matches, labels,
                   _worker_prefer_rct_trees)
 
 
-def region_owners(xyz, workers):
-    """Deterministic worker per 4 m cache region (each 2 m query cell lies in one region)."""
+def _keys(cells):
+    """One sortable int64 per XY cell."""
+    return cells[:, 0] * (1 << 32) + (cells[:, 1] + (1 << 31))
+
+
+def _lookup(keys, table):
+    """Worker of each key in (sorted keys, workers), -1 where absent."""
+    sorted_keys, workers = table
+    if not len(sorted_keys):
+        return np.full(len(keys), -1, dtype=np.int64)
+    at = np.minimum(np.searchsorted(sorted_keys, keys), len(sorted_keys) - 1)
+    return np.where(sorted_keys[at] == keys, workers[at], -1)
+
+
+def region_owners(xyz, workers, assigned=None):
+    """Deterministic worker per 4 m cache region (each 2 m query cell lies in one region).
+
+    ``assigned`` ({"regions": table, "cells": table} of balanced_regions)
+    places indexed regions and the 2 m query cells of split dense regions;
+    others are hashed.
+    """
     regions = np.floor(xyz[:, :2] / REGION_SIZE).astype(np.int64)
-    return ((regions[:, 0] * 73856093) ^ (regions[:, 1] * 19349663)) % workers
+    owners = ((regions[:, 0] * 73856093) ^ (regions[:, 1] * 19349663)) % workers
+    if assigned:
+        lookup = _lookup(_keys(regions), assigned["regions"])
+        cells = _lookup(_keys(np.floor(xyz[:, :2] / SUBCELL_SIZE).astype(np.int64)), assigned["cells"])
+        lookup = np.where(cells >= 0, cells, lookup)
+        owners = np.where(lookup >= 0, lookup, owners)
+    return owners
+
+
+def balanced_regions(indexes, workers):
+    """{4 m region: worker} for the regions of ``indexes``: largest first onto the least-loaded worker.
+
+    A region's weight is its indexed point count over all indexes; ties go by
+    region, so the assignment is deterministic. A region above a quarter of an
+    even worker share is placed as its four 2 m query cells instead, so one
+    dense spot near a scanner does not hold one worker while the others wait.
+    Any fixed assignment keeps results identical: a query cell is still
+    answered by one process.
+    """
+    weights, cells = {}, {}
+    for index in indexes:
+        if index is None:
+            continue
+        counts = index.cell_points
+        if counts is None:
+            # Built from shards: index blobs are single 2 m cells, so each
+            # blob's lower corner names its cell.
+            size = index._storage_dtype().itemsize
+            rows = np.array(index.db.execute(
+                'SELECT r.x0, r.y0, length(b.data) FROM bounds r JOIN batches b ON b.id=r.id').fetchall(),
+                dtype=np.float64).reshape(-1, 3)
+            keys, inverse = np.unique(np.floor(rows[:, :2] / SUBCELL_SIZE).astype(np.int64), axis=0, return_inverse=True)
+            counts = dict(zip(map(tuple, keys.tolist()), np.bincount(inverse.ravel(), weights=rows[:, 2] / size).tolist()))
+        for (cx, cy), n in counts.items():
+            cells[(cx, cy)] = cells.get((cx, cy), 0) + n
+            region = (cx // 2, cy // 2)  # REGION_SIZE is two query cells
+            weights[region] = weights.get(region, 0) + n
+    limit = sum(weights.values()) / (4 * workers)
+    for region in [r for r, weight in weights.items() if weight > limit]:
+        del weights[region]
+        for dx in (0, 1):
+            for dy in (0, 1):
+                cell = (2 * region[0] + dx, 2 * region[1] + dy)
+                if cell in cells:
+                    weights[("cell", *cell)] = cells[cell]
+    load = [(0.0, w) for w in range(workers)]  # heap of (load, worker)
+    placed = {"regions": {}, "cells": {}}
+    for unit, weight in sorted(weights.items(), key=lambda item: (-item[1], repr(item[0]))):
+        total, worker = heapq.heappop(load)
+        if unit[0] == "cell":
+            placed["cells"][unit[1:]] = worker
+        else:
+            placed["regions"][unit] = worker
+        heapq.heappush(load, (total + weight, worker))
+    assigned = {}
+    for kind, table in placed.items():
+        keys = _keys(np.array(sorted(table), dtype=np.int64).reshape(-1, 2))
+        order = np.argsort(keys)
+        assigned[kind] = (keys[order], np.array([table[k] for k in sorted(table)], dtype=np.int64)[order])
+    return assigned
 
 
 def _merge(parts, length):
@@ -98,7 +184,7 @@ class RemapBatchQueries:
     """Keep records in the parent; send only XYZ and receive prediction arrays.
 
     Indexes must be complete before entry and unchanged until exit. A baseline
-    may be None, which skips that model's baseline distances. At most two
+    may be None, which skips that model's baseline distances. At most eight
     batches per worker are admitted, including completed out-of-order results.
     """
 
@@ -111,8 +197,13 @@ class RemapBatchQueries:
         self.matches = matches
         self.prefer_rct_trees = prefer_rct_trees
         self.workers, self.radius = workers, radius
-        self.max_pending = 2 * workers
+        # Batches follow the scan; a few dense cells can hold one worker for
+        # several batches, so admit enough that the others keep working.
+        self.max_pending = 8 * workers
         self.pools = []
+        self.assigned = None
+        self.cache_stats = None
+        self.points_per_worker = [0] * workers
 
     def __enter__(self):
         if self.workers > 1:
@@ -120,6 +211,7 @@ class RemapBatchQueries:
                 if index is not None:
                     index.flush()
             specs = lambda indexes: [None if index is None else (index.path, index.dimensions) for index in indexes]
+            self.assigned = balanced_regions([*self.indices, *self.baselines], self.workers)
             context = multiprocessing.get_context("spawn")
             # One single-process pool per worker: a region is always answered by
             # the same process, which keeps that region's trees cached.
@@ -129,7 +221,11 @@ class RemapBatchQueries:
                           for _ in range(self.workers)]
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, exc_type, *args):
+        if exc_type is None and self.pools:
+            stats = [pool.submit(_worker_stats).result() for pool in self.pools]
+            self.cache_stats = {name: sum(s[name] for s in stats) for name in stats[0]}
+            self.cache_stats.update(max_bytes=stats[0]["max_bytes"], points_per_worker=self.points_per_worker)
         # Join workers before the caller deletes the temporary index files.
         for pool in self.pools:
             pool.shutdown(wait=True, cancel_futures=True)
@@ -156,7 +252,9 @@ class RemapBatchQueries:
                         exhausted = True
                         break
                     labels = labels[0] if labels else None
-                    owners = region_owners(xyz, self.workers)
+                    owners = region_owners(xyz, self.workers, self.assigned)
+                    self.points_per_worker = [n + int(c) for n, c in
+                                              zip(self.points_per_worker, np.bincount(owners, minlength=self.workers))]
                     parts = [(positions, self.pools[worker].submit(
                                  _worker_query, xyz[positions],
                                  None if labels is None else {n: v[positions] for n, v in labels.items()}))

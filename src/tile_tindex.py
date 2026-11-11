@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 from point_cloud_metadata import point_cloud_files
 
 
@@ -139,12 +141,29 @@ def build_tindex(input_dir: Path, output_gpkg: Path) -> Path:
     return output_gpkg
 
 
+def point_extent(source_files: List[Path]) -> Tuple[float, float, float, float]:
+    """(minx, miny, maxx, maxy) of the sources' headers, including the coordinates
+    as laspy computes them from the LAS integers, which a header's writer may have
+    rounded differently."""
+    import laspy
+
+    lows, highs = [], []
+    for path in source_files:
+        with laspy.open(path) as reader:
+            header = reader.header
+        scales, offsets = header.scales[:2], header.offsets[:2]
+        for bound, values in ((header.mins[:2], lows), (header.maxs[:2], highs)):
+            values.extend([bound, np.round((bound - offsets) / scales) * scales + offsets])
+    return (*np.min(lows, axis=0).tolist(), *np.max(highs, axis=0).tolist())
+
+
 def calculate_tile_bounds(
     tindex_file: Path,
     tile_length: float,
     tile_buffer: float,
     output_dir: Path,
     grid_origin=None,
+    source_extent=None,
 ) -> Tuple[Path, Path, dict]:
     """Calculate tile jobs and bounds JSON from a tindex."""
     from get_bounds_from_tindex import write_tile_bounds
@@ -160,7 +179,7 @@ def calculate_tile_bounds(
     print(f"  Tile buffer: {tile_buffer}m")
     # Floats, as the former script CLI parsed them: the JSON records 300.0, not 300.
     tile_count = write_tile_bounds(Path(tindex_file), float(tile_length), float(tile_buffer), bounds_json,
-                                   grid_origin=grid_origin)
+                                   grid_origin=grid_origin, source_extent=source_extent)
     write_job_list(bounds_json, jobs_file)
     print(f"  ✓ Calculated {tile_count} tiles")
     print(f"  Jobs file: {jobs_file}")

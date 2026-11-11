@@ -6,7 +6,6 @@ import csv
 import json
 import math
 import os
-import tempfile
 import time
 from contextlib import ExitStack
 from pathlib import Path
@@ -22,9 +21,11 @@ from merge_stages import (
     prepare_dense, reconcile_instances,
 )
 from point_cloud_metadata import (
-    copc_only_files, copy_single_source_header, raw_point_cloud_files,
+    copc_only_files, copy_single_source_header, ensure_point_capacity, raw_point_cloud_files,
     update_extra_dimensions, write_retained_evlrs,
 )
+from crs_records import validate_crs_records_unchanged
+from scratch import scratch_directory
 from dense_instance_ownership import (
     ANCHORS, filter_owned_instances, ownership_regions,
     assign_shared_points,
@@ -178,7 +179,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
     report['parallelism'].update(
         enrichment_processes=process_workers,
         enrichment_query_workers=1 if process_workers > 1 else query_workers,
-        max_pending_batches=2 * process_workers,
+        max_pending_batches=8 * process_workers,
         enrichment_scope='bounded process-parallel original remap; ordered writer')
     selected = []
     ids_by_dimension = {}
@@ -232,7 +233,7 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                 source_header = reader.header
             # Query in spatial blocks so each region tree is built once, then
             # write in the original point order (original_blocks docstring).
-            with tempfile.TemporaryDirectory(prefix=".enrich-", dir=output_dir.parent) as scratch:
+            with scratch_directory(".enrich-", dir=output_dir.parent) as scratch:
                 scratch = Path(scratch)
                 tick = time.monotonic()
                 label_paths = {name: scratch / f"label_{i:04d}.npy" for i, name in enumerate(labels)}
@@ -293,11 +294,14 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                 store.clear()
                 label_stores.clear()
                 data = batches = None
+                validate_crs_records_unchanged(file, output_dir / file.name)
                 phases["write"] += time.monotonic() - tick
                 for dimension, ids in file_ids.items():
                     ids_by_dimension.setdefault(dimension, {})[file.name] = ids
     report.setdefault("timings", {})["enrichment_seconds"] = time.monotonic() - enrichment_start
     report["timings"]["enrichment_phase_seconds"] = phases
+    if queries.cache_stats is not None:
+        report["parallelism"]["enrichment_query_cache"] = queries.cache_stats
     report["background_assigned_points"] = sum(m.get("background_assigned", 0) for m in metrics)
     failures = [m for m in metrics if m["matched"] != m["total"]
                 and m.get("unmatched_policy") != "background_zero"]
@@ -341,8 +345,12 @@ def tile_overlaps(pairs, tile_bounds_json, origin):
 
 def merge_file(files, output):
     """Stream an intermediate merged cloud, preserving the dense geometry."""
+    total = 0
+    for file in files:
+        with laspy.open(file) as reader:
+            total += int(reader.header.point_count)
     with laspy.open(files[0]) as first:
-        header = copy_single_source_header(first.header)
+        header = ensure_point_capacity(copy_single_source_header(first.header), total)
     with laspy.open(output, mode="w", header=header) as writer:
         for file in files:
             with laspy.open(file) as reader:
@@ -414,7 +422,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                       ready=False, matching=True, target_dims=None,
                       instance_dimension="PredInstance", filter_anchor="centroid", workers=1,
                       resolution_1=0.01, remap_tolerance=None, small_instances=None,
-                      keep_unfiltered=True, rct_folders=None):
+                      keep_unfiltered=True, rct_folders=None, match_limits=None):
     """The sole remap-first merge path for one or more independent models.
 
     ``small_instances`` (a SmallInstancePolicy) reassigns small final instances
@@ -484,7 +492,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
     for path in destinations:
         available_destination(path)
     try:
-        with tempfile.TemporaryDirectory(prefix=".remap-first-", dir=output_tiles.parent) as temporary, ExitStack() as stack:
+        with scratch_directory(".remap-first-", dir=output_tiles.parent) as temporary, ExitStack() as stack:
             work = Path(temporary)
             final_dir, dense_dir = work / "final", work / "dense"
             models, indices, baselines = [], [], []
@@ -532,7 +540,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                                                     transfer_radius, model_report, ready=ready, workers=query_workers)
                 owned_files, counts = timed_stage(model_report, 'core_filter_and_index', filter_owned_instances,
                     model, dense_files, regions, work / "owned" / suffix, owned, origin, model_report,
-                    anchor=filter_anchor, workers=query_workers)
+                    anchor=filter_anchor, workers=query_workers, source=dense)
                 if tree_mode:
                     admitted_index = stack.enter_context(PointIndex(work / f"rct_admitted_{i}.sqlite",
                         {model.instance: np.uint32}, query_workers=query_workers))
@@ -551,7 +559,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                         survivors, origin, final_tile_dir, instance_statistics=statistics)
                     model_report["rct_instance_ids"] = namespace
                     # RCT trees are never merged across tiles; check the one-tile contract.
-                    verify_distinct_instances(final_files, model.instance)
+                    verify_distinct_instances(final_files, model.instance, workers=query_workers)
                     validate_recovered_geometry(survivors, model, admitted, claims_path, model_report, origin)
                     for stage in (owned, admitted_index):
                         _release(stage)
@@ -566,7 +574,7 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                     }
                     model_report["tree_sidecars"] = filter_tree_sidecars(
                         pairs, sidecars_by_collection[i], model_report["instance_ownership"],
-                        work / "tree_files", id_mapping=mapping)
+                        work / "tree_files", id_mapping=mapping, instance_dimension=model.instance)
                     source_meshes = meshes_by_collection[i]
                     if source_meshes:
                         model_report["tree_meshes"] = timed_stage(model_report, 'tree_mesh_filter', filter_tree_meshes,
@@ -601,7 +609,8 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                              None if keep_unfiltered else dense_dir / suffix, live=owned_files)
                     mapping = timed_stage(model_report, 'reconciliation', reconcile_instances, model, owned_files, owned, origin, counts, overlap_threshold,
                                                   CORRESPONDENCE_RADIUS, model_report, enabled=matching,
-                                                  overlaps=overlaps, normal_keys=normal_keys if admitted else None, workers=query_workers)
+                                                  overlaps=overlaps, normal_keys=normal_keys if admitted else None, workers=query_workers,
+                                                  limits=match_limits)
                     # 3DT-2209: a reconciled ID does not imply identical geometry.
                     # Keep every member here; selecting one whole-instance owner
                     # discards recovered tips before shared-point ownership runs.
@@ -636,12 +645,14 @@ def merge_collections(*, collections, target_dir, output_tiles, tile_bounds_json
                     # pre-reassignment labels and compaction folds them (aliases).
                     if small_instances is not None:
                         reassigned = timed_stage(model_report, 'small_instance_reassignment', reassign_small_instances,
-                                                 statistics, small_instances, final_files, model.instance, model_report)
+                                                 statistics, small_instances, final_files, model.instance, model_report,
+                                                 workers=query_workers)
                     mapping = {key: reassigned.get(value, value) for key, value in mapping.items()}
                     reassignments[model.instance] = reassigned
                     # One tile per instance, so per-tile tools see every tree once and whole.
                     timed_stage(model_report, 'instance_consolidation', consolidate_instances,
-                                final_files, model.instance, regions, work / "consolidation" / suffix, model_report)
+                                final_files, model.instance, regions, work / "consolidation" / suffix, model_report,
+                                workers=query_workers)
                     with (final_dir / suffix / "instance_metadata.csv").open("w", newline="", encoding="utf-8") as stream:
                         writer = csv.writer(stream)
                         writer.writerow([model.instance, "has_added_clusters"])
@@ -793,7 +804,7 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
             raise ValueError("Provide one shared baseline or one baseline per model")
         if len(baseline_collections) == 1:
             baseline_collections = baseline_collections * len(collections)
-        with tempfile.TemporaryDirectory(prefix=".strict-remap-", dir=output.parent) as temporary, ExitStack() as stack:
+        with scratch_directory(".strict-remap-", dir=output.parent) as temporary, ExitStack() as stack:
             work = Path(temporary)
             models, indices, baselines = [], [], []
             source_files = original_files(originals)
@@ -859,7 +870,8 @@ def strict_remap(*, collections, originals, output, baseline_collections=None, t
                     sidecars, meshes=meshes, terrain=terrain, footprints=footprints)
             report["instance_finalization"] = compact_originals(work / "originals", final_ids)
             stack.close()
-            report["checksums"] = {f.name: digest(f) for f in sorted((work / "originals").iterdir())}
+            report["checksums"] = {f.relative_to(work / "originals").as_posix(): digest(f)
+                                   for f in sorted((work / "originals").rglob("*")) if f.is_file()}  # with octree/
             publish([(work / "originals", output)])
             report["state"] = "validated"
     except Exception as exc:

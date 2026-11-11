@@ -12,7 +12,7 @@ import laspy
 import numpy as np
 from laspy.vlrs.vlrlist import VLRList
 
-from crs_records import standardize_projection_records
+import crs_records  # noqa: F401  (laspy then writes CRS records as read)
 from output_names import file_stem
 
 
@@ -406,7 +406,14 @@ def copy_single_source_header(
             and (preserve_extra_dimensions or not is_extra_bytes_vlr(vlr))
         ])
 
-    return standardize_projection_records(header)
+    return header
+
+
+def ensure_point_capacity(header: laspy.LasHeader, point_count: int) -> laspy.LasHeader:
+    """LAS 1.4 for a file of ``point_count`` points that its version cannot count (32-bit up to LAS 1.3)."""
+    if point_count > header.max_point_count():
+        header.version = laspy.header.Version(1, 4)
+    return header
 
 
 def _point_cloud_paths(directory: Optional[Path]) -> List[Path]:

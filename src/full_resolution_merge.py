@@ -12,7 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import subprocess
-import tempfile
 from typing import List
 
 import laspy
@@ -20,15 +19,19 @@ import numpy as np
 
 from point_cloud_metadata import (
     copy_single_source_header,
+    ensure_point_capacity,
     extra_bytes_params_compatible,
     extra_bytes_params_from_dimension_info,
     write_retained_evlrs,
 )
+from crs_records import projection_record_list
+from scratch import scratch_directory
 
 ORIGINAL_POINT_INDEX = "OriginalPointIndex"
 # Addressable through lidR selectors 2.. after the order key (ForestStructure).
 SELECTIVE_DIMENSIONS = ("PredInstance", "PredInstance_SAT", "PredInstance_FM")
 READ_POINTS = 1_000_000
+SCAN_ANGLE_SCALE = 0.006  # LAS 1.4: degrees per unit of scan_angle; scan_angle_rank counts whole degrees
 INT32 = np.iinfo(np.int32)
 UINT32 = np.iinfo(np.uint32)
 
@@ -38,8 +41,18 @@ def _schema(header):
             for dimension in header.point_format.extra_dimensions}
 
 
+def _common_point_format(headers) -> int:
+    """The inputs' point format, or the LAS 1.4 format that holds all their fields (as COPC staging)."""
+    formats = {header.point_format.id for header in headers}
+    if len(formats) == 1:
+        return formats.pop()
+    fields = {name for header in headers for name in header.point_format.standard_dimension_names}
+    return 8 if "nir" in fields else 7 if "red" in fields else 6
+
+
 def merged_header(inputs: List[Path], original_point_index: bool) -> laspy.LasHeader:
-    """One header for every input: same schema and CRS, finest scale, int32-safe offsets."""
+    """One header for every input: ExtraBytes and CRS of the first, one point format,
+    finest scale, int32-safe offsets, and a LAS version that can count every point."""
     headers = []
     for path in inputs:
         with laspy.open(path) as reader:
@@ -48,12 +61,14 @@ def merged_header(inputs: List[Path], original_point_index: bool) -> laspy.LasHe
     extras = _schema(first)
     for path, header in zip(inputs[1:], headers[1:]):
         actual = _schema(header)
-        if (header.point_format.id != first.point_format.id or list(actual) != list(extras)
+        if (set(actual) != set(extras)
                 or any(not extra_bytes_params_compatible(extras[name], actual[name]) for name in extras)):
-            raise ValueError(f"{path.name}: point format or ExtraBytes differ from {inputs[0].name}; "
+            raise ValueError(f"{path.name}: ExtraBytes differ from {inputs[0].name}; "
                              "a full-resolution merge needs one schema")
         if header.parse_crs() != first.parse_crs():
             raise ValueError(f"{path.name}: CRS differs from {inputs[0].name}")
+        if projection_record_list(header) != projection_record_list(first):
+            print(f"  Warning: {path.name} spells the shared CRS differently; {inputs[0].name}'s record is kept")
     names = list(extras)
     if original_point_index and ORIGINAL_POINT_INDEX in names:
         raise ValueError(f"Inputs already contain {ORIGINAL_POINT_INDEX}; disable --original-point-index")
@@ -65,6 +80,10 @@ def merged_header(inputs: List[Path], original_point_index: bool) -> laspy.LasHe
         offsets = np.floor(mins)
     header = copy_single_source_header(first, offsets=offsets, scales=scales)
     header.remove_extra_dims(names)
+    point_format = _common_point_format(headers)
+    if point_format != first.point_format.id:
+        header.set_version_and_point_format(laspy.header.Version(1, 4), laspy.PointFormat(point_format))
+    ensure_point_capacity(header, sum(int(h.point_count) for h in headers))
     if original_point_index:
         header.add_extra_dim(laspy.ExtraBytesParams(
             name=ORIGINAL_POINT_INDEX, type=np.uint64,
@@ -98,6 +117,16 @@ def _validate_ply_index_range(minimum: int, maximum: int) -> None:
     if minimum < 0 or maximum > UINT32.max:
         raise ValueError(f"PLY {ORIGINAL_POINT_INDEX} must be in uint32 range "
                          f"0..{UINT32.max}; found {minimum}..{maximum}. Use LAZ or COPC.")
+
+
+def _copy_standard_fields(chunk, record, names) -> None:
+    """Standard fields by name; a field the source's point format lacks stays zero."""
+    available = set(chunk.point_format.dimension_names)
+    for name in names:
+        if name in available:
+            record[name] = chunk[name]
+    if "scan_angle" in names and "scan_angle" not in available and "scan_angle_rank" in available:
+        record["scan_angle"] = np.round(np.asarray(chunk["scan_angle_rank"], dtype=float) / SCAN_ANGLE_SCALE)
 
 
 def write_full_resolution(inputs: List[Path], output: Path, *, compress: bool,
@@ -136,8 +165,7 @@ def write_full_resolution(inputs: List[Path], output: Path, *, compress: bool,
                             record[axis] = chunk[axis]
                     else:
                         record.x, record.y, record.z = chunk.x, chunk.y, chunk.z
-                    for name in standard:
-                        record[name] = chunk[name]
+                    _copy_standard_fields(chunk, record, standard)
                     for name in extras:
                         record.array[name] = chunk.array[name]
                     if original_point_index:
@@ -162,7 +190,7 @@ def create_full_resolution_product(inputs: List[Path], output_file: Path, output
     if output_format == "laz":
         write_full_resolution(inputs, output_file, compress=True, original_point_index=original_point_index)
         return output_file
-    with tempfile.TemporaryDirectory(prefix=".full-merge-", dir=output_file.parent) as work:
+    with scratch_directory(".full-merge-", dir=output_file.parent) as work:
         merged = Path(work) / "merged.las"
         count = write_full_resolution(inputs, merged, compress=False,
                                       original_point_index=original_point_index, ply=output_format == "ply")

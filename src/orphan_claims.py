@@ -8,8 +8,8 @@ from bounded_point_index import MAX_BATCH_POINTS, distance_limit, spatial_batche
 from merge_stages import DUPLICATE_RADIUS
 
 
-def _coordinates(rows):
-    return np.array([np.frombuffer(row[0], dtype='<f8') for row in rows])
+def claim_coordinates(rows):
+    return np.frombuffer(b''.join(row[0] for row in rows), dtype='<f8').reshape(-1, 3)
 
 
 def _prepare_selection(db):
@@ -21,10 +21,11 @@ def _prepare_selection(db):
     cursor = db.execute('SELECT loc,id FROM locations')
     padding = DUPLICATE_RADIUS
     while rows := cursor.fetchmany(MAX_BATCH_POINTS):
-        xyz = _coordinates(rows)
+        xyz = claim_coordinates(rows)
         padding = max(padding, distance_limit(xyz, DUPLICATE_RADIUS))
+        x, y, z = xyz.T.tolist()
         db.executemany('INSERT INTO location_bounds VALUES (?,?,?,?,?,?,?)',
-                       ((row[1], x, x, y, y, z, z) for row, (x, y, z) in zip(rows, xyz)))
+                       zip((row[1] for row in rows), x, x, y, y, z, z))
     db.execute('CREATE TABLE scores (tile INTEGER, instance INTEGER, score INTEGER, '
                'PRIMARY KEY(tile,instance)) WITHOUT ROWID')
     db.execute('INSERT INTO scores SELECT tile,instance,COUNT(*) FROM claims GROUP BY tile,instance')
@@ -44,7 +45,7 @@ def _cover_nearby(db, geometry, padding, query_tree, metric):
             'AND NOT EXISTS (SELECT 1 FROM covered c WHERE c.loc=l.loc)',
             (lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]))
         while rows := cursor.fetchmany(MAX_BATCH_POINTS):
-            xyz = _coordinates(rows)
+            xyz = claim_coordinates(rows)
             metric['selection_checked_locations'] += len(xyz)
             supported = np.zeros(len(xyz), dtype=bool)
             for batch in spatial_batches(xyz):
@@ -81,5 +82,5 @@ def select_claims(db, query_tree, metric, *, admit_candidate=None):
         # Include already covered samples of the winner: they can cover a
         # different claimant's nearby samples when this instance is admitted.
         while rows := cursor.fetchmany(MAX_BATCH_POINTS):
-            _cover_nearby(db, _coordinates(rows), padding, query_tree, metric)
+            _cover_nearby(db, claim_coordinates(rows), padding, query_tree, metric)
         yield tile, uid, score

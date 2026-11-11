@@ -13,7 +13,6 @@ import json
 import os
 import sqlite3
 import struct
-import tempfile
 import zlib
 from collections import Counter
 from contextlib import closing
@@ -30,6 +29,7 @@ from point_cloud_metadata import (
     extra_bytes_attribute_equal,
     write_retained_evlrs,
 )
+from scratch import scratch_directory
 
 
 VECTOR_SCHEMA_USER_ID = "3DTrees"
@@ -395,7 +395,7 @@ def validate_vector_conversion(source: Path, output: Path, *, chunk_size: int = 
             if before.header.point_count != after.header.point_count:
                 raise ValueError("Vector conversion changed the point count")
             components = _validated_vector_components(schema, (before.header, after.header))
-            with tempfile.TemporaryDirectory(prefix="smarttile-vector-check-", dir=output.parent) as tmp:
+            with scratch_directory("smarttile-vector-check-", dir=output.parent) as tmp:
                 with closing(sqlite3.connect(Path(tmp) / "records.sqlite")) as db:
                     db.execute("PRAGMA cache_size=-16384")
                     db.execute("PRAGMA temp_store=FILE")

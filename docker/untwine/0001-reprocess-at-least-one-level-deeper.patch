@@ -1,0 +1,24 @@
+diff --git a/epf/Reprocessor.cpp b/epf/Reprocessor.cpp
+index c49d0cc..2826910 100644
+--- a/epf/Reprocessor.cpp
++++ b/epf/Reprocessor.cpp
+@@ -13,6 +13,7 @@
+ 
+ // This include is necessary for released PDAL 2.0 and earlier, as it wasn't included in
+ // FileUtils.hpp.
++#include <algorithm>
+ #include <vector>
+ #include <pdal/util/FileUtils.hpp>
+ 
+@@ -44,6 +45,11 @@ Reprocessor::Reprocessor(const VoxelKey& k, int numPoints, int pointSize,
+ 
+     m_levels = (int)std::ceil(log2((double)numPoints / MaxPointsPerNode) / 2);
+ 
++    // A cell of exactly MaxPointsPerNode points gives zero levels. The points would then be
++    // re-binned into this cell's own file, which run() deletes when it is done, losing
++    // whatever the writer had already appended. Always split at least one level deeper.
++    m_levels = (std::max)(m_levels, 1);
++
+     // We're going to steal points from the leaf nodes for sampling, so unless the
+     // spatial distribution is really off, this should be fine and pretty conservative.
+ 

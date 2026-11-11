@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import laspy
+import json
 import numpy as np
 import pytest
 
@@ -308,6 +309,13 @@ def test_third_resolution_and_ply_come_from_the_same_read(tmp_path):
     assert header[1] == "format binary_little_endian 1.0" and f"element vertex {len(xyz)}" in header
     third = laspy.read(outputs[2][1][tiles[0].label])
     assert np.array_equal(xyz, np.c_[third.x, third.y, third.z]) and written[tiles[0].label][3] == len(xyz)
+    ply = outputs[3][1][tiles[0].label]
+    info = json.loads(Path(str(ply) + ".smarttile.json").read_text())
+    assert info["task"] == "tile" and info["points"] == len(xyz)
+    assert [p["name"] for p in info["properties"]] == ["x", "y", "z"]
+    assert info["source_las"]["scales"] == [float(v) for v in las[0].header.scales]
+    if las[0].header.parse_crs() is not None:
+        assert Path(str(ply) + ".crs.wkt").read_text().strip() and info["crs"]["wkt_sidecar"]
 
 
 def test_tile_output_selector_parses_pairs_and_rejects_bad_ones():

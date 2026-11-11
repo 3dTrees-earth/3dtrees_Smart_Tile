@@ -12,6 +12,11 @@ runs on staged copies whose ExtraBytes VLR carries placeholder names instead;
 the placeholders get their source names back in every output and report before
 the outputs are published. Only the fixed 32-byte name fields change, so no
 point is rewritten.
+
+A column named like a standard field keeps that name in LAS/LAZ outputs, which
+must match their source column by column. Viewer products (create_merged_file
+outputs) and every COPC publish it as "<name>_extra": PDAL, untwine and Potree
+read those and would take it for the standard field.
 """
 from __future__ import annotations
 
@@ -220,8 +225,8 @@ def _pdal_folds(name: bytes, point_format: int, data_type: str) -> bool:
 
 def clashes_with_standard_field(name: bytes, point_format: int, data_type: str) -> bool:
     """True if an ExtraBytes ``name`` is a standard LAS field (as PDAL and Potree
-    compare names) or a name PDAL folds into one; such columns are published as
-    "<name>_extra" so they never shadow the standard field."""
+    compare names) or a name PDAL folds into one; viewer products and COPCs
+    publish such columns as "<name>_extra" so they never shadow the standard field."""
     try:
         text = name.decode("utf-8")
     except UnicodeDecodeError:
@@ -284,7 +289,7 @@ def names_to_stage(path: Path) -> List[bytes]:
                     or not _round_trip_keeps((name,), fmt, (types[name],)):
                 staged.add(name)
                 break
-    # Columns named like standard fields are published as "<name>_extra".
+    # Columns named like standard fields: "<name>_extra" in viewer products and COPCs.
     for name in names:
         if name not in staged and name in types and clashes_with_standard_field(name, point_format.id, types[name]):
             staged.add(name)
@@ -343,7 +348,7 @@ class StagedNames:
                 index += 1
             self.names[name] = PLACEHOLDER.format(index).encode()
             index += 1
-        # Output names: the source name, or "<name>_extra" for a standard field's name.
+        # Names in viewer products and COPCs: the source name, or "<name>_extra" for a standard field's name.
         clashing = {name for folder in problem_folders if folder.is_dir() for path in _point_clouds(folder)
                     for name, data_type in zip(raw_names(path), _raw_types(path))
                     if name in self.names and clashes_with_standard_field(name, _point_format(path), data_type)}
@@ -372,10 +377,10 @@ class StagedNames:
         print(f"  ExtraBytes names staged for PDAL: "
               f"{', '.join(repr(n.decode('utf-8', 'replace')) for n in self.names)}")
         for name, final in self.renamed().items():
-            print(f"  ExtraBytes {name!r} is a standard field name; published as {final!r}")
+            print(f"  ExtraBytes {name!r} is a standard field name; {final!r} in viewer products and COPCs")
 
     def renamed(self) -> Dict[str, str]:
-        """Source name -> published name for the columns renamed to "<name>_extra"."""
+        """Source name -> name in viewer products and COPCs, for the columns renamed to "<name>_extra"."""
         return {name.decode("utf-8", "replace"): final.decode("utf-8", "replace")
                 for name, final in self.final.items() if final != name}
 
@@ -391,15 +396,27 @@ class StagedNames:
             return name
         return self.names.get(name.encode("utf-8"), name.encode("utf-8")).decode("utf-8")
 
-    def restore(self, *roots: Path) -> None:
-        """Source names back in every LAS/LAZ/COPC and PLY below ``roots``; JSON,
-        CSV and text reports get the source names, input folders and checksums."""
+    def restore(self, *roots: Path, products: Iterable[Path] = ()) -> None:
+        """Names back in every LAS/LAZ/COPC and PLY below ``roots``: the source names,
+        or the viewer names in ``products`` and COPCs. JSON, CSV and text reports get
+        the same names, the input folders and the checksums."""
         if not self.names:
             return
-        back = {placeholder: self.final.get(name, name) for name, placeholder in self.names.items()}
-        text = {placeholder.decode(): name.decode("utf-8", "replace") for placeholder, name in back.items()}
+        source = {placeholder: name for name, placeholder in self.names.items()}
+        viewer = {placeholder: self.final.get(name, name) for name, placeholder in self.names.items()}
+        products = [Path(product) for product in products]
+
+        def names_of(path: Path) -> Dict[bytes, bytes]:
+            # A product's sidecars start with its file name.
+            product = ".copc." in path.name.lower() or any(
+                path.parent == p.parent and path.name.startswith(p.name) for p in products)
+            return viewer if product else source
+
+        def text_of(back: Dict[bytes, bytes]) -> Dict[str, str]:
+            return {placeholder.decode(): name.decode("utf-8", "replace") for placeholder, name in back.items()}
+
         folders = {str(staged.absolute()): str(folder.absolute()) for folder, staged in self.staged.items()}
-        digests, reports, seen = {}, [], set()
+        digests, reports, seen, viewer_names = {}, [], set(), False
         for root in roots:
             if root is None or not Path(root).exists():
                 continue
@@ -408,17 +425,21 @@ class StagedNames:
                     continue
                 seen.add(path)
                 suffix = path.suffix.lower()
+                back = names_of(path)
                 if suffix in POINT_CLOUD_SUFFIXES and set(raw_names(path)) & set(back):
                     before = _sha256(path)
                     rename(path, back)
                     digests[before] = _sha256(path)
+                    viewer_names = viewer_names or back is viewer
                 elif suffix == ".ply":
                     before = _sha256(path)
-                    if _restore_ply(path, text):
+                    if _restore_ply(path, text_of(back)):
                         digests[before] = _sha256(path)
+                        viewer_names = viewer_names or back is viewer
                 elif suffix in (".json", ".csv", ".txt"):
                     reports.append(path)
         for report in reports:
+            text = text_of(names_of(report))
             try:
                 content = report.read_text()
             except UnicodeDecodeError:
@@ -435,12 +456,13 @@ class StagedNames:
                 fixed = _replace_text(content, text, folders, digests)
                 if fixed != content:
                     report.write_text(fixed)
-        if self.renamed():
+        if self.renamed() and viewer_names:
             for root in roots:
                 if root is not None and Path(root).is_dir():
                     (Path(root) / "extra_bytes_names.json").write_text(json.dumps(
                         {"renamed_extra_bytes": self.renamed(),
-                         "reason": "ExtraBytes named like a standard LAS field are published as <name>_extra"},
+                         "reason": "Viewer products and COPCs publish ExtraBytes named like a standard "
+                                   "LAS field as <name>_extra; LAS/LAZ outputs keep the source name"},
                         indent=2, ensure_ascii=False) + "\n")
                     break
 

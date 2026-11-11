@@ -37,7 +37,8 @@ class Parameters(BaseSettings):
             "Task to perform: 'tile' (tiling + subsampling), 'merge' (transfer, filter and merge; "
             "--segmented-remapped-folder filters already-dense tiles), 'remap' "
             "(prediction source -> original files), or 'create_merged_file' "
-            "(prod-merged from original_with_predictions)"
+            "(prod-merged from original_with_predictions). merge with --instance-manifest merges RayCloudTools "
+            "QSMs of instance tiles per original instead, with the viewer's QSM octree, reading no points"
         ),
     )
 
@@ -177,6 +178,39 @@ class Parameters(BaseSettings):
         description="Instance tiles: skip the check that fails when many instance IDs occur in several input "
                     "files more than 5 m apart (IDs reused by separately segmented files).",
         validation_alias=AliasChoices("allow-reused-instance-ids", "allow_reused_instance_ids"),
+    )
+
+    qsm_manifest: bool = Field(
+        False,
+        description="Instance tiles: also write what merge --instance-manifest needs to put RayCloudTools QSMs per original "
+                    "without reading points: qsm_manifest_<dimension>.json (originals, tiles, every instance "
+                    "with its tile and originals) and qsm_footprints.npz (each original's 1 m cells).",
+        validation_alias=AliasChoices("qsm-manifest", "qsm_manifest"),
+    )
+
+    rct_terrain_folder: Optional[Path] = Field(
+        default=None,
+        description="Instance tiles (implies --qsm-manifest): folder with the per-original terrain meshes of an "
+                    "earlier RayCloudTools run (<original>_terrain_mesh.ply). Writes <tiles>_terrain/<tile>.ply "
+                    "per instance tile, the triangles within 10 m of the tile with shared ones once, for "
+                    "RayCloudTools --terrain-mesh. merge --instance-manifest: copy these as each original's terrain.",
+        validation_alias=AliasChoices("rct-terrain-folder", "rct_terrain_folder"),
+    )
+
+    instance_manifest: Optional[Path] = Field(
+        default=None,
+        description="Merge of RayCloudTools QSMs of instance tiles: qsm_manifest_<dimension>.json of the tile run "
+                    "selects this mode (qsm_footprints.npz beside it is needed without --rct-terrain-folder). The "
+                    "RCT outputs come from --qsm-folder or, by kind and paired by tile name, from --tree-tables-folder, "
+                    "--tree-info-folder, --tree-meshes-folder and --terrain-meshes-folder.",
+        validation_alias=AliasChoices("instance-manifest", "instance_manifest"),
+    )
+
+    qsm_folder: Optional[Path] = Field(
+        default=None,
+        description="merge --instance-manifest: folder with the RayCloudTools --instance-dimension outputs of every instance "
+                    "tile: <tile>_trees.txt, <tile>_trees_info.txt, <tile>_trees_mesh.ply and <tile>_mesh.ply.",
+        validation_alias=AliasChoices("qsm-folder", "qsm_folder"),
     )
 
     tile_outputs: Optional[str] = Field(
@@ -401,6 +435,32 @@ class Parameters(BaseSettings):
         validation_alias=AliasChoices("merged-resolutions", "merged_resolutions"),
     )
 
+    visualization_copc: bool = Field(
+        False,
+        description=(
+            "create_merged_file: also write a viewer-optimised COPC per original into "
+            "OUTPUT/visualization_copc (Potree-like octree levels, every point and dimension kept, "
+            "plus coloring_id_* and its palette mapping for every PredInstance* dimension). "
+            "With several --original-with-predictions-dir collections each gets its own file "
+            "(<original>_<collection>.copc.laz) instead of one joined file. "
+            "Use --merged-resolutions none to write only these files."
+        ),
+        validation_alias=AliasChoices("visualization-copc", "visualization_copc"),
+    )
+
+    visualization_copc_grid: int = Field(
+        80, ge=8, le=512,
+        description="Visualization COPC: one point per voxel of this many cells per node edge on every level "
+                    "(untwine uses 128; 80 gives PotreeConverter-sized upper levels).",
+        validation_alias=AliasChoices("visualization-copc-grid", "visualization_copc_grid"),
+    )
+
+    visualization_copc_leaf_points: int = Field(
+        20_000, ge=100,
+        description="Visualization COPC: a node becomes a leaf once at most this many points remain in it.",
+        validation_alias=AliasChoices("visualization-copc-leaf-points", "visualization_copc_leaf_points"),
+    )
+
     merged_output_formats: str = Field(
         "copc.laz",
         description="Comma-separated prod-merged output formats: laz, copc.laz, or ply.",
@@ -487,6 +547,19 @@ class Parameters(BaseSettings):
         0.3,
         description="Overlap ratio threshold for instance matching (0.3 = 30%)",
         validation_alias=AliasChoices("overlap-threshold", "overlap_threshold"),
+    )
+
+    max_centroid_distance: float = Field(
+        5.0, ge=0, allow_inf_nan=False,
+        description="Merge: instances of two tiles match only if their 3D centroids are at most this many metres "
+                    "apart, and a matched group only if all its members are (0 disables the cap)",
+        validation_alias=AliasChoices("max-centroid-distance", "max_centroid_distance"),
+    )
+
+    min_match_points: int = Field(
+        10, ge=1,
+        description="Merge: points two instances of neighboring tiles must share to match",
+        validation_alias=AliasChoices("min-match-points", "min_match_points"),
     )
 
     max_volume_for_merge: Optional[float] = Field(

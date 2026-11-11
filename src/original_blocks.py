@@ -28,6 +28,7 @@ import laspy
 import numpy as np
 
 from bounded_point_index import CELL_SIZE, MAX_BATCH_POINTS, coordinates
+from point_ranges import seekable
 from spatial_query_cache import REGION_SIZE
 
 # Point index within the file plus the raw LAS integer coordinates.
@@ -103,6 +104,9 @@ def spill_original(path, origin, directory, workers, *, label_paths=None):
     if not count:
         return size
     chunk = max(READ_POINTS, math.ceil(count / max(1, 2 * workers)))
+    if not seekable(path):
+        # A task after the first seeks (point_ranges): read a variable-chunk file in one.
+        chunk = count
     tasks = [(index, str(path), start, min(chunk, count - start), tuple(origin), size, str(directory), stores)
              for index, start in enumerate(range(0, count, chunk))]
     with ProcessPoolExecutor(max_workers=max(1, min(workers, len(tasks))),

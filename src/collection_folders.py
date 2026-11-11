@@ -47,11 +47,22 @@ def check_collection_dir(collection_dir: Path, output_root: Path) -> None:
 
 
 def tile_collections(output_dir: Path) -> dict[str, list[Path]]:
-    """Tile output i (``subsampled_res<i>``) is collection ``tiles_<i>``."""
+    """Tile output i (``subsampled_res<i>``) is collection ``tiles_<i>``.
+
+    Instance tiles add ``tiles_<i>_terrain`` (the RCT terrain cut per tile) and
+    ``qsm_manifest`` (the manifests and footprints merge --instance-manifest reads).
+    """
     collections, index = {}, 1
     while (output_dir / f"subsampled_res{index}").is_dir():
         collections[f"tiles_{index}"] = _files(output_dir / f"subsampled_res{index}", POINT_CLOUDS)
+        terrain = _files(output_dir / f"subsampled_res{index}_terrain", (".ply",))
+        if terrain:
+            collections[f"tiles_{index}_terrain"] = terrain
         index += 1
+    manifest = [p for p in _files(output_dir, (".json", ".npz"))
+                if p.name.startswith("qsm_manifest_") or p.name == "qsm_footprints.npz"]
+    if manifest:
+        collections["qsm_manifest"] = manifest
     return collections
 
 
@@ -75,6 +86,12 @@ def original_collections(original_output: Path) -> dict[str, list[Path]]:
         collection = next((f"original_{TREE_FILES[suffix]}" for suffix in TREE_FILES if stem.endswith(suffix)), None)
         if collection is not None:
             collections.setdefault(collection, []).append(path)
+    octree = _files(original_output / "octree", (".json", ".bin"))
+    if octree:
+        collections["qsm_octree"] = octree  # the viewer's QSM octree of the run: hierarchy.json, octree.bin
+    terrain = [p for p in _files(original_output, (".tif",)) if p.name == "rct_terrain.tif"]
+    if terrain:
+        collections["terrain_cog"] = terrain  # the RCT terrain of all originals as one COG
     return collections
 
 

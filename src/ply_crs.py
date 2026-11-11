@@ -89,3 +89,50 @@ def add_crs_comment_to_ply(path: Path, crs_value: Optional[str], restore_names=(
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+# Sidecars of every point-cloud PLY: PLY has no CRS or provenance of its own,
+# and readers skip the ``comment crs:`` line (too long for some WKT anyway).
+PLY_SIDECAR_SUFFIXES = (".smarttile.json", ".crs.wkt")
+
+
+def write_ply_sidecars(ply_path: Path, source_header, *, task: str, sources=()) -> list[Path]:
+    """Write ``<file>.crs.wkt`` (the source CRS record, verbatim; none without a CRS)
+    and ``<file>.smarttile.json`` (task, sources, point count, properties, CRS
+    and LAS scale/offset of the source) beside ``ply_path``; returns them."""
+    import json
+
+    from crs_records import standardized_crs_record
+
+    ply_path = Path(ply_path)
+    properties, points = [], None
+    with ply_path.open("rb") as stream:
+        for _ in range(MAX_HEADER_LINES):
+            line = stream.readline(MAX_LINE_BYTES).decode("ascii").strip()
+            parts = line.split()
+            if parts[:2] == ["element", "vertex"]:
+                points = int(parts[2])
+            elif parts[:1] == ["property"]:
+                properties.append({"type": parts[1], "name": parts[2]})
+            elif line == "end_header":
+                break
+    record = standardized_crs_record(source_header)
+    written = []
+    crs_file = Path(str(ply_path) + ".crs.wkt")
+    if record is not None:
+        crs_file.write_bytes(record.rstrip(b"\0") + b"\n")
+        written.append(crs_file)
+    document = {
+        "format": "3dtrees-smarttile-ply-sidecar-v1",
+        "task": task,
+        "sources": [Path(source).name for source in sources],
+        "points": points,
+        "encoding": "binary_little_endian",
+        "properties": properties,
+        "crs": {"comment": crs_comment_value(source_header), "wkt_sidecar": record is not None},
+        "source_las": {"scales": [float(v) for v in source_header.scales],
+                       "offsets": [float(v) for v in source_header.offsets]},
+    }
+    info = Path(str(ply_path) + ".smarttile.json")
+    info.write_text(json.dumps(document, indent=1) + "\n", encoding="utf-8")
+    return [info, *written]

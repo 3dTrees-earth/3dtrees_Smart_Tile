@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import multiprocessing
+import queue
+import threading
 from collections import Counter, defaultdict, deque
-from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from contextlib import ExitStack, closing
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from time import perf_counter
 
 import laspy
 import numpy as np
 
-from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates, inside_xy, spatial_batches
+from bounded_point_index import MAX_BATCH_POINTS, PointIndex, coordinates, inside_xy, read_chunks, spatial_batches
+from point_ranges import seekable
 from point_cloud_metadata import (
     copy_single_source_header, extra_bytes_params_from_dimension_info, extra_bytes_attribute_equal,
     update_extra_dimensions, write_retained_evlrs,
@@ -19,6 +24,7 @@ from prediction_collections import prediction_collection_files, promote_collecti
 from instance_labels import instance_extra_bytes_params
 from parallel_index_queries import IndexQueries
 from parallel_tiles import map_tiles
+from block_nearest import NearestResults, NearestSpill, spill_file
 
 
 DUPLICATE_RADIUS = 0.01
@@ -134,7 +140,7 @@ def index_file(index, file, tile, origin, model, *, validate_record=None):
     offset = 0
     maximum = 0
     with laspy.open(file) as reader:
-        for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+        for record in read_chunks(reader, MAX_BATCH_POINTS):
             validate_labels(model, record, file.name)
             if validate_record is not None:
                 validate_record(record)
@@ -158,7 +164,7 @@ def index_written_record(index, record, tile, header, origin, model, offset):
 
 
 def _transfer_tile(model, tile, source, target, output_dir, origin, transfer_radius, ready, query_workers,
-                   query_processes=1):
+                   query_processes=1, blockwise=False):
     """Transfer one tile's own predictions into its 1 cm geometry.
 
     Writes ``tile_NNNNN.laz`` and an index file of exactly the emitted records
@@ -176,43 +182,110 @@ def _transfer_tile(model, tile, source, target, output_dir, origin, transfer_rad
     counts = Counter()
     source_index_path = output_dir / f"source_{tile}.sqlite"
     with PointIndex(source_index_path, dimensions, query_workers=query_workers) as source_index, \
-            PointIndex(shard_path, dimensions, query_workers=1) as shard:
+            PointIndex(shard_path, dimensions, query_workers=1, shared_thread=blockwise) as shard:
         if not ready:
             index_file(source_index, source, 0, origin, model)
-        indexed_offset = 0
-        with laspy.open(target) as reader, \
-                IndexQueries(source_index, transfer_radius, workers=1 if ready else query_processes) as queries:
-            header = target_header(reader.header, model, ready=ready)
-            batches = ((record, coordinates(record, reader.header, origin))
-                       for record in reader.chunk_iterator(MAX_BATCH_POINTS))
-            if ready:
-                batches = ((record, xyz, None) for record, xyz in batches)
-            else:
-                batches = queries.map(batches)
-            with laspy.open(output, mode="w", header=header) as writer:
-                for record, xyz, nearest in batches:
-                    if ready:
-                        validate_labels(model, record, source.name)
-                        matched = np.ones(len(record), dtype=bool)
-                        values = prediction_values(record, model.dimensions)
-                    else:
-                        distances, values, _ = nearest
-                        matched = np.isfinite(distances)
-                    metric["total"] += len(record)
-                    metric["matched"] += int(np.count_nonzero(matched))
-                    for point in xyz[~matched][:5 - len(metric["missing_examples"])]:
-                        metric["missing_examples"].append((point + origin).tolist())
-                    out = copy_record(record, header)
-                    for name, data in values.items():
-                        out.array[name] = data
-                    writer.write_points(out)
-                    indexed_offset = index_written_record(shard, out, tile, header, origin, model, indexed_offset)
-                    ids, sizes = np.unique(values[model.instance], return_counts=True)
-                    counts.update({(tile, int(i)): int(n) for i, n in zip(ids, sizes) if i > 0})
-                write_retained_evlrs(writer, header)
+        answers = None
+        if not ready and blockwise:
+            # Answer every target's nearest query block by block (block_nearest),
+            # then write the tile in record order as before.
+            source_index.flush()
+            started = perf_counter()
+            spill = spill_file(target, origin, transfer_radius, output_dir / f".transfer_{tile:05d}" / "points",
+                               processes=query_processes, chunk_points=MAX_BATCH_POINTS)
+            metric["spill_seconds"] = perf_counter() - started
+            started = perf_counter()
+            answers = NearestResults(output_dir / f".transfer_{tile:05d}" / "answers", dimensions, spill.rows)
+            spill.answer(source_index.path, dimensions, transfer_radius, answers, workers=query_processes)
+            metric["answer_seconds"] = perf_counter() - started
+        if blockwise:
+            started = perf_counter()
+            _write_answered(model, tile, target, output, shard, origin, metric, counts, *answers.open())
+            metric["write_seconds"] = perf_counter() - started
+        else:
+            _write_queried(model, tile, source, target, output, shard, source_index, origin, transfer_radius,
+                           ready, query_processes, metric, counts)
         shard.flush()
+    if answers is not None:
+        answers.remove()
+        answers.folder.parent.rmdir()
     source_index_path.unlink()
     return output, shard_path, metric, counts
+
+
+def _write_queried(model, tile, source, target, output, shard, source_index, origin, transfer_radius, ready,
+                   query_processes, metric, counts):
+    """Write a tile whose predictions are ready, or answered per 2 m group as the rows stream."""
+    indexed_offset = 0
+    with laspy.open(target) as reader, \
+            IndexQueries(source_index, transfer_radius,
+                         workers=1 if ready else query_processes) as queries:
+        header = target_header(reader.header, model, ready=ready)
+        batches = ((record, coordinates(record, reader.header, origin))
+                   for record in read_chunks(reader, MAX_BATCH_POINTS))
+        if ready:
+            batches = ((record, xyz, None) for record, xyz in batches)
+        else:
+            batches = ((record, xyz, (np.isfinite(nearest[0]), nearest[1]))
+                       for record, xyz, nearest in queries.map(batches))
+        with laspy.open(output, mode="w", header=header) as writer:
+            for record, xyz, nearest in batches:
+                if ready:
+                    validate_labels(model, record, source.name)
+                    matched = np.ones(len(record), dtype=bool)
+                    values = prediction_values(record, model.dimensions)
+                else:
+                    matched, values = nearest
+                metric["total"] += len(record)
+                metric["matched"] += int(np.count_nonzero(matched))
+                for point in xyz[~matched][:5 - len(metric["missing_examples"])]:
+                    metric["missing_examples"].append((point + origin).tolist())
+                out = copy_record(record, header)
+                for name, data in values.items():
+                    out.array[name] = data
+                writer.write_points(out)
+                indexed_offset = index_written_record(shard, out, tile, header, origin, model, indexed_offset)
+                ids, sizes = np.unique(values[model.instance], return_counts=True)
+                counts.update({(tile, int(i)): int(n) for i, n in zip(ids, sizes) if i > 0})
+            write_retained_evlrs(writer, header)
+
+
+def _write_answered(model, tile, target, output, shard, origin, metric, counts, matched, values):
+    """Write a block-wise transferred tile: the same records, values, index rows and counts as the
+    per-group loop in ``_transfer_tile``. Decoding, and writing with indexing, run in threads in
+    chunk order."""
+    def chunks():
+        offset = 0
+        for record in read_chunks(reader, MAX_BATCH_POINTS):
+            rows = slice(offset, offset + len(record))
+            yield (record, coordinates(record, reader.header, origin), np.array(matched[rows]),
+                   {name: np.array(data[rows]) for name, data in values.items()})
+            offset += len(record)
+
+    offset = [0]
+
+    def emit(writer, record, values):
+        out = copy_record(record, header)
+        for name, data in values.items():
+            out.array[name] = data
+        writer.write_points(out)
+        offset[0] = index_written_record(shard, out, tile, header, origin, model, offset[0])
+        ids, sizes = np.unique(values[model.instance], return_counts=True)
+        counts.update({(tile, int(i)): int(n) for i, n in zip(ids, sizes) if i > 0})
+
+    with laspy.open(target) as reader:
+        header = target_header(reader.header, model, ready=False)
+        with laspy.open(output, mode="w", header=header) as writer, ExitStack() as stack:
+            sink = _OrderedSink(emit, writer)
+            stack.callback(sink.abandon)
+            for record, xyz, hit, data in stack.enter_context(closing(_prefetched(chunks()))):
+                metric["total"] += len(record)
+                metric["matched"] += int(np.count_nonzero(hit))
+                for point in xyz[~hit][:5 - len(metric["missing_examples"])]:
+                    metric["missing_examples"].append((point + origin).tolist())
+                sink.submit(record, data)
+            sink.close()
+            write_retained_evlrs(writer, header)
 
 
 def query_process_shares(sizes, workers, *, ready=False):
@@ -227,7 +300,22 @@ def query_process_shares(sizes, workers, *, ready=False):
     return [max(1, round(workers * size / total)) for size in sizes]
 
 
-def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, report, *, ready=False, workers=1):
+# Target points per square metre above which a tile answers its transfer
+# queries block by block: 2585 TLS 1 cm tiles hold about 4,700, ALS such as
+# 2779 far fewer.
+BLOCKWISE_MIN_DENSITY = 1000.0
+
+
+def dense_targets(target):
+    """Whether a 1 cm target tile is dense enough for block-wise transfer queries."""
+    with laspy.open(target) as reader:
+        header = reader.header
+        area = max(1e-9, float((header.maxs[0] - header.mins[0]) * (header.maxs[1] - header.mins[1])))
+        return header.point_count / area >= BLOCKWISE_MIN_DENSITY
+
+
+def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, report, *, ready=False, workers=1,
+                  spill_tiles=3):
     """Transfer each tile's own predictions, requiring assignment of every target.
 
     Tiles are independent, so up to ``workers`` tiles run in separate processes
@@ -243,13 +331,25 @@ def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, repo
         with laspy.open(target) as reader:
             sizes.append(reader.header.point_count)
     query_processes = query_process_shares(sizes, workers, ready=ready)
+    # Dense tiles (TLS) re-read their query regions from the index for most
+    # 2 m groups; they answer block by block instead (block_nearest). Sparse
+    # tiles keep the per-group queries, which their cached regions serve well.
+    blockwise = [not ready and dense_targets(target) for _, target, _ in pairs]
+    ahead = None
+    if any(blockwise) and len(pairs) > 1:
+        # Each block-wise tile spills its targets (about 50 bytes a point):
+        # at most ``spill_tiles`` tiles transfer at once, sharing the workers.
+        ahead = max(1, int(spill_tiles))
+        query_processes = [max(1, workers // min(ahead, len(pairs)))] * len(pairs)
     query_workers = index.query_workers if processes == 1 else max(1, index.query_workers // processes)
     jobs = [(model, tile, source, target, output_dir, origin, transfer_radius, ready, query_workers,
-             query_processes[tile]) for tile, (source, target, _) in enumerate(pairs)]
+             query_processes[tile], blockwise[tile]) for tile, (source, target, _) in enumerate(pairs)]
     report.setdefault("parallelism", {}).update(dense_transfer_processes=processes,
-                                                 dense_query_processes=query_processes)
+                                                 dense_query_processes=query_processes,
+                                                 dense_blockwise_tiles=[t for t, b in enumerate(blockwise) if b])
     files, counts = [], Counter()
-    for output, shard_path, metric, tile_counts in map_tiles(_transfer_tile, jobs, processes=processes, sizes=sizes):
+    for output, shard_path, metric, tile_counts in map_tiles(_transfer_tile, jobs, processes=processes, sizes=sizes,
+                                                             ahead=ahead):
         report.setdefault("transfer", []).append(metric)
         if metric["matched"] != metric["total"]:
             raise ValueError(f"{model.name}: incomplete prediction assignment on {Path(metric['target']).name}: "
@@ -262,23 +362,127 @@ def prepare_dense(model, pairs, output_dir, index, origin, transfer_radius, repo
     return files, counts
 
 
-def _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics):
+@dataclass
+class MatchLimits:
+    """Guards on cross-tile instance matches (3DT-1899).
+
+    A mutual-best pair also needs ``min_points`` matched points, and the 3D
+    centroids of the two instances' points inside the tiles' shared overlap
+    within ``max_centroid_distance`` metres (0 disables): a tree cut by a tile
+    edge keeps its overlap part, whatever lies outside. With semantics, most
+    matched points must carry the same label on both sides. Groups join in
+    descending match count; a group joins another only if every pair of their
+    members lies on overlapping tiles and keeps the centroid limit in that
+    overlap, so no chain of matches bridges distant trees.
+    """
+    max_centroid_distance: float = 5.0
+    min_points: int = 10
+
+
+class InstanceShapes:
+    """XYZ sums and point counts of a tile's instances inside each shared overlap, by neighbor tile.
+
+    ``agree`` counts, per neighbor and instance pair, the matched points whose
+    semantic labels agree on both sides.
+    """
+
+    def __init__(self, slabs):
+        self.slabs = slabs  # {neighbor tile: (lo, hi)} XY bounds of the shared overlap
+        self.sums = {other: {} for other in slabs}
+        self.count = {other: Counter() for other in slabs}
+        self.agree, self.semantics = {}, Counter()
+
+    def add(self, ids, xyz, semantics=None):
+        self.apply(self.terms(ids, xyz, semantics))
+
+    def terms(self, ids, xyz, semantics=None):
+        """One chunk's contribution: semantic counts and, per neighbor, labels, XYZ sums and counts."""
+        votes = None
+        if semantics is not None:
+            keep = ids > 0
+            pairs, n = np.unique(np.column_stack((ids[keep], semantics[keep])), axis=0, return_counts=True)
+            votes = {(int(a), int(b)): int(k) for (a, b), k in zip(pairs, n)}
+        per_neighbor = []
+        for other, box in self.slabs.items():
+            keep = (ids > 0) & inside_xy(xyz, box)
+            if not np.any(keep):
+                continue
+            labels, inverse = np.unique(ids[keep], return_inverse=True)
+            sums = np.stack([np.bincount(inverse, weights=xyz[keep][:, axis], minlength=len(labels))
+                             for axis in range(3)], axis=1)
+            per_neighbor.append((other, labels.tolist(), sums, np.bincount(inverse, minlength=len(labels)).tolist()))
+        return votes, per_neighbor
+
+    def apply(self, terms):
+        """Add one chunk's terms; applying them in chunk order equals reading the tile in one pass."""
+        votes, per_neighbor = terms
+        if votes is not None:
+            self.semantics.update(votes)
+        for other, labels, sums, counts in per_neighbor:
+            for label, total, n in zip(labels, sums, counts):
+                self.sums[other][label] = self.sums[other].get(label, 0) + total
+                self.count[other][label] += n
+
+
+    def majority_semantic(self, label):
+        """The instance's most frequent semantic label (smallest on ties); None without semantics."""
+        votes = [(-n, value) for (instance, value), n in self.semantics.items() if instance == label]
+        return min(votes)[1] if votes else None
+
+    def centroid(self, other, label):
+        """Centroid of the instance's points in the overlap with ``other``; None if it has none there."""
+        n = self.count.get(other, {}).get(label, 0)
+        return self.sums[other][label] / n if n else None
+
+
+class ChunkTerms(InstanceShapes):
+    """Records each chunk's terms instead of adding them, for a tile read in parts."""
+
+    def __init__(self, slabs):
+        super().__init__(slabs)
+        self.log = []
+
+    def add(self, ids, xyz, semantics=None):
+        self.log.append(self.terms(ids, xyz, semantics))
+
+
+def _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics, shapes=None, chunks=None,
+                          nearest=None):
     """Read a query tile once and accumulate all earlier-neighbor matches.
 
     Prune whole XY query groups only. Retaining every point in a selected group
     preserves its numerical distance allowance, even when background/high-Z
     points set that allowance. Source background remains a nearest candidate.
+    With ``shapes`` (an InstanceShapes) the read also collects the tile's
+    instance centroids in each shared overlap and the semantic agreement of the
+    matched points, so a tile without earlier neighbors is read too.
+    ``nearest(other, xyz)`` -> ``(found, values)`` replaces the index query
+    (block-wise answers); by default ``index.nearest(xyz, radius, tile=other, ...)``.
     """
+    if nearest is None:
+        def nearest(other, points):
+            d, values, _ = index.nearest(points, radius, tile=other,
+                                         overlaps=None if overlaps is None else overlaps[tile])
+            return np.isfinite(d), values
     neighbors = [other for other in range(tile)
                  if overlaps is None or other in overlaps[tile]]
     counters = {other: Counter() for other in neighbors}
-    if not neighbors:
+    if not neighbors and shapes is None:
         return counters
-    metrics['files_read'] += 1
+    first, stop, size = (0, None, MAX_BATCH_POINTS) if chunks is None else chunks
+    metrics['files_read'] += int(first == 0)
     with laspy.open(file) as reader:
-        for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+        if first:
+            reader.seek(first * size)
+        for number, record in enumerate(read_chunks(reader, size), start=first):
+            if stop is not None and number >= stop:
+                break
             xyz = coordinates(record, reader.header, origin)
             left = np.asarray(record[model.instance])
+            if shapes is not None:
+                shapes.add(left, xyz, np.asarray(record[model.semantic]) if model.semantic else None)
+            if not neighbors:
+                continue
             groups = list(spatial_batches(xyz))
             metrics['points_read'] += len(record)
             for other in neighbors:
@@ -291,27 +495,128 @@ def _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, me
                 metrics['skipped_query_points'] += len(record) - len(positions)
                 if not len(positions):
                     continue
-                d, values, _ = index.nearest(xyz[positions], radius, tile=other,
-                                             overlaps=None if overlaps is None else overlaps[tile])
+                found, values = nearest(other, xyz[positions])
                 right = values[model.instance]
                 labels = left[positions]
-                matched = np.isfinite(d) & (labels > 0) & (right > 0)
+                matched = found & (labels > 0) & (right > 0)
                 if np.any(matched):
                     ids, sizes = np.unique(np.column_stack((labels[matched], right[matched])),
                                            axis=0, return_counts=True)
                     counters[other].update({tuple(map(int, pair)): int(n) for pair, n in zip(ids, sizes)})
+                    if shapes is not None and model.semantic:
+                        same = matched & (np.asarray(record[model.semantic])[positions] == values[model.semantic])
+                        if np.any(same):
+                            ids, sizes = np.unique(np.column_stack((labels[same], right[same])), axis=0, return_counts=True)
+                            agree = shapes.agree.setdefault(other, Counter())
+                            agree.update({tuple(map(int, pair)): int(n) for pair, n in zip(ids, sizes)})
     return counters
 
 
-def _count_tile_pairs(model, file, tile, index_path, dimensions, origin, radius, overlaps):
-    """Worker: pair counts of one tile against a read-only copy of the finished index."""
+def _count_tile_pairs(model, file, tile, index_path, dimensions, origin, radius, overlaps, slabs=None, chunks=None):
+    """Worker: pair counts (and per-chunk shape terms) of a tile's chunk range against the finished index."""
     metrics = dict(files_read=0, points_read=0, query_points=0, skipped_query_points=0)
-    with PointIndex(index_path, dimensions, query_workers=1, read_only=True) as index:
-        return _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, metrics), metrics
+    shapes = ChunkTerms(slabs) if slabs is not None else None
+    # First pass: spill this part's queries per neighbor; answer them block by
+    # block; second pass: count with the stored answers, in chunk order.
+    work = Path(index_path).parent / f".pairs_{tile:05d}_{0 if chunks is None else chunks[0]:06d}"
+    recorder = _RecordedQueries(work, dimensions, radius)
+    _count_instance_pairs(model, file, tile, None, origin, radius, overlaps,
+                          dict.fromkeys(metrics, 0), None, chunks, nearest=recorder)
+    answers = recorder.answer(index_path, overlaps=None if overlaps is None else overlaps[tile])
+    try:
+        counters = _count_instance_pairs(model, file, tile, None, origin, radius, overlaps, metrics, shapes, chunks,
+                                         nearest=_StoredAnswers(answers))
+    finally:
+        for results in answers.values():
+            results.remove()
+        if work.exists():
+            for folder in work.iterdir():
+                folder.rmdir()
+            work.rmdir()
+    return counters, metrics, None if shapes is None else (shapes.log, shapes.agree)
+
+
+class _RecordedQueries:
+    """``nearest`` stand-in for a first pass: spills each neighbor's queries, finds nothing."""
+
+    def __init__(self, folder, dimensions, radius):
+        self.folder, self.dimensions, self.radius, self.spills = Path(folder), dimensions, radius, {}
+
+    def __call__(self, other, points):
+        if other not in self.spills:
+            self.spills[other] = NearestSpill(self.folder / f"points_{other:05d}")
+        self.spills[other].add(points, self.radius)
+        return (np.zeros(len(points), dtype=bool),
+                {name: np.zeros(len(points), dtype=dtype) for name, dtype in self.dimensions.items()})
+
+    def answer(self, index_path, *, overlaps):
+        answers = {}
+        for other, spill in self.spills.items():
+            answers[other] = NearestResults(self.folder / f"answers_{other:05d}", self.dimensions, spill.rows)
+            spill.answer(index_path, self.dimensions, self.radius, answers[other], tile=other, overlaps=overlaps)
+        return answers
+
+
+class _StoredAnswers:
+    """``nearest`` stand-in for the second pass: hands out each neighbor's answers in query order."""
+
+    def __init__(self, answers):
+        self.maps = {other: results.open() for other, results in answers.items()}
+        self.offsets = dict.fromkeys(answers, 0)
+
+    def __call__(self, other, points):
+        matched, values = self.maps[other]
+        rows = slice(self.offsets[other], self.offsets[other] + len(points))
+        self.offsets[other] += len(points)
+        return np.array(matched[rows]), {name: np.array(data[rows]) for name, data in values.items()}
+
+
+def _tile_parts(files, processes):
+    """``[(tile, (first chunk, stop chunk, chunk size))]`` in tile and chunk order, about two parts per process.
+
+    Large tiles are split so no single tile holds the stage; every chunk keeps
+    the boundaries of a one-pass read.
+    """
+    chunks = []
+    for file in files:
+        with laspy.open(file) as reader:
+            chunks.append(max(1, -(-int(reader.header.point_count) // MAX_BATCH_POINTS)))
+    share = max(1, -(-sum(chunks) // (2 * processes)))
+    # A part after the first seeks: a variable-chunk tile is read in one part.
+    return [(tile, (first, min(first + share, n) if seekable(file) else n, MAX_BATCH_POINTS))
+            for tile, (n, file) in enumerate(zip(chunks, files))
+            for first in (range(0, n, share) if seekable(file) else [0])]
+
+
+def _combine_parts(parts, results, slabs, metrics):
+    """Yield ``(counters, metrics, shapes)`` per tile from its chunk-range parts, in tile order."""
+    current, counters, part_metrics, shapes = None, None, None, None
+    for (tile, _), (part_counters, part_values, log) in zip(parts, results):
+        if tile != current:
+            if current is not None:
+                yield counters, part_metrics, shapes
+            current = tile
+            counters, part_metrics = None, dict.fromkeys(metrics, 0)
+            shapes = InstanceShapes(slabs[tile]) if log is not None else None
+        if counters is None:
+            counters = part_counters
+        else:
+            for other, pairs in part_counters.items():
+                counters[other].update(pairs)
+        for name, value in part_values.items():
+            part_metrics[name] += value
+        if log is not None:
+            terms_log, agree = log
+            for terms in terms_log:
+                shapes.apply(terms)
+            for other, pairs in agree.items():
+                shapes.agree.setdefault(other, Counter()).update(pairs)
+    if current is not None:
+        yield counters, part_metrics, shapes
 
 
 def reconcile_instances(model, files, index, origin, counts, overlap_threshold, radius, report, *,
-                        enabled=True, overlaps=None, normal_keys=None, workers=1):
+                        enabled=True, overlaps=None, normal_keys=None, workers=1, limits=None):
     """Match mutual-best instance pairs, then form consistent cross-tile groups.
 
     Each pair needs the configured overlap fraction of the smaller instance.
@@ -321,6 +626,8 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
     establish normal groups first and forbid a recovered path from joining two
     groups that were distinct before recovery. Accepted groups retain every
     member's geometry; shared-point ownership chooses only duplicate records.
+    ``limits`` (MatchLimits) adds the support, two-way coverage, centroid and
+    semantic guards and joins groups in descending match count.
     """
     parent = {key: key for key in sorted(counts)}
     members = {key: {key[0]: key[1]} for key in parent}
@@ -332,22 +639,34 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
             key = parent[key]
         return key
 
-    edges = []
+    edges, shapes, rejected, rejected_examples = [], {}, {}, []
     metrics = dict(files_read=0, points_read=0, query_points=0, skipped_query_points=0)
     if enabled:
         index.flush()
         processes = min(max(1, int(workers)), len(files))
         report.setdefault("parallelism", {})["reconciliation_processes"] = processes
-        jobs = [(model, file, tile, index.path, index.dimensions, origin, radius, overlaps)
-                for tile, file in enumerate(files)]
+        slabs = [_overlap_slabs(overlaps, tile, len(files)) if limits is not None else None
+                 for tile in range(len(files))]
         def count_here(tile, file):
             part = dict.fromkeys(metrics, 0)
-            return _count_instance_pairs(model, file, tile, index, origin, radius, overlaps, part), part
+            tile_shapes = InstanceShapes(slabs[tile]) if limits is not None else None
+            return (_count_instance_pairs(model, file, tile, index, origin, radius, overlaps, part, tile_shapes),
+                    part, tile_shapes)
 
-        results = (map_tiles(_count_tile_pairs, jobs, processes=processes,
-                             sizes=[Path(file).stat().st_size for file in files])
-                   if processes > 1 else (count_here(tile, file) for tile, file in enumerate(files)))
-        for tile, (counters, part) in enumerate(results):
+        if processes > 1:
+            # Tiles are read in chunk ranges across all processes; each tile's
+            # counters and shape terms are then combined in chunk order.
+            parts = _tile_parts(files, max(1, int(workers)))
+            report["parallelism"]["reconciliation_parts"] = len(parts)
+            jobs = [(model, files[tile], tile, index.path, index.dimensions, origin, radius, overlaps, slabs[tile], chunks)
+                    for tile, chunks in parts]
+            sizes = [chunks[1] - chunks[0] for _, chunks in parts]
+            results = _combine_parts(parts, map_tiles(_count_tile_pairs, jobs, processes=max(1, int(workers)),
+                                                      sizes=sizes), slabs, metrics)
+        else:
+            results = (count_here(tile, file) for tile, file in enumerate(files))
+        for tile, (counters, part, tile_shapes) in enumerate(results):
+            shapes[tile] = tile_shapes
             for name, value in part.items():
                 metrics[name] += value
             for other, pairs in counters.items():
@@ -361,8 +680,20 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
                         (len(left_best) > 1 and left_best[1][0] == n) or
                         (len(right_best) > 1 and right_best[1][0] == n)):
                         continue
-                    if n / min(counts[(tile, a)], counts[(other, b)]) >= overlap_threshold:
+                    if n / min(counts[(tile, a)], counts[(other, b)]) < overlap_threshold:
+                        continue
+                    reason = None if limits is None else _match_rejection(
+                        limits, shapes, model, (tile, a), (other, b), n)
+                    if reason is None:
                         edges.append((tile, a, other, b, n))
+                    else:
+                        rejected[reason] = rejected.get(reason, 0) + 1
+                        if len(rejected_examples) < 200:
+                            rejected_examples.append({"tiles": [tile, other], "instances": [a, b],
+                                                      "matches": n, "reason": reason})
+    if limits is not None and normal_keys is None:
+        # Strongest correspondences first; ties in tile and instance order.
+        edges.sort(key=lambda edge: (-edge[4], edge[:4]))
     if normal_keys is not None:
         # Preserve the original normal/normal edge order. Recovery edges then
         # take stronger mutual-best correspondences first, with stable ties.
@@ -378,6 +709,12 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
         if left != right:
             if any(t in members[right] and members[right][t] != label for t, label in members[left].items()):
                 continue
+            if limits is not None and not _groups_compatible(limits, shapes, overlaps, members[left], members[right]):
+                rejected["group_limits"] = rejected.get("group_limits", 0) + 1
+                if len(rejected_examples) < 200:
+                    rejected_examples.append({"tiles": [tile, other], "instances": [a, b], "matches": n,
+                                              "reason": "group_limits"})
+                continue
             if (normal_component is not None and normal_component[left] and normal_component[right]
                     and not ((tile, a) in normal_keys and (other, b) in normal_keys)):
                 rejected_bridge_count += 1
@@ -390,7 +727,14 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
             members[survivor].update(members[removed])
             if normal_component is not None:
                 normal_component[survivor] |= normal_component[removed]
-        accepted.append({"tiles": [tile, other], "instances": [a, b], "matches": n})
+        entry = {"tiles": [tile, other], "instances": [a, b], "matches": n}
+        if limits is not None:
+            entry["overlap_centroid_distance_m"] = _overlap_distance(limits, shapes, (tile, a), (other, b))
+            if model.semantic:
+                # Diagnostic: would comparing the instances' majority labels have kept this match?
+                entry["majority_semantic_equal"] = (shapes[tile].majority_semantic(a)
+                                                    == shapes[other].majority_semantic(b))
+        accepted.append(entry)
     roots = {key: i + 1 for i, key in enumerate(sorted({root(key) for key in parent}))}
     mapping = {key: roots[root(key)] for key in parent}
     if len(roots) > np.iinfo(np.uint32).max:
@@ -400,9 +744,55 @@ def reconcile_instances(model, files, index, origin, counts, overlap_threshold, 
                                 "groups": len(roots), "accepted_pairs": accepted,
                                 "rejected_recovery_bridge_count": rejected_bridge_count,
                                 "rejected_recovery_bridges": rejected_bridges,
+                                "limits": None if limits is None else asdict(limits),
+                                "rejected_candidates": rejected, "rejected_candidate_examples": rejected_examples,
                                 "ids": [[tile, local, final] for (tile, local), final in mapping.items()]}
     report["reconciliation"].update(metrics)
     return mapping
+
+
+def _overlap_slabs(overlaps, tile, tiles):
+    """{neighbor: shared-overlap XY bounds} of ``tile``; without a layout every tile overlaps all of it."""
+    if overlaps is None:
+        everywhere = (np.full(2, -1e15), np.full(2, 1e15))
+        return {other: everywhere for other in range(tiles) if other != tile}
+    slabs = dict(overlaps[tile])
+    slabs.update({other: overlaps[other][tile] for other in range(tile + 1, tiles) if tile in overlaps[other]})
+    return slabs
+
+
+def _overlap_distance(limits, shapes, left, right):
+    """Distance of two instances' centroids in their tiles' shared overlap; None if either has no point there."""
+    a = shapes[left[0]].centroid(right[0], left[1])
+    b = shapes[right[0]].centroid(left[0], right[1])
+    return None if a is None or b is None else float(np.linalg.norm(a - b))
+
+
+def _match_rejection(limits, shapes, model, left, right, n):
+    """Why a mutual-best pair above the overlap threshold is not a match, or None."""
+    if n < limits.min_points:
+        return "support"
+    distance = _overlap_distance(limits, shapes, left, right)
+    if limits.max_centroid_distance and distance is not None and distance > limits.max_centroid_distance:
+        return "centroid_distance"
+    if model.semantic:
+        agree = shapes[left[0]].agree.get(right[0], {}).get((left[1], right[1]), 0)
+        if 2 * agree < n:
+            return "semantic"
+    return None
+
+
+def _groups_compatible(limits, shapes, overlaps, left, right):
+    """Whether each member of group ``left`` lies on a tile overlapping each member of ``right``,
+    with their centroids in that overlap within the cap."""
+    for tile, label in left.items():
+        for other, other_label in right.items():
+            if overlaps is not None and min(tile, other) not in overlaps[max(tile, other)]:
+                return False
+            distance = _overlap_distance(limits, shapes, (tile, label), (other, other_label))
+            if limits.max_centroid_distance and distance is not None and distance > limits.max_centroid_distance:
+                return False
+    return True
 
 
 def mapped_values(model, values, tile, mapping):
@@ -501,10 +891,26 @@ def deduplicate(model, files, dense_index, survivor_index, origin, mapping, outp
         tile_overlaps = None if overlaps is None else overlaps[tile]
         with laspy.open(file) as reader:
             header = target_header(reader.header, model, ready=True)
-            parallel = processes > 1 and tile > 0 and reader.header.point_count > 2 * MAX_BATCH_POINTS
+            parallel = processes > 1 and reader.header.point_count > 2 * MAX_BATCH_POINTS
         shard_path = output_dir / f".survivors_{tile:05d}.sqlite"
         pool = None
-        if parallel:
+        answered = None
+        if parallel and tile > 0 and dense_targets(file):
+            # Dense tiles answer both queries block by block (block_dedup); a
+            # conflict sends the tile through the per-chunk path, which raises it.
+            from block_dedup import dedup_answers
+            answers, conflict_free = dedup_answers(
+                model, mapping, tile, file, dense_index, survivor_index, tile_overlaps, background_semantics_owned,
+                core_regions, origin, DUPLICATE_RADIUS, output_dir / f".dedup_{tile:05d}", processes=processes)
+            if conflict_free:
+                answered = _AnsweredDedup(answers, survivor_index, tile, tile_overlaps)
+            else:
+                answers.remove()
+                answers.folder.parent.rmdir()
+        if answered is not None:
+            parallelism["deduplication_parallel_tiles"].append(tile)
+            query = answered
+        elif parallel:
             parallelism["deduplication_parallel_tiles"].append(tile)
             pool = ProcessPoolExecutor(max_workers=processes, mp_context=multiprocessing.get_context("spawn"),
                 initializer=_start_dedup_worker,
@@ -516,12 +922,19 @@ def deduplicate(model, files, dense_index, survivor_index, origin, mapping, outp
             query = _DedupQueries(model, mapping, tile, dense_index, survivor_index, tile_overlaps,
                                   background_semantics_owned, rule)
         try:
+            # The stack exits first: the reading and writing threads stop before
+            # the files and the shard they use are closed.
             with laspy.open(file) as reader, laspy.open(output, mode="w", header=header) as writer, \
-                    PointIndex(shard_path, survivor_index.dimensions, query_workers=1) as shard:
-                chunks = ((record, coordinates(record, reader.header, origin)) for record in reader.chunk_iterator(MAX_BATCH_POINTS))
+                    PointIndex(shard_path, survivor_index.dimensions, query_workers=1, shared_thread=True) as shard, \
+                    ExitStack() as stack:
+                chunks = ((record, coordinates(record, reader.header, origin)) for record in read_chunks(reader, MAX_BATCH_POINTS))
                 chunks = ((record, xyz, mapped_values(model, prediction_values(record, model.dimensions), tile, mapping))
                           for record, xyz in chunks)
-                for record, xyz, values, (conflict, nearest) in _ordered(chunks, pool, query, processes):
+                # Reading, the queries and writing overlap; each runs in chunk order.
+                sink = _OrderedSink(_keep_survivors, writer, shard, instance_statistics, model, tile)
+                stack.callback(sink.abandon)
+                prefetched = stack.enter_context(closing(_prefetched(chunks)))
+                for record, xyz, values, (conflict, nearest) in _ordered(prefetched, pool, query, processes):
                     if conflict is not None:
                         pos = conflict.pop("query_index")
                         conflict.update(model=model.name, query_tile=tile, query_point=offset + pos,
@@ -537,32 +950,140 @@ def deduplicate(model, files, dense_index, survivor_index, origin, mapping, outp
                     # A neighbor's class must never replace the owning tile's class.
                     same_labels = np.all(label_matrix(model, values) == label_matrix(model, survivor_values), axis=1)
                     keep = ~np.isfinite(distances) | ~same_labels
-                    for pos in np.flatnonzero(~keep)[:5 - len(metric["removal_examples"])]:
+                    examples = np.flatnonzero(~keep)[:5 - len(metric["removal_examples"])]
+                    if len(examples) and answered is not None:
+                        distances, _, refs = answered.exact(xyz)
+                    for pos in examples:
                         metric["removal_examples"].append({"point": int(offset + pos),
                             "survivor": refs[pos].tolist(), "distance_m": float(distances[pos])})
-                    out = copy_record(record[keep], header)
-                    for name, data in values.items():
-                        out.array[name] = data[keep]
-                    writer.write_points(out)
-                    shard.add(tile, xyz[keep], {n: v[keep] for n, v in values.items()},
-                              np.flatnonzero(keep) + offset)
-                    if instance_statistics is not None:
-                        instance_statistics.add(values[model.instance][keep], xyz[keep])
+                    sink.submit(record, header, xyz, values, keep, offset)
                     metric["input"] += len(record)
                     metric["surviving"] += int(np.count_nonzero(keep))
                     metric["removed"] += int(np.count_nonzero(~keep))
                     offset += len(record)
+                sink.close()
                 write_retained_evlrs(writer, header)
                 shard.flush()
         finally:
             if pool is not None:
                 pool.shutdown(wait=True, cancel_futures=True)
+            if answered is not None:
+                answered.close()
         # Readers of this tile have stopped; publish its survivors for later tiles.
         survivor_index.append_index(shard_path)
         shard_path.unlink()
         survivor_index.flush()
         outputs.append(output)
     return outputs
+
+
+class _AnsweredDedup:
+    """Dedup queries of one tile from block-wise answers, in chunk order; no conflict exists.
+
+    ``exact`` repeats the per-chunk survivor query, for the report's removal
+    examples (their survivor reference and distance).
+    """
+
+    def __init__(self, answers, survivor_index, tile, overlaps):
+        self.answers, self.survivors, self.tile, self.overlaps = answers, survivor_index, tile, overlaps
+        self.matched, self.values = answers.open()
+        self.offset = 0
+
+    def __call__(self, xyz, values):
+        rows = slice(self.offset, self.offset + len(xyz))
+        self.offset += len(xyz)
+        matched = np.array(self.matched[rows])
+        survivor_values = {name: np.array(data[rows]) for name, data in self.values.items()}
+        return None, (np.where(matched, 0.0, np.inf), survivor_values, np.full((len(xyz), 2), -1, dtype=np.int64))
+
+    def exact(self, xyz):
+        return self.survivors.nearest(xyz, DUPLICATE_RADIUS, before_tile=self.tile, overlaps=self.overlaps)
+
+    def close(self):
+        self.matched = self.values = None
+        self.answers.remove()
+        self.answers.folder.parent.rmdir()
+
+
+def _keep_survivors(writer, shard, instance_statistics, model, tile, record, header, xyz, values, keep, offset):
+    """Write one chunk's surviving records and index them, as deduplicate always has."""
+    out = copy_record(record[keep], header)
+    for name, data in values.items():
+        out.array[name] = data[keep]
+    writer.write_points(out)
+    shard.add(tile, xyz[keep], {n: v[keep] for n, v in values.items()}, np.flatnonzero(keep) + offset)
+    if instance_statistics is not None:
+        instance_statistics.add(values[model.instance][keep], xyz[keep])
+
+
+class _OrderedSink:
+    """One thread applying ``function`` to each submitted chunk, in submission order.
+
+    At most ``depth`` chunks wait; the writer, shard and statistics are touched
+    only by that thread until ``close`` returns.
+    """
+
+    def __init__(self, function, *bound, depth=4):
+        self.function, self.bound, self.depth = function, bound, depth
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.pending = deque()
+
+    def submit(self, *args):
+        while len(self.pending) >= self.depth:
+            self.pending.popleft().result()
+        self.pending.append(self.executor.submit(self.function, *self.bound, *args))
+
+    def close(self):
+        while self.pending:
+            self.pending.popleft().result()
+        self.executor.shutdown(wait=True)
+
+    def abandon(self):
+        """Stop after the running chunk; a no-op after ``close``."""
+        for future in self.pending:
+            future.cancel()
+        self.executor.shutdown(wait=True)
+
+
+def _prefetched(items, depth=2):
+    """Yield ``items`` in order while a thread produces up to ``depth`` ahead."""
+    buffer = queue.Queue(maxsize=depth)
+    done = object()
+    stop = threading.Event()
+
+    def produce():
+        try:
+            for item in items:
+                while not stop.is_set():
+                    try:
+                        buffer.put((item, None), timeout=1)
+                        break
+                    except queue.Full:
+                        continue
+                if stop.is_set():
+                    return
+            buffer.put((done, None))
+        except BaseException as exc:  # handed to the consumer
+            buffer.put((done, exc))
+
+    thread = threading.Thread(target=produce, daemon=True)
+    thread.start()
+    try:
+        while True:
+            item, error = buffer.get()
+            if item is done:
+                if error is not None:
+                    raise error
+                return
+            yield item
+    finally:
+        stop.set()
+        while thread.is_alive():
+            try:
+                buffer.get(timeout=0.1)
+            except queue.Empty:
+                pass
+        thread.join()
 
 
 def _ordered(chunks, pool, query, processes):

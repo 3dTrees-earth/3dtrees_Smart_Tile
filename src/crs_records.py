@@ -1,17 +1,18 @@
-"""One standardized CRS record per output file.
+"""CRS records of output files.
 
-Point-cloud writers (PDAL/GDAL, untwine) re-serialize CRS text. Keeping the
-writer's text next to the source's original text left two different records
-for one CRS: readers disagreed (PDAL reads the first, laspy the last) and byte
-validation failed for valid uploads (3DT-2200 class). SmartTile therefore
-writes exactly one WKT record with the *standardized* text — the EPSG
-definition as WKT1_GDAL when the CRS is identified, as PDAL does — and
-validates outputs semantically.
+SmartTile's own writers copy the source's CRS records byte for byte, in every
+LAS/LAZ output (3DT-2718): a rewritten record is a changed record for readers
+that compare CRSs strictly, and the EPSG text depends on the PROJ build.
+Point-cloud writers (PDAL/GDAL, untwine) re-serialize CRS text, so COPC and PDAL
+products cannot keep the source's bytes; they carry one WKT record and are
+validated semantically. The standardized text below only labels PLY comments.
 """
 from __future__ import annotations
 
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+from laspy.vlrs import known
 
 from copc_metadata import (
     PROJECTION_VLR_USER_ID,
@@ -25,6 +26,31 @@ from copc_metadata import (
 WKT_RECORD_ID = 2112
 STANDARD_EPSG_CONFIDENCE = 70
 PLY_COMMENT_MAX_BYTES = 8192
+
+
+def _keep_source_bytes(vlr_class) -> None:
+    """Make laspy write a CRS record as it read it.
+
+    laspy parses these records and serializes them anew, which drops NUL padding
+    and repairs key counts. A record changed after reading is written as changed.
+    """
+    parse, serialize = vlr_class.parse_record_data, vlr_class.record_data_bytes
+
+    def parse_record_data(self, record_data):
+        parse(self, record_data)
+        self.source_bytes = bytes(record_data), serialize(self)
+
+    def record_data_bytes(self):
+        current = serialize(self)
+        source, parsed = getattr(self, "source_bytes", (current, current))
+        return source if current == parsed else current
+
+    vlr_class.parse_record_data, vlr_class.record_data_bytes = parse_record_data, record_data_bytes
+
+
+for _record in (known.GeoKeyDirectoryVlr, known.GeoDoubleParamsVlr, known.GeoAsciiParamsVlr,
+                known.WktMathTransformVlr, known.WktCoordinateSystemVlr):
+    _keep_source_bytes(_record)
 
 
 def standardized_wkt_bytes(wkt: bytes | str) -> bytes:
@@ -78,32 +104,16 @@ def projection_record_list(header) -> List[Tuple[str, int, bytes]]:
     return rows
 
 
-def standardize_projection_records(header):
-    """Replace every CRS record of a LAS 1.4 header by one standardized WKT VLR.
+def validate_crs_records_unchanged(source_file: Path, output_file: Path) -> None:
+    """Raise unless an output written by SmartTile carries the source's CRS records byte for byte."""
+    import laspy
 
-    Keeping the writer's and the source's serializations side by side made
-    readers disagree (PDAL reads the first, laspy the last) and broke byte
-    validation (3DT-2200 class). Headers without CRS, or older than LAS 1.4
-    (GeoTIFF keys only), are left unchanged.
-    """
-    from laspy.vlrs.known import WktCoordinateSystemVlr
-
-    if str(header.version) != "1.4":
-        return header
-    data = standardized_crs_record(header)
-    if data is None:
-        return header
-    # The typed VLR keeps parse_crs() working before the header is written.
-    header.vlrs[:] = [v for v in header.vlrs if getattr(v, "user_id", "") != PROJECTION_VLR_USER_ID] + [
-        WktCoordinateSystemVlr(data.rstrip(b"\0").decode("utf-8"))]
-    evlrs = getattr(header, "evlrs", None)
-    if evlrs:
-        evlrs[:] = [v for v in evlrs if getattr(v, "user_id", "") != PROJECTION_VLR_USER_ID]
-    try:
-        header.global_encoding.wkt = True
-    except AttributeError:
-        pass
-    return header
+    with laspy.open(str(source_file), laz_backend=laspy_laz_backend()) as src, \
+            laspy.open(str(output_file), laz_backend=laspy_laz_backend()) as out:
+        if projection_record_list(src.header) != projection_record_list(out.header):
+            raise ValueError(f"{Path(output_file).name}: CRS records differ from {Path(source_file).name}")
+        if src.header.global_encoding.wkt != out.header.global_encoding.wkt:
+            raise ValueError(f"{Path(output_file).name}: WKT flag differs from {Path(source_file).name}")
 
 
 UNNAMED_DATUMS = {"", "unknown", "unnamed"}
@@ -145,11 +155,12 @@ def same_horizontal_crs_unknown_vertical(source_crs, output_crs) -> bool:
 
 
 def validate_single_crs_record(source_file: Path, copc_file: Path) -> Tuple[bool, str]:
-    """Validate that an output carries exactly one CRS record, equal to the source CRS.
+    """Validate that an output keeps the source's CRS records, or carries one equal CRS record.
 
-    The comparison is semantic (same authority code or equal CRS definition),
-    not byte-wise: writers standardize CRS text. Duplicate or GeoTIFF+WKT
-    records in a LAS 1.4 output fail, since readers would disagree about them.
+    The second comparison is semantic (same authority code or equal CRS
+    definition): PDAL and untwine rewrite CRS text. Duplicate or GeoTIFF+WKT
+    records that a writer added to a LAS 1.4 output fail, since readers would
+    disagree about them.
     """
     import laspy
 
@@ -158,6 +169,7 @@ def validate_single_crs_record(source_file: Path, copc_file: Path) -> Tuple[bool
             source_header = src.header
             source_crs = parse_crs(source_header)
             source_projection = projection_vlr_fingerprints(source_header)
+            source_records = projection_record_list(source_header)
         # Writers' empty placeholder records (untwine writes a 1-byte NUL WKT
         # VLR for sources without CRS) are not CRS metadata.
         source_content = {key: data for key, data in source_projection.items()
@@ -175,6 +187,8 @@ def validate_single_crs_record(source_file: Path, copc_file: Path) -> Tuple[bool
 
     if not records:
         return (False, "source CRS missing in output")
+    if records == source_records:
+        return (True, "source CRS records kept unchanged")
     if source_crs is None:
         # Unreadable but present source CRS: only an unchanged copy is provable.
         output_payloads = {data for _, _, data in records}
@@ -185,7 +199,7 @@ def validate_single_crs_record(source_file: Path, copc_file: Path) -> Tuple[bool
         return (False, "source CRS missing in output")
     if version == "1.4" and len(records) != 1:
         found = ", ".join(f"{kind} {record_id}" for kind, record_id, _ in records)
-        return (False, f"output carries {len(records)} CRS records ({found}); exactly one standardized WKT record is required")
+        return (False, f"output carries {len(records)} CRS records ({found}); a rewritten CRS must be exactly one WKT record")
     if not crs_equivalent(source_crs, output_crs) and not same_horizontal_crs_unknown_vertical(source_crs, output_crs):
         return (False, f"output CRS {output_crs.name!r} differs from source CRS {source_crs.name!r}")
     return (True, "single CRS record, equal to the source CRS")

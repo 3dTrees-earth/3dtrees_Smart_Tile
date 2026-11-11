@@ -16,12 +16,13 @@ Usage:
     python src/run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output
 """
 
+import os
 import sys
 import argparse
 from pathlib import Path
 
-from worker_budget import (allocated_cpu_count, limit_native_threads, requested_workers,
-                           spatial_query_worker_count)
+from worker_budget import (MemoryBudgetError, allocated_cpu_count, failure_exit_code, limit_native_threads,
+                           memory_capped_workers, oom_kill_count, requested_workers, spatial_query_worker_count)
 
 # Cap native thread pools before numpy, laspy or lazrs load. Spawned worker
 # processes re-run this module as __mp_main__ and get one thread each.
@@ -258,7 +259,7 @@ def run_tile_task(params: Parameters):
             name: output_dir / name for name in ("tile_bounds_tindex.json", "overview_copc_tiles.png")})
     except Exception as exc:
         print(f"Error: {exc}")
-        sys.exit(1)
+        sys.exit(failure_exit_code(exc, OOM_KILLS_AT_START))
     print(f"Tile task complete: {output_dir}")
     return input_dir
 
@@ -323,6 +324,8 @@ def _write_tile_task(params: Parameters):
             instance_outputs = parse_tile_outputs(params.instance_outputs)
             if not instance_outputs:
                 raise ValueError("--instance-outputs lists no outputs")
+        if (params.qsm_manifest or params.rct_terrain_folder) and not instance_dimensions:
+            raise ValueError("--qsm-manifest and --rct-terrain-folder need --instance-tiles")
         if params.tile_outputs:
             tile_outputs = parse_tile_outputs(params.tile_outputs)
         elif instance_dimensions:
@@ -363,7 +366,11 @@ def _write_tile_task(params: Parameters):
                 wide=params.max_instance_extent,
                 attributes=_parse_csv(params.instance_tile_dims) if params.instance_tile_dims else [],
                 check_ids=not params.allow_reused_instance_ids, workers=spatial_query_worker_count(workers),
-                publish_occupancy=not tile_outputs, **instance_options)
+                publish_occupancy=not tile_outputs, qsm_manifest=params.qsm_manifest,
+                rct_terrain=params.rct_terrain_folder,
+                # Instance tiles keep real points unless a method is chosen explicitly.
+                nearest="subsampling_method" not in params.model_fields_set or not center_of_mass,
+                **instance_options)
 
         # Step 7: Update tile_bounds_tindex.json with actual bounds from created tiles
         # (so remap/merge matching uses file extent instead of nominal grid)
@@ -393,7 +400,42 @@ def _write_tile_task(params: Parameters):
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
+        sys.exit(failure_exit_code(e, OOM_KILLS_AT_START))
+
+
+def _run_merge_qsm(params: Parameters):
+    """Merge of RayCloudTools QSMs of instance tiles per original (--instance-manifest); reads no points."""
+    from output_publication import DirectoryTransaction
+    from qsm_merge import merge_qsm
+
+    if params.subsampled_10cm_folder or params.segmented_folders or params.segmented_remapped_folder:
+        print("Error: --instance-manifest merges RayCloudTools QSMs; it takes no segmented point collections")
         sys.exit(1)
+    kinds = {"trees": params.tree_tables_folder, "info": params.tree_info_folder,
+             "mesh": params.tree_meshes_folder, "terrain": params.terrain_meshes_folder}
+    kind_folders = {kind: Path(folder) for kind, folder in kinds.items() if folder is not None}
+    output = params.output_folder or params.output_dir
+    if not output or not (params.qsm_folder or kind_folders):
+        print("Error: the QSM merge needs --output-dir and --qsm-folder or --tree-tables-folder, "
+              "--tree-info-folder and --tree-meshes-folder")
+        sys.exit(1)
+    output_dir = Path(output)
+    inputs = [Path(p) for p in [params.qsm_folder, *kind_folders.values()] if p is not None]
+    try:
+        _check_collection_dir(params, output_dir)
+        with DirectoryTransaction(output_dir, inputs=inputs) as transaction:
+            report = merge_qsm(params.instance_manifest, params.qsm_folder, transaction.path,
+                               dimension=params.instance_dimension if "instance_dimension" in params.model_fields_set
+                               else None, rct_terrain_folder=params.rct_terrain_folder, kind_folders=kind_folders)
+            transaction.commit()
+        from collection_folders import original_collections
+        _publish_collections(params, original_collections(output_dir), {})
+    except Exception as exc:
+        print(f"Error: {exc}")
+        sys.exit(failure_exit_code(exc, OOM_KILLS_AT_START))
+    print(f"QSM merge {report['instance_dimension']}: {report['qsms']} QSMs of {report['instances']} instances "
+          f"for {len(report['originals'])} originals ({report['instances_without_qsm']} instances without QSM); "
+          f"terrain from {report['terrain']}: {output_dir}")
 
 
 def _small_instance_policy(params: Parameters):
@@ -405,7 +447,14 @@ def _small_instance_policy(params: Parameters):
 
 
 def run_merge_task(params: Parameters):
-    """Transfer to dense geometry, filter ownership, reconcile and deduplicate."""
+    """Transfer to dense geometry, filter ownership, reconcile and deduplicate.
+
+    With ``--instance-manifest`` it instead merges RayCloudTools QSMs of instance
+    tiles per original, without points (``qsm_merge``).
+    """
+    if params.instance_manifest:
+        return _run_merge_qsm(params)
+    from merge_stages import MatchLimits
     from remap_first_pipeline import merge_collections
 
     modes = [bool(params.subsampled_10cm_folder), bool(params.segmented_folders),
@@ -461,6 +510,7 @@ def run_merge_task(params: Parameters):
             resolution_1=params.resolution_1, remap_tolerance=params.remap_tolerance,
             transfer_radius=params.prediction_transfer_tolerance,
             overlap_threshold=params.overlap_threshold, matching=not params.disable_matching,
+            match_limits=MatchLimits(params.max_centroid_distance, params.min_match_points),
             ready=ready, instance_dimension=params.instance_dimension, filter_anchor=params.filter_anchor,
             target_dims={names.name(d) for d in _parse_csv(params.remap_dims)} if params.remap_dims else None,
             small_instances=_small_instance_policy(params),
@@ -470,7 +520,7 @@ def run_merge_task(params: Parameters):
         products = []
         if originals and params.transfer_original_dims_to_merged:
             products = _create_prod_merged_outputs(original_output, output_tiles.parent, params)
-        names.restore(output_tiles.parent, original_output)
+        names.restore(output_tiles.parent, original_output, products=products)
         from collection_folders import merged_product_collections, merged_tile_collections, original_collections
         _publish_collections(params, {
             **merged_tile_collections(output_tiles, output_tiles.parent / "segmented_filtered"),
@@ -479,7 +529,7 @@ def run_merge_task(params: Parameters):
         print(f"Merge complete: {report['state']}; report: {output_tiles.parent / 'remap_first_report.json'}")
     except Exception as exc:
         print(f"Error: {exc}")
-        sys.exit(1)
+        sys.exit(failure_exit_code(exc, OOM_KILLS_AT_START))
     finally:
         if "names" in locals():
             names.cleanup()
@@ -540,16 +590,44 @@ def run_remap_task(params: Parameters):
         products = []
         if params.transfer_original_dims_to_merged:
             products = _create_prod_merged_outputs(output, output.parent, params)
-        names.restore(output.parent)
+        names.restore(output.parent, products=products)
         from collection_folders import merged_product_collections, original_collections
         _publish_collections(params, {**original_collections(output), **merged_product_collections(products)})
         print(f"Strict original remap complete: {output}")
     except Exception as exc:
         print(f"Error: {exc}")
-        sys.exit(1)
+        sys.exit(failure_exit_code(exc, OOM_KILLS_AT_START))
     finally:
         if "names" in locals():
             names.cleanup()
+
+
+def _create_visualization_copcs(input_dirs: list[Path], output_dir: Path, params: Parameters) -> list[Path]:
+    """One visualization COPC per original and collection; returns the COPCs and their mappings."""
+    import json
+    from main_create_merged_file import point_cloud_files, source_key
+    from visualization_copc import write_visualization_copc
+
+    target_dir = output_dir / "visualization_copc"
+    products = []
+    print()
+    print("=" * 60)
+    print("Creating Visualization COPC")
+    print("=" * 60)
+    for input_dir in input_dirs:
+        for source in point_cloud_files(input_dir):
+            name = source_key(source) if len(input_dirs) == 1 else f"{source_key(source)}_{input_dir.name}"
+            report = write_visualization_copc(
+                source, target_dir / f"{name}.copc.laz",
+                grid=params.visualization_copc_grid,
+                leaf_points=params.visualization_copc_leaf_points,
+                workers=params.workers,
+            )
+            print(f"  {source.name} -> {name}.copc.laz: {report['points']:,} points, "
+                  f"{report['nodes']} nodes, root {report['root_points']:,} points, {report['seconds']} s")
+            (target_dir / f"{name}.visualization.json").write_text(json.dumps(report, indent=2) + "\n")
+            products += [Path(report["output"]), *map(Path, report["coloring_mappings"])]
+    return products
 
 
 def run_create_merged_file_task(params: Parameters):
@@ -571,27 +649,35 @@ def run_create_merged_file_task(params: Parameters):
         output_dir.mkdir(parents=True, exist_ok=True)
         names = StagedNames(input_dirs, output_dir)
         input_dirs = [names.folder(folder) for folder in input_dirs]
-        if len(input_dirs) > 1:
-            import shutil
-            import tempfile
+        visualization = _create_visualization_copcs(input_dirs, output_dir, params) if params.visualization_copc else []
+        if params.merged_resolutions.strip().lower() == "none":
+            if not params.visualization_copc:
+                raise ValueError("--merged-resolutions none needs --visualization-copc")
+            products = []
+        elif len(input_dirs) > 1:
             from attribute_join import join_attribute_collections
+            from scratch import remove_tree, scratch_directory
 
             output_dir.mkdir(parents=True, exist_ok=True)
             print(f"Joining attributes of {len(input_dirs)} collections of the same originals")
-            with tempfile.TemporaryDirectory(prefix=".joined-originals-", dir=output_dir) as work:
+            with scratch_directory(".joined-originals-", dir=output_dir) as work:
                 joined = join_attribute_collections(input_dirs, Path(work) / "originals")
                 products = _create_prod_merged_outputs(joined, output_dir, params)
-                shutil.rmtree(joined)
+                remove_tree(joined)
         else:
             products = _create_prod_merged_outputs(input_dirs[0], output_dir, params)
-        names.restore(output_dir)
+        names.restore(output_dir, products=[*products, *visualization])
         from collection_folders import merged_product_collections
-        _publish_collections(params, merged_product_collections(products))
+        collections = merged_product_collections(products)
+        for path in visualization:
+            key = "visualization_copc" if path.name.endswith(".copc.laz") else "visualization_coloring"
+            collections.setdefault(key, []).append(path)
+        _publish_collections(params, collections)
     except Exception as e:
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
-        sys.exit(1)
+        sys.exit(failure_exit_code(e, OOM_KILLS_AT_START))
     finally:
         if names is not None:
             names.cleanup()
@@ -616,8 +702,10 @@ def preprocess_boolean_flags(args_list):
         '--match-instances', '--match_instances',
         '--prediction-resolution-original', '--prediction_resolution_original',
         '--allow-reused-instance-ids', '--allow_reused_instance_ids',
+        '--qsm-manifest', '--qsm_manifest',
         '--original-point-index', '--original_point_index',
         '--transfer-original-dims-to-merged', '--transfer_original_dims_to_merged',
+        '--visualization-copc', '--visualization_copc',
     ]
 
     processed = []
@@ -733,6 +821,8 @@ def _print_cli_help() -> None:
                 "max_instance_extent",
                 "instance_tile_dims",
                 "allow_reused_instance_ids",
+                "qsm_manifest",
+                "rct_terrain_folder",
                 "resolution_1",
                 "resolution_2",
                 "output_copc_res1",
@@ -741,6 +831,8 @@ def _print_cli_help() -> None:
                 "tiling_threshold",
             ],
         ),
+        ("Merge of RayCloudTools QSMs of instance tiles (merge --instance-manifest)",
+         ["instance_manifest", "qsm_folder", "rct_terrain_folder"]),
         (
             "Merge",
             [
@@ -821,6 +913,19 @@ def _print_cli_help() -> None:
         print()
 
 
+OOM_KILLS_AT_START = 0
+
+
+def _memory_tasks(params: Parameters) -> list[str]:
+    """The tasks whose memory this run needs: merge and remap also build prod-merged products."""
+    tasks = [params.task]
+    if params.task == "merge" and params.original_raw_input_dir:
+        tasks.append("remap")
+    if params.task in ("merge", "remap") and params.transfer_original_dims_to_merged:
+        tasks.append("create_merged_file")
+    return tasks
+
+
 def main():
     if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
         _print_cli_help()
@@ -890,6 +995,19 @@ def main():
         print("       python run.py --task create_merged_file --original-with-predictions-dir /path/to/original_with_predictions --output-dir /path/to/output")
         print("       python run.py --show-params")
         sys.exit(1)
+
+    global OOM_KILLS_AT_START
+    OOM_KILLS_AT_START = oom_kill_count()
+    try:
+        workers = memory_capped_workers(_memory_tasks(params), params.workers)
+    except MemoryBudgetError as exc:
+        print(f"Error: {exc}")
+        sys.exit(failure_exit_code(exc))
+    if workers < params.workers:
+        print(f"Workers: {workers} instead of {params.workers}, to fit the memory limit")
+        params.workers = workers
+    # Spawned workers size their query caches by the run's worker count.
+    os.environ["SMARTTILE_WORKERS"] = str(spatial_query_worker_count(params.workers))
 
     # Route to appropriate task function
     if params.task == "tile":

@@ -25,6 +25,7 @@ from tile_tindex import (
     build_tindex,
     calculate_tile_bounds,
     parse_proj_bounds as _parse_proj_bounds,
+    point_extent,
     write_single_cloud_bounds,
 )
 
@@ -158,7 +159,7 @@ def plan_tiling(input_dir, output_dir, tile_length, tile_buffer, tiling_threshol
 
     # Step 2: Calculate tile bounds
     jobs_file, bounds_json, env = calculate_tile_bounds(
-        tindex_file, tile_length, tile_buffer, output_dir, grid_origin
+        tindex_file, tile_length, tile_buffer, output_dir, grid_origin, point_extent(source_files)
     )
 
     # Symlink tindex for Galaxy if needed

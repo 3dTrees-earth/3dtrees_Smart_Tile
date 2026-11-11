@@ -10,6 +10,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from collections import Counter
+
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -17,7 +19,18 @@ from worker_budget import spatial_query_worker_count
 
 
 MAX_BATCH_POINTS = 32_768
+# lazrs decodes the LAZ chunks (50,000 points) of one read in parallel; a
+# 32,768-point read is less than one chunk, so reads take this many at a time.
+READ_POINTS = 32 * MAX_BATCH_POINTS
 CELL_SIZE = 2.0
+
+
+def read_chunks(reader, chunk_points=MAX_BATCH_POINTS):
+    """The records of ``reader.chunk_iterator(chunk_points)``, decoded ``READ_POINTS`` at a time."""
+    step = chunk_points * max(1, READ_POINTS // chunk_points)
+    for block in reader.chunk_iterator(step):
+        for start in range(0, len(block), chunk_points):
+            yield block[start:start + chunk_points]
 
 
 def coordinates(points, header, origin):
@@ -60,17 +73,23 @@ def spatial_batches(xyz):
 
 class PointIndex:
     def __init__(self, path: Path, dimensions: dict[str, np.dtype], *, query_workers: int = 1,
-                 read_only: bool = False, query_cache=None):
+                 read_only: bool = False, query_cache=None, shared_thread: bool = False):
         from spatial_query_cache import shared_cache
         self.query_cache = shared_cache() if query_cache is None else query_cache
         self._cache_owner = object()
         self._cache_ready = read_only
         self._cache_tiles = set()
+        self._extents = None
+        self._layout = None
+        # Points per 2 m cell of everything added here (None once shards are
+        # appended): balances remap workers without scanning the index.
+        self.cell_points = None if read_only else Counter()
         self.query_workers = spatial_query_worker_count(query_workers)
         self.dimensions = dimensions
         self.path = Path(path).resolve()
+        # ``shared_thread``: the caller hands the index to one other thread at a time.
         self.db = (sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)
-                   if read_only else sqlite3.connect(self.path))
+                   if read_only else sqlite3.connect(self.path, check_same_thread=not shared_thread))
         self.db.execute("PRAGMA cache_size=-16384")
         self.db.execute("PRAGMA temp_store=FILE")
         if read_only:
@@ -125,8 +144,21 @@ class PointIndex:
         # layout avoids ZIP/NPY parsing and array copies for every spatial query.
         # Derive it from current dimensions: survivor schemas may be narrowed
         # before their first insertion.
-        return np.dtype([("xyz", np.float64, (3,)), ("indices", np.int64)] +
-                        [(f"value_{i}", dtype) for i, dtype in enumerate(self.dimensions.values())])
+        return self._storage_layout()[0]
+
+    def storage_key(self):
+        """A hashable name of the record layout, for cache keys."""
+        return self._storage_layout()[1]
+
+    def _storage_layout(self):
+        # Queries ask for the layout once per 2 m group; rebuild it only when
+        # the dimensions change.
+        dims = tuple((name, np.dtype(dtype).str) for name, dtype in self.dimensions.items())
+        if self._layout is None or self._layout[0] != dims:
+            dtype = np.dtype([("xyz", np.float64, (3,)), ("indices", np.int64)] +
+                             [(f"value_{i}", dtype) for i, dtype in enumerate(self.dimensions.values())])
+            self._layout = (dims, (dtype, repr(dtype.descr)))
+        return self._layout[1]
 
     def add(self, tile, xyz, values, point_indices):
         if len(xyz) > MAX_BATCH_POINTS:
@@ -134,7 +166,9 @@ class PointIndex:
         if self._cache_ready:
             self.query_cache.discard(self._cache_owner)
         self._cache_ready = False
+        self._extents = None
         self._cache_tiles.add(int(tile))
+        starts, sizes = [], []
         for group in spatial_batches(xyz):
             pts = xyz[group]
             payload = np.empty(len(group), dtype=self._storage_dtype())
@@ -144,9 +178,14 @@ class PointIndex:
                 payload[f"value_{i}"] = values[name][group]
             row = self.db.execute("INSERT INTO batches(tile,data) VALUES (?,?)",
                                   (int(tile), payload.tobytes())).lastrowid
+            starts.append(group[0])
+            sizes.append(len(group))
             lo, hi = pts.min(axis=0), pts.max(axis=0)
             self.db.execute("INSERT INTO bounds VALUES (?,?,?,?,?,?,?)",
                             (row, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]))
+        if self.cell_points is not None and starts:
+            cells = np.floor(xyz[starts, :2] / CELL_SIZE).astype(np.int64)
+            self.cell_points.update(dict(zip(map(tuple, cells.tolist()), sizes)))
 
     def flush(self):
         self.db.commit()
@@ -161,6 +200,8 @@ class PointIndex:
         if self._cache_ready:
             self.query_cache.discard(self._cache_owner)
         self._cache_ready = False
+        self._extents = None
+        self.cell_points = None
         self.db.commit()
         self.db.execute("ATTACH DATABASE ? AS shard", (str(path),))
         failed = True
@@ -213,17 +254,17 @@ class PointIndex:
         Baseline validation needs only geometric coverage. Avoid resolving source
         identity for coincident unfiltered copies from neighboring tiles.
         """
-        from spatial_query_cache import REGION_SIZE, region_entry
+        from spatial_query_cache import query_cells, region_entry
         distances = np.full(len(xyz), np.inf)
         for group in spatial_batches(xyz):
             points = xyz[group]
             limit = distance_limit(points, radius)
-            cell = tuple(np.floor(points[0, :2] / REGION_SIZE).astype(np.int64))
+            cell, subcell = query_cells(points)
             best = np.full(len(points), np.inf)
-            for tile in sorted(self._cache_tiles):
+            for tile in self.search_order(points, radius):
                 entry = None
                 if self._cache_ready and self.query_cache.max_bytes:
-                    entry = region_entry(self, tile, cell, limit, None, None)
+                    entry = region_entry(self, tile, cell, limit, None, None, subcell=subcell)
                 if entry is not None:
                     tree, _ = entry
                     trees = () if tree is None else (tree,)
@@ -235,12 +276,14 @@ class PointIndex:
             distances[group] = best
         return distances
 
-    def covered(self, xyz, radius, *, positive_dimension):
+    def covered(self, xyz, radius, *, positive_dimension, cores=None):
         """Whether any positive tree lies within radius of each query point.
 
         Coverage needs neither winning attributes nor nearest-point tie breaks.
         Preserve each original XY group's inclusive numerical distance bound,
-        including when previously supported queries are skipped.
+        including when previously supported queries are skipped. ``cores``
+        ({tile: ((x0, x1), (y0, y1))} in index coordinates) only orders the
+        tiles searched: coverage is an OR over tiles, so the answer is the same.
         """
         from spatial_query_cache import covered_region
         found = np.zeros(len(xyz), dtype=bool)
@@ -248,11 +291,39 @@ class PointIndex:
             points = xyz[group]
             result = None
             if self._cache_ready and self.query_cache.max_bytes:
-                result = covered_region(self, points, radius, positive_dimension)
+                result = covered_region(self, points, radius, positive_dimension,
+                                        tiles=self.search_order(points, radius, cores))
             if result is None:
                 result = self._covered_batch(points, radius, positive_dimension)
             found[group] = result
         return found
+
+    def tile_extents(self):
+        """{tile: (x0, x1, y0, y1)} of everything indexed, read once per finished index."""
+        if self._extents is None:
+            rows = self.db.execute("SELECT b.tile, MIN(r.x0), MAX(r.x1), MIN(r.y0), MAX(r.y1) "
+                                   "FROM bounds r JOIN batches b ON b.id=r.id GROUP BY b.tile").fetchall()
+            self._extents = {tile: extent for tile, *extent in rows}
+        return self._extents
+
+    def search_order(self, xyz, radius, cores=None):
+        """Tiles that can hold a point within ``radius`` of ``xyz``: core owners first, then by tile.
+
+        A tile whose indexed extent is farther than the group's distance bound
+        cannot hold a match, so skipping it changes no answer.
+        """
+        limit = distance_limit(xyz, radius)
+        lo, hi = xyz[:, :2].min(axis=0) - limit, xyz[:, :2].max(axis=0) + limit
+        extents = self.tile_extents()
+        reachable = [tile for tile in sorted(self._cache_tiles)
+                     if tile in extents and extents[tile][0] <= hi[0] and extents[tile][1] >= lo[0]
+                     and extents[tile][2] <= hi[1] and extents[tile][3] >= lo[1]]
+        if cores is None:
+            return reachable
+        x, y = xyz[0, 0], xyz[0, 1]
+        owners = [tile for tile in reachable if tile in cores
+                  and cores[tile][0][0] <= x <= cores[tile][0][1] and cores[tile][1][0] <= y <= cores[tile][1][1]]
+        return owners + [tile for tile in reachable if tile not in owners]
 
     def _covered_batch(self, xyz, radius, positive_dimension):
         """Bounded fallback for one XY group; skip already supported queries."""
@@ -384,8 +455,8 @@ class PointIndex:
             roundoff = distance_roundoff(xyz[group])
 
             def candidates():
-                from spatial_query_cache import REGION_SIZE, region_entry
-                cell = tuple(np.floor(points[0, :2] / REGION_SIZE).astype(np.int64))
+                from spatial_query_cache import query_cells, region_entry
+                cell, subcell = query_cells(points)
                 sources = [tile] if tile is not None else sorted(self._cache_tiles)
                 for source in sources:
                     if before_tile is not None and source >= before_tile:
@@ -399,7 +470,7 @@ class PointIndex:
                     entry = None
                     if self._cache_ready and self.query_cache.max_bytes:
                         entry = region_entry(self, source, cell, limit, positive_dimension, bounds,
-                                             matching=matching)
+                                             matching=matching, subcell=subcell)
                     if entry is not None:
                         tree, payload = entry
                         if tree is not None:

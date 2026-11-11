@@ -25,15 +25,16 @@ import math
 import multiprocessing
 import os
 from pathlib import Path
-import shutil
-import tempfile
 import time
 
 import laspy
 import numpy as np
 
 from output_publication import publish_files, validate_output_paths
+from point_ranges import seekable
+from ply_crs import PLY_SIDECAR_SUFFIXES
 from output_names import file_stem
+from scratch import remove_tree, scratch_directory
 from voxel_grid import voxel_keys
 
 # One spilled point: XYZ in its tile's LAS encoding plus a bit per resolution.
@@ -109,12 +110,36 @@ def sample_xy(sources, points=2_000_000, run=20_000):
     for source, count in zip(sources, counts):
         runs = max(1, math.ceil(points * count / max(total, 1) / run))
         kwargs = {"laz_backend": backend} if str(source).lower().endswith(".laz") and backend is not None else {}
+        starts = np.linspace(0, max(count - run, 0), runs).astype(np.int64)
         with laspy.open(source, **kwargs) as reader:
-            for start in np.linspace(0, max(count - run, 0), runs).astype(np.int64):
-                reader.seek(int(start))
-                chunk = reader.read_points(min(run, count - int(start)))
-                parts.append(np.c_[np.asarray(chunk.x), np.asarray(chunk.y)])
+            if seekable(source):
+                for start in starts:
+                    reader.seek(int(start))
+                    chunk = reader.read_points(min(run, count - int(start)))
+                    parts.append(np.c_[np.asarray(chunk.x), np.asarray(chunk.y)])
+            else:
+                parts.extend(_runs_in_order(reader, starts, run, count))
     return np.concatenate(parts) if parts else np.empty((0, 2))
+
+
+def _runs_in_order(reader, starts, run, count):
+    """XY of the runs ``[start, start + run)``, read front to back (point_ranges: no seek)."""
+    wanted = [(int(start), min(int(start) + run, count)) for start in starts]
+    pieces = [[] for _ in wanted]
+    offset = 0
+    for chunk in reader.chunk_iterator(CHUNK_POINTS):
+        end = offset + len(chunk)
+        xy = None
+        for piece, (first, stop) in zip(pieces, wanted):
+            low, high = max(first, offset), min(stop, end)
+            if low < high:
+                if xy is None:
+                    xy = np.c_[np.asarray(chunk.x), np.asarray(chunk.y)]
+                piece.append(xy[low - offset:high - offset])
+        offset = end
+        if offset >= wanted[-1][1]:
+            break
+    return [np.concatenate(piece) if piece else np.empty((0, 2)) for piece in pieces]
 
 
 def route(raw_xyz, masks, resolutions, cells, *, scales, offsets):
@@ -349,7 +374,7 @@ def _reduce_block(task):
         for index, (centers, used) in enumerate(_reduce_block((child, resolutions, finer, scales, offsets, limit, nearest, include_original))):
             parts[index].append(centers)
             represented[index] += used
-    shutil.rmtree(children)
+    remove_tree(children)
     return [(np.concatenate(p) if p else np.empty((0, 3)), used) for p, used in zip(parts, represented)]
 
 
@@ -379,8 +404,10 @@ def _range_tasks(sources, tiles, resolutions, cells, spill_dir, workers):
     size = max(CHUNK_POINTS, math.ceil(sum(counts) / max(1, 2 * workers)))
     tasks = []
     for source, total in zip(sources, counts):
-        for start in range(0, total, size):
-            tasks.append((len(tasks), str(source), start, min(size, total - start),
+        # A range after the first seeks (point_ranges): a variable-chunk source is one range.
+        step = size if seekable(source) else max(total, 1)
+        for start in range(0, total, step):
+            tasks.append((len(tasks), str(source), start, min(step, total - start),
                           tiles, resolutions, cells, str(spill_dir)))
     return tasks, sum(counts), area
 
@@ -444,7 +471,7 @@ def _reduce_and_write(task):
     original_counts = _write_original_fragments(block, originals, slot_dirs, name, limit) if originals else {}
     results = _reduce_block((block, resolutions, cells, scales, offsets, limit, nearest, False)) \
         if any(resolutions) else [(np.empty((0, 3)), 0) for _ in resolutions]
-    shutil.rmtree(block)
+    remove_tree(block)
     dtype = laspy.PointFormat(FRAGMENT_POINT_FORMAT).dtype()
     counts = []
     for slot, (centers, used) in enumerate(results):
@@ -494,14 +521,14 @@ def _assemble(directory, target, template, compress):
         for points in _fragment_batches(directory, header):
             writer.write_points(points)
         write_retained_evlrs(writer, header)
-    shutil.rmtree(directory)
+    remove_tree(directory)
     return True
 
 
 def _assemble_ply(directory, target, template, expected):
     """Binary little-endian PLY of float64 XYZ, with the CRS as `comment crs:`."""
     from crs_records import crs_comment_value
-    from ply_crs import add_crs_comment_to_ply
+    from ply_crs import add_crs_comment_to_ply, write_ply_sidecars
 
     with laspy.open(template) as reader:
         header = reader.header
@@ -518,7 +545,8 @@ def _assemble_ply(directory, target, template, expected):
     if written != expected:
         raise ValueError(f"{Path(target).name}: wrote {written:,} of {expected:,} points")
     add_crs_comment_to_ply(target, crs)
-    shutil.rmtree(directory)
+    write_ply_sidecars(target, header, task="tile")
+    remove_tree(directory)
     return True
 
 
@@ -571,7 +599,7 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
     work_dir.mkdir(parents=True, exist_ok=True)
     workers = max(1, int(workers))
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix=".tile-centroids-", dir=work_dir) as scratch:
+    with scratch_directory(".tile-centroids-", dir=work_dir) as scratch:
         scratch = Path(scratch)
         spill_dir = scratch / "blocks"
         context = multiprocessing.get_context("spawn")
@@ -597,7 +625,7 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
             if not occupied.any():
                 raise ValueError("No planned tile core contains source points")
             for index in np.flatnonzero(~occupied):
-                shutil.rmtree(spill_dir / tiles[index].label, ignore_errors=True)
+                remove_tree(spill_dir / tiles[index].label)
             spilled = time.monotonic()
             spill_bytes = sum(path.stat().st_size for path in spill_dir.rglob("*.bin"))
             print(f"  Read {total_points:,} source points once with {workers} workers in {spilled - started:.1f} s; "
@@ -663,6 +691,8 @@ def write_tile_centroids(sources, tiles, header, outputs, *, workers, work_dir, 
                     if not future.result():
                         raise RuntimeError(f"COPC conversion failed for {final.name}")
                     staged.append((target, final))
+                    staged += [(Path(str(target) + suffix), Path(str(final) + suffix))
+                               for suffix in PLY_SIDECAR_SUFFIXES if Path(str(target) + suffix).exists()]
             finally:
                 finish.shutdown(wait=True)
         missing = [tile.label for index, tile in enumerate(tiles)

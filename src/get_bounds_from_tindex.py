@@ -71,6 +71,12 @@ def load_extent_from_tindex(tindex_path: Path):
         return (minx, miny, maxx, maxy), srs_info
 
 
+def _tile_count(start, stop, length):
+    """Tiles from ``start`` that reach ``stop``, also where the division rounds down."""
+    count = max(1, math.ceil((stop - start) / length))
+    return count + 1 if start + count * length < stop else count
+
+
 def build_tiles(minx, miny, maxx, maxy, length, buffer, grid_origin=None):
     """Build the tile grid: cores of ``length`` from the south-west corner, buffered by ``buffer``.
 
@@ -94,8 +100,8 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, grid_origin=None):
             raise ValueError("Grid origin must not exclude source minimum bounds")
     else:
         start_x, start_y = minx, miny
-    num_tiles_x = max(1, math.ceil((maxx - start_x) / length))
-    num_tiles_y = max(1, math.ceil((maxy - start_y) / length))
+    num_tiles_x = _tile_count(start_x, maxx, length)
+    num_tiles_y = _tile_count(start_y, maxy, length)
     end_x = start_x + num_tiles_x * length
     end_y = start_y + num_tiles_y * length
     total_tiles = num_tiles_x * num_tiles_y
@@ -113,11 +119,10 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, grid_origin=None):
 
     tiles = []
     for col in range(num_tiles_x):
-        x = start_x + col * length
+        # Neighbouring cores share one float edge, so no point falls between them.
+        core_x = [start_x + col * length, start_x + (col + 1) * length]
         for row in range(num_tiles_y):
-            y = start_y + row * length
-            core_x = [x, x + length]
-            core_y = [y, y + length]
+            core_y = [start_y + row * length, start_y + (row + 1) * length]
             buffered_x = [core_x[0] - buffer, core_x[1] + buffer]
             buffered_y = [core_y[0] - buffer, core_y[1] + buffer]
             tiles.append(
@@ -140,9 +145,14 @@ def build_tiles(minx, miny, maxx, maxy, length, buffer, grid_origin=None):
 
 
 def write_tile_bounds(tindex_path: Path, tile_length: float, tile_buffer: float, out: Path,
-                      grid_origin=None) -> int:
-    """Write the tile bounds JSON for the tindex extent; returns the tile count."""
+                      grid_origin=None, source_extent=None) -> int:
+    """Write the tile bounds JSON for the tindex extent, widened to ``source_extent``
+    (the index rounds coordinates to 15 digits, so its minimum can lie inside the
+    data and a grid starting there misses points); returns the tile count."""
     (minx, miny, maxx, maxy), srs = load_extent_from_tindex(tindex_path)
+    if source_extent is not None:
+        minx, miny = min(minx, source_extent[0]), min(miny, source_extent[1])
+        maxx, maxy = max(maxx, source_extent[2]), max(maxy, source_extent[3])
     proj_crs = srs if srs != "missing" else PROJECTED_CRS_FALLBACK
     # Data-aligned tiling; the geographic extent equals the planar one (metric input).
     tiles, grid_bounds = build_tiles(minx, miny, maxx, maxy, tile_length, tile_buffer, grid_origin=grid_origin)

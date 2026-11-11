@@ -1,0 +1,12 @@
+diff --git a/untwine/Config.hpp.in b/untwine/Config.hpp.in
+index a3b2265..1633899 100644
+--- a/untwine/Config.hpp.in
++++ b/untwine/Config.hpp.in
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-#define UNTWINE_VERSION "@PROJECT_VERSION@"
++#define UNTWINE_VERSION "@PROJECT_VERSION@+3dtrees.1"
+ #define UNTWINE_VERSION_MAJOR "@PROJECT_VERSION_MAJOR@"
+ #define UNTWINE_VERSION_MINOR "@PROJECT_VERSION_MINOR@"
+ #define UNTWINE_VERSION_PATCH "@PROJECT_VERSION_PATCH@"

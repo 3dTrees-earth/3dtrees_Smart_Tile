@@ -89,15 +89,18 @@ class ParallelDenseTransferTests(unittest.TestCase):
             serial, parallel = Path(a), Path(b)
             files_1, counts_1, report_1, _ = transfer(serial, 1)
             files_3, counts_3, report_3, _ = transfer(parallel, 3)
-            self.assertEqual(report_1["parallelism"], {"dense_transfer_processes": 1, "dense_query_processes": [1, 1, 1]})
-            self.assertEqual(report_3["parallelism"], {"dense_transfer_processes": 3, "dense_query_processes": [1, 1, 1]})
+            self.assertEqual(report_1["parallelism"], {"dense_transfer_processes": 1, "dense_query_processes": [1, 1, 1],
+                                                       "dense_blockwise_tiles": [0, 1, 2]})
+            self.assertEqual(report_3["parallelism"], {"dense_transfer_processes": 3, "dense_query_processes": [1, 1, 1],
+                                                       "dense_blockwise_tiles": [0, 1, 2]})
             self.assertEqual([f.name for f in files_1], [f.name for f in files_3])
             for f1, f3 in zip(files_1, files_3):
                 p1, p3 = laspy.read(f1).points.array, laspy.read(f3).points.array
                 self.assertEqual(p1.dtype, p3.dtype)
                 np.testing.assert_array_equal(p1, p3)
             self.assertEqual(list(counts_1.items()), list(counts_3.items()))
-            strip = lambda r: [{k: v for k, v in m.items() if k not in ("source", "target")} for m in r["transfer"]]
+            strip = lambda r: [{k: v for k, v in m.items() if k not in ("source", "target") and not k.endswith("_seconds")}
+                               for m in r["transfer"]]
             self.assertEqual(strip(report_1), strip(report_3))
             self.assertEqual(index_rows(serial / "dense.sqlite"), index_rows(parallel / "dense.sqlite"))
             self.assertEqual(sorted(p.name for p in (parallel / "dense").iterdir()), [f.name for f in files_3])
@@ -171,7 +174,8 @@ class ParallelDenseTransferTests(unittest.TestCase):
                 mock.patch.object(merge_stages, "MAX_BATCH_POINTS", 2048):
             files_1, counts_1, report_1, _ = transfer(Path(a), 1, count=1)
             files_4, counts_4, report_4, _ = transfer(Path(b), 4, count=1)
-            self.assertEqual(report_4["parallelism"], {"dense_transfer_processes": 1, "dense_query_processes": [4]})
+            self.assertEqual(report_4["parallelism"], {"dense_transfer_processes": 1, "dense_query_processes": [4],
+                                                       "dense_blockwise_tiles": [0]})
             np.testing.assert_array_equal(laspy.read(files_1[0]).points.array, laspy.read(files_4[0]).points.array)
             self.assertEqual(list(counts_1.items()), list(counts_4.items()))
             self.assertEqual(index_rows(Path(a) / "dense.sqlite"), index_rows(Path(b) / "dense.sqlite"))
@@ -310,3 +314,36 @@ class ParallelDenseTransferTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReconciliationPartsTests(unittest.TestCase):
+    def test_tiles_read_in_chunk_parts_equal_one_pass(self):
+        """Small chunks split every tile into several parts; pairs, shapes and the report stay identical."""
+        from dense_instance_ownership import filter_owned_instances, ownership_regions
+        from merge_stages import MatchLimits, reconcile_instances
+        from remap_first_pipeline import tile_overlaps
+        runs = []
+        for workers in (1, 3):
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            root = Path(tmp.name)
+            files, _, report, _ = transfer(root, 1)
+            source, target, bounds = root / "source", root / "target", root / "tile_bounds.json"
+            pairs = [(s, t, s.name) for s, t in zip(sorted(source.iterdir()), sorted(target.iterdir()))]
+            report["tile_sources"] = [{"tile": n, "prediction": p[0].name} for n, p in enumerate(pairs)]
+            model = describe_model(source, "PredInstance")
+            dims = {n: p.type for n, p in model.dimensions.items()}
+            regions, overlaps = ownership_regions(pairs, bounds), tile_overlaps(pairs, bounds, np.zeros(3))
+            with PointIndex(root / "owned.sqlite", dims) as owned:
+                owned_files, counts = filter_owned_instances(model, files, regions, root / "owned", owned,
+                                                             np.zeros(3), report, workers=1)
+                with mock.patch.object(merge_stages, "MAX_BATCH_POINTS", 997):
+                    mapping = reconcile_instances(model, owned_files, owned, np.zeros(3), counts, .01, .05, report,
+                                                  overlaps=overlaps, workers=workers,
+                                                  limits=MatchLimits(max_centroid_distance=50.0, min_points=1))
+            runs.append((mapping, report["reconciliation"], report["parallelism"]))
+        (m1, rec1, _), (m3, rec3, par3) = runs
+        self.assertGreater(par3["reconciliation_parts"], 3)
+        self.assertEqual(m1, m3)
+        self.assertEqual(rec1, rec3)
+        self.assertGreater(len(rec3["accepted_pairs"]), 0)

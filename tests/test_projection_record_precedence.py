@@ -1,4 +1,4 @@
-"""Every output carries exactly one standardized CRS record (3DT-2200 class)."""
+"""Copied outputs keep the source CRS records; rewritten outputs carry exactly one (3DT-2200 class)."""
 import laspy
 from laspy.vlrs.known import WktCoordinateSystemVlr
 from laspy.vlrs.vlrlist import VLRList
@@ -35,18 +35,18 @@ def test_unidentified_compound_crs_keeps_its_text():
     assert standardized_wkt_bytes(compound) == compound.encode() + b"\0"
 
 
-def test_copied_header_has_one_standardized_record(tmp_path):
+def test_copied_header_keeps_every_record_as_it_is(tmp_path):
     source = tmp_path / 'source.laz'
-    write_cloud(source, STANDARD, ORIGINAL)       # the duplicate state of v2.3 outputs
+    write_cloud(source, STANDARD, ORIGINAL)
     with laspy.open(source) as reader:
+        expected = projection_record_list(reader.header)
         header = copy_single_source_header(reader.header)
-    records = projection_record_list(header)
-    assert [(kind, rid) for kind, rid, _ in records] == [('vlr', 2112)]
-    assert records[0][2] == STANDARD.encode() + b"\0"
+    assert projection_record_list(header) == expected
+    assert [(kind, rid) for kind, rid, _ in expected] == [('vlr', 2112), ('evlr', 2112)]
     assert header.global_encoding.wkt
 
 
-def test_upload_spelling_is_standardized_on_copy(tmp_path):
+def test_upload_spelling_stays_on_copy(tmp_path):
     source, target = tmp_path / 'source.laz', tmp_path / 'target.laz'
     write_cloud(source, ORIGINAL)
     with laspy.open(source) as reader:
@@ -56,7 +56,7 @@ def test_upload_spelling_is_standardized_on_copy(tmp_path):
     cloud.write(target)
     with laspy.open(target) as reader:
         records = projection_record_list(reader.header)
-    assert records == [('vlr', 2112, STANDARD.encode() + b"\0")]
+    assert records == [('vlr', 2112, ORIGINAL.encode() + b"\0")]
     assert validate_single_crs_record(source, target)[0]
 
 
@@ -77,7 +77,7 @@ def test_validator_rejects_duplicates_and_changed_crs(tmp_path):
     write_cloud(dual, STANDARD, ORIGINAL)
     write_cloud(changed, CRS.from_epsg(25832).to_wkt("WKT1_GDAL"))
     ok, message = validate_single_crs_record(source, dual)
-    assert not ok and "exactly one standardized WKT record" in message
+    assert not ok and "a rewritten CRS must be exactly one WKT record" in message
     ok, message = validate_single_crs_record(source, changed)
     assert not ok and "differs from source CRS" in message
 

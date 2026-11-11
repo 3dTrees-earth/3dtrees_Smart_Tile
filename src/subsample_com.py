@@ -9,7 +9,6 @@ from typing import List, Tuple
 
 import laspy
 
-from crs_records import standardize_projection_records
 
 
 def _is_stale_copc_vlr(vlr) -> bool:
@@ -56,7 +55,7 @@ def make_center_of_mass_header(source_header: laspy.LasHeader, dimension_reducti
     if source_evlrs is not None:
         header.evlrs = VLRList([vlr for vlr in source_evlrs if not _is_stale_copc_vlr(vlr)])
 
-    return standardize_projection_records(header)
+    return header
 
 
 def aligned_edges(start: float, stop: float, step: float, align: float) -> List[Tuple[float, float]]:

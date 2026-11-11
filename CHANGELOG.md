@@ -1,5 +1,85 @@
 # Changelog
 
+## v2.5.0 - 2026-11-11
+
+### QSMs per segmentation (Linear: SmartTile v2.5)
+- RayCloudTools QSMs for every segmentation (SAT, ForestMamba, ...) at any size. The tile task's `--qsm-manifest` writes beside the instance tiles what a QSM merge needs without reading points: `qsm_manifest_<dimension>.json` (originals, tiles, every instance with its tile and the originals holding its points) and `qsm_footprints.npz`. The per-instance statistics read collects both; nothing else is read.
+- `--rct-terrain-folder` takes the per-original terrain meshes of an earlier RayCloudTools run, merges them once (identical vertices welded, shared triangles once) and writes per instance tile the triangles within 10 m (`<tiles>_terrain/<tile>.ply`) for RayCloudTools `--terrain-mesh`, so every segmentation's QSMs stand on the RCT ground.
+- `merge --instance-manifest` (a mode of merge; it takes no segmented point collections): the RayCloudTools `--instance-dimension` outputs of all instance tiles, from `--qsm-folder` or the per-kind folders of the RCT merge, per original (`_trees.txt`, `_trees_info.txt`, `_trees_mesh.ply`, `_terrain_mesh.ply`), with the instance IDs and table rows unchanged and a tree shared by originals in each, plus `octree/`, the results viewer's QSM octree (3DT-2626): one per run, that is per dataset and instance dimension, internal to the viewer. Its contract `3dtrees-qsm-octree-v2` lists `originals` (info and mesh file per original) and gives each tree record the `original` its ranges point into; a tree shared by originals is in the octree once. A tile whose instances all got no QSM (RayCloudTools writes rowless tables and a mesh without trees) is reported, not refused. Point clouds are not merged.
+- `rct_terrain.tif`: beside the terrain meshes, merge and remap write all originals' RCT terrain as one COG (float32, 0.5 m, each cell the mesh height at its centre), for the viewer's raster layers. `src/terrain_cog.py` also converts existing meshes.
+
+### Visualization COPC (prototype)
+- `create_merged_file --visualization-copc` writes one viewer-optimised COPC per original with coloring IDs, and `--merged-resolutions none` skips the merged products. It keeps the source's WKT record and streams: the source is read twice in chunks and nodes above `memory_points` (4 million) are split through scratch files, so memory does not grow with the point count (3753: 10.6 → 1.7 GB peak). A voxel keeps the point with the lowest hash of its record index instead of a random permutation of the whole cloud; scaled float ExtraBytes are copied raw.
+
+### Instance tiles (3DT-2799)
+- Instance tiles honour `--subsampling-method` when it is given: `center-of-mass` writes each (instance, voxel) as the exact mean of its points, as tile outputs do; ID and carried attributes come from the point nearest that mean. Without the option they keep `nearest-to-centroid`, so existing runs are unchanged (3753 at 10 cm: byte-identical, 18 s with either method).
+
+### Tree table ID column (3DT-2625)
+- The ID column of the RayCloudTools tree tables SmartTile writes is named after the instance dimension it refers to, not `predinstance`: `PredInstance_RCT` for RayCloudTools' own trees (merge and remap) and the segmentation's dimension, such as `PredInstance_SAT`, for QSMs merged with `--instance-manifest`. Values and the other columns are unchanged. Tables with `predinstance` are still read. The tree meshes name the dimension in `comment rct_instance_dimension`. Readers of the old name need updating; the results viewer's `products_to_parquet.py` takes either.
+
+### Merge speed: orphan recovery, deduplication, consolidation (2585)
+- Outputs are byte-identical to before (3753 and 2779, SAT and FM; 2585 9-tile subset: 43,130 → 33,850 s on 10 CPUs); only the work is spread differently.
+- Orphan recovery buffers the uncovered claims and inserts them sorted by key, with a 128 MB SQLite cache, instead of one insert per point; claim coordinates are decoded vectorised. Tiles with admitted instances are rewritten, and every tile is re-indexed, in up to `workers` processes, joining the index in tile order.
+- Deduplication also queries tile 0 in the process pool, and overlaps reading, the queries and writing: one thread decodes the next chunks, one writes the survivors, their index shard and the instance statistics in chunk order.
+- Instance consolidation and small-instance relabelling handle tiles in up to `workers` processes. Sums are accumulated in tile and chunk order and departing points are joined in tile order, so the files equal a one-process run.
+
+### Merge speed: block-wise queries and index read-back (dense TLS)
+- Outputs are byte-identical to before (3753 and 2779, SAT and FM; 2585 2-tile block and a 2x2 corner cut). 2585 2-tile block on 10 CPUs: 14,522 → 8,729 s, RAM peak 7.2 → 5.3 GB; reconciliation 3,418 → 329 s, core filter 1,136 → 626 s, ownership 2,476 → 1,588 s, dense transfer 1,967 → 1,487 s, dedup 1,927 → 1,521 s, orphan recovery 2,007 → 1,562 s. 3753: 132 → 82 s, 2779: 528–577 → 381–400 s.
+- On dense TLS a 2 m query group re-read its region from the index for nearly every chunk that touched it. Dense transfer (tiles above 1,000 points/m²), reconciliation, orphan claim coverage and deduplication now spill their query points to one file per 8 m block, each with the bound `nearest` would give its original group, and answer a block with one index read and one tree (`block_nearest`, `block_coverage`, `block_dedup`). A point whose nearest candidate is unambiguous is taken from the tree; any group with a near tie is answered again, whole, by `PointIndex.nearest`, so ties resolve as before. One file per block keeps a worker to one block's points: on 2585, 570 M of a tile's 706 M points lie in one 16 m strip.
+- Deduplication screens each block for a conflicting earlier label (eight neighbours within the bound) and checks suspicious groups exactly; with no conflict, survivors are answered block-wise, otherwise the stage falls back to the per-chunk path and its error.
+- Core filter and both ownership stages read coordinates and labels back from the index the previous stage built of exactly its written records (`indexed_chunks`, about 5x faster than decoding the LAZ with its coordinate conversion) and build their own index from it in a side process while the LAZ is copied. An index that does not hold the tile's records once each falls back to decoding.
+- Reads decode 32 x 32,768 points per call and hand out 32,768-point chunks: a 32,768-point read is less than one LAZ chunk, so lazrs could not decode in parallel. Records and chunk boundaries are unchanged.
+
+### Point ranges in LAZ with variable-size chunks
+- `reader.seek(n)` lands on the wrong record in LAZ with variable-size chunks (COPC, PDAL/untwine output) with lazrs 0.8.2: laz-rs 0.12/0.13 take the position in the chunk as `n % chunk point count`. Readers that split a file into point ranges (tile ranges and sample, instance tiles, originals for remap, reconciliation parts, block spills, dedup labels) now read such a file in one sequential range (`point_ranges.seekable`). Fixed-size chunks (LASzip, laspy, the Standardization output every production workflow feeds in) are split as before, so production outputs are unchanged. A SmartTile run straight on a COPC could read wrong records before. laz-rs 0.14.0 fixes the seek ("Fix seeking in files using variable-size chunks"); the guard can go once a lazrs built on it is required.
+
+### Untwine point loss (1924)
+- The image builds untwine 1.5.1 from source with `docker/untwine/0001-reprocess-at-least-one-level-deeper.patch` and reports `untwine version (1.5.1+3dtrees.1)` (label `org.3dtrees.untwine.version`). Unpatched untwine reprocessed a first-pass cell of exactly 100,000 points with zero extra levels, re-binned it into its own file and deleted that file, so the COPC lost part of the cell while untwine exited 0: 1924 (4.26 B points) lost 49,401 points in the full-resolution merge, which failed on its count check. The patch always splits such a cell one level deeper.
+- The two untwine paths without a point-count check now have one: COPC staging of the originals and the chunk-merge LAZ fallback remove a COPC short of its source and stop with `COPC holds X of Y points`, as the full-resolution merge does.
+
+### Merged products (3DT-2846)
+- `create_merged_file` cuts the 10 cm product into strips of 20 M points instead of 2 M and picks voxels from a memory-mapped strip in groups of whole voxel columns, so a strip is never held whole. Thin strips made every COPC query decompress the same octree nodes many times (3808, 1.1 B points: 522 strips of 0.4 m). Records are ordered with one lexsort over their fields, which runs in parallel across strips; the structured sort held the GIL. 3808: 298 s and 9.7 GB instead of about 5,900 s and 18 GB; changing only the strip size would have needed 95 GB. Products byte-identical.
+- The soft open-file limit is raised to the hard limit and chunk files are merged in batches of at most 200: PDAL 2.10 keeps two descriptors per LAZ reader and crashed without a message above about 509 readers (3808, 3820, 3827). A PDAL crash now names its signal.
+
+### Memory and Galaxy (3DT-1896, 3DT-2469)
+- Workers are capped by the memory limit, the smallest of `GALAXY_MEMORY_MB`, the cgroup limits and physical memory: per task a fixed 0.5 GB plus 0.6 (tile), 0.35 (merge), 0.35 (remap) or 0.95 GB (create_merged_file) per worker, measured with about 40 % margin. The merge's share covers its block-query and index processes: at 10 workers 3753 merge needs 3.8 GB, and in a 2 GB grant it runs 4 workers (90 s, byte-identical) instead of being killed. When one worker does not fit, the task stops with an error that names memory. A failure from lack of memory exits 137 with `out of memory`, so Galaxy can resubmit with more. 2548 (2 GB grant), Brandenburg 1129 (3.06 GB) and 1134 (3.55 GB) pass with 2, 4 and 5 workers; outputs equal the 10-worker runs.
+- `--collection-dir` also publishes `qsm_manifest` (manifests and footprints), `tiles_<i>_terrain` (the RCT terrain per tile) and `terrain_cog` (`rct_terrain.tif`).
+
+### PLY sidecars (3DT-1898)
+- Every point-cloud PLY (tiles and merged products) gets `<file>.crs.wkt`, the source CRS record verbatim, and `<file>.smarttile.json` with task, sources, point count, properties, CRS and the source's LAS scale and offset, published with it.
+
+### Cross-tile matching (3DT-1899)
+- A mutual-best pair of instances in neighbouring tiles also needs at least `--min-match-points` shared points (10), centroids of their points inside the tiles' shared overlap within `--max-centroid-distance` (5 m), and, with semantics, the same label on most matched points. Groups join strongest match first, and a group joins another only if all members lie on overlapping tiles within the cap. The report lists rejected candidates by reason. Merge output unchanged on 3753, 2779 and 1341 with SAT and ForestMamba labels.
+
+### Remap on dense scans (3DT-2849)
+- The query cache reserves a region's read against its whole budget and the kept search tree against half; a region that still does not fit is cached per 2 m query cell instead of being queried from SQLite on every batch. The budget is a third of the memory limit across the run's processes.
+- Regions go to workers by point count, largest first onto the least-loaded worker; dense regions are placed as their 2 m cells. Eight batches per worker are in flight. The report records cache hits, builds, disk fallbacks and points per worker.
+- 1919 (65.5 M terrestrial points), first 12 M points: 1,072 → 39 s at 10 workers, 1,523 → 57 s at its 2.5 GB Galaxy grant; the whole cloud at 10 workers in 303 s. Outputs byte-identical; 3753, 2779 and 2030 unchanged in output and speed.
+
+## v2.4.3 - not released separately; included in v2.5.0
+
+### CRS records (3DT-2718)
+- LAS/LAZ outputs keep the source's CRS records byte for byte, in VLRs and EVLRs, with the WKT flag. `copy_single_source_header` no longer rewrites them as WKT1_GDAL from the local EPSG database. That rewrite dropped the axis order of northing-first CRSs (3805, EPSG:6678) and renamed CRSs between PROJ versions (3827, EPSG:3067 became EUREF-FIN), so the sidecar check rejected the member.
+- laspy serializes CRS records anew when writing; `crs_records.py` makes it write the bytes it read, including NUL padding.
+- Remap checks every enriched original against its source byte for byte. A full-resolution merge keeps the first input's records and warns if another input spells the shared CRS differently.
+- COPC and PDAL products still carry the writer's WKT and are validated semantically; those writers rewrite CRS text.
+
+### ExtraBytes names (3DT-2790)
+- `<name>_extra` applies only to viewer products (`create_merged_file` outputs) and COPCs. Remap and merge LAS/LAZ outputs keep the base's column names, as the sidecar check requires (389: `Class`).
+
+### Full-resolution merge
+- Above 4,294,967,295 points the merged file is LAS 1.4, because LAS 1.3 and older count points in 32 bits (3DT-2789, 2585). Smaller merges keep the inputs' version. The intermediate merged cloud of merge and remap does the same.
+- Inputs with different point formats are promoted to LAS 1.4 format 6, 7 with RGB, or 8 with NIR: standard fields by name, `scan_angle_rank` to `scan_angle`, missing fields zero (3DT-2677).
+- ExtraBytes are compared as a set, so their order may differ between inputs (3DT-2677).
+
+### Tile grid
+- The grid covers the points' own coordinates. PDAL's tile index keeps 15 significant digits, so its minimum could lie inside the data and leave points outside every tile core (3860, 3849: `1 source points lie outside every planned tile core`).
+- Neighbouring cores share one float edge, and the last tile reaches a maximum on its edge.
+
+### Network storage
+- Scratch cleanup retries while NFS reports a folder busy. A folder that stays behind is a warning, not a failed task (`scratch.py`).
+- A cleanup failure no longer replaces the error that stopped the task: the first error and its traceback are written before cleanup. On 6 Nov four remaps ended with only `[Errno 16] Device or resource busy`.
+
 ## v2.4.2 - 2026-10-31
 
 ### ExtraBytes missingness (#15)

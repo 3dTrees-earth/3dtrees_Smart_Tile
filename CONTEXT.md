@@ -22,6 +22,15 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
   validates COPC twins; no enriched COPC original is written.
 - `create_merged_file`: builds `prod_merged_*` / `merged.*` products from
   Original-with-predictions (or plain source) files.
+- `merge --instance-manifest`: RayCloudTools `--instance-dimension` QSMs of instance tiles per
+  original (`qsm_merge.py`), from the tile task's `--qsm-manifest`
+  (`qsm_tiles.py`); reads no points. IDs and table rows stay unchanged; a tree
+  in several originals goes to each; terrain is the RCT original's
+  (`--rct-terrain-folder`) or the core-owned tile triangles over the original's
+  footprint. Writes one viewer QSM octree per run (`qsm_octree.py`, contract
+  v2: several originals, each tree from the first original holding it). A tile
+  whose instances all got no QSM is reported, not refused. Never merge or
+  rewrite point clouds here.
 
 ## Merge contract (3DT-2101)
 
@@ -115,10 +124,14 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
 - Index every prediction collection sequentially into a disk-backed
   `PointIndex`, then stream originals in bounded batches; no COPC spatial
   queries, no full cloud in memory.
-- One standardized WKT CRS record per LAS 1.4/COPC output; validation is
-  semantic. Resolve duplicate projection records with the reader's last-record
-  precedence (EVLRs after VLRs); repeated conversion must be idempotent. Do not
-  promise byte-identical VLRs after LAZ → COPC.
+- LAS/LAZ outputs written by SmartTile keep the source's CRS records byte for
+  byte (`crs_records.py`), and remap checks that for every enriched original.
+  COPC and PDAL products carry one WKT record from the writer; validation is
+  semantic there. Resolve duplicate projection records with the reader's
+  last-record precedence (EVLRs after VLRs); repeated conversion must be
+  idempotent. Do not promise byte-identical VLRs after LAZ → COPC.
+- An ExtraBytes column named like a standard LAS field keeps its name in LAS/LAZ
+  outputs and is `<name>_extra` in viewer products and COPCs.
 - Tiling CRS check (`tile_crs`): reads WKT in EVLRs; rejects geographic,
   geocentric, non-metre horizontal or vertical units, unreadable CRS records,
   differing CRSs and mixed with/without CRS.

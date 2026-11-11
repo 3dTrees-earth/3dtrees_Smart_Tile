@@ -120,3 +120,73 @@ class QueryCacheTests(unittest.TestCase):
                         np.testing.assert_array_equal(actual[0],expected[0]);np.testing.assert_array_equal(actual[1]['id'],expected[1]['id']);np.testing.assert_array_equal(actual[2],expected[2])
                         self.assertLessEqual(pool.bytes_used,pool.max_bytes)
                 self.assertLess(len(pool.entries),20)
+
+
+def test_dense_region_is_cached_per_query_cell_with_identical_results(tmp_path):
+    # A 4 m region too large for the cache: its 2 m query cells are cached instead,
+    # and nearest results equal the bounded disk path, ties included.
+    rng = np.random.default_rng(7)
+    region_points = 40_000
+    xyz = np.c_[rng.uniform(0, 4, region_points), rng.uniform(0, 4, region_points), rng.uniform(0, 10, region_points)]
+    xyz = np.round(xyz, 3)
+    xyz[:50] = xyz[50:100]  # exact duplicates: ties go to the lowest source index
+    queries = np.round(np.c_[rng.uniform(0, 4, 3000), rng.uniform(0, 4, 3000), rng.uniform(0, 10, 3000)], 3)
+    small = SpatialQueryCache(6 * 1024**2)  # the region needs more than half of it, a 2 m cell does not
+    with PointIndex(tmp_path / 'i.db', {'id': np.uint32}, query_cache=small) as idx:
+        for start in range(0, region_points, 20_000):  # inserts are bounded batches
+            part = slice(start, start + 20_000)
+            idx.add(0, xyz[part], {'id': np.arange(1, region_points + 1, dtype=np.uint32)[part]},
+                    np.arange(region_points)[part])
+        idx.flush()
+        got = idx.nearest(queries, .05)
+        stats = small.stats()
+        expected = idx._nearest_batches(queries, .05)
+        np.testing.assert_array_equal(got[0], expected[0]); np.testing.assert_array_equal(got[2], expected[2])
+        np.testing.assert_array_equal(got[1]['id'], expected[1]['id'])
+        # Only the sparse neighbor regions reached by queries on x or y = 4 are built whole.
+        assert stats['cell_builds'] >= 4 and stats['disk_fallbacks'] == 0
+        assert small.peak_bytes <= small.max_bytes
+
+
+def test_regions_go_to_workers_by_point_count(tmp_path):
+    from parallel_remap import balanced_regions, region_owners
+    with PointIndex(tmp_path / 'i.db', {'id': np.uint32}) as idx:
+        sizes = {(0, 0): 9000, (1, 0): 3000, (2, 0): 3000, (3, 0): 3000, (4, 0): 100}  # each under the batch bound
+        for (rx, ry), n in sizes.items():
+            pts = np.c_[np.full(n, rx * 4 + 1.0), np.full(n, ry * 4 + 1.0), np.arange(n) * .01]
+            idx.add(0, pts, {'id': np.ones(n, dtype=np.uint32)}, np.arange(n))
+        idx.flush()
+        assigned = balanced_regions([idx, None], 2)
+        again = balanced_regions([idx], 2)  # deterministic
+        assert all(np.array_equal(a, b) for kind in assigned for a, b in zip(assigned[kind], again[kind]))
+        # The dense spot gets a worker of its own; the three medium regions share the other.
+        owners = region_owners(np.array([[rx * 4 + 1., 1., 0.] for rx in range(5)] + [[401., 1., 0.]]), 2, assigned)
+        assert owners[0] != owners[1] and owners[1] == owners[2] == owners[3] and owners[5] in (0, 1)
+
+
+def test_tiles_out_of_reach_are_skipped_with_identical_results(tmp_path):
+    # Six tiles in a grid; each query group can reach only its neighbours.
+    rng = np.random.default_rng(2802)
+    for budget in (0, 1, 8 * 1024**2):
+        pool = SpatialQueryCache(budget)
+        with PointIndex(tmp_path / f'{budget}.db', {'id': np.uint32}, query_cache=pool) as idx:
+            clouds = []
+            for tile in (4, 1, 0, 5, 3, 2):
+                x0, y0 = 10.0 * (tile % 3), 10.0 * (tile // 3)
+                xyz = rng.uniform([x0 - 2, y0 - 2, 0], [x0 + 12, y0 + 12, 3], (300, 3))
+                xyz[:2] = [[x0 + 10, y0 + 10, 1], [x0 + 10, y0 + 10, 1]]  # coincident corners across tiles
+                labels = rng.integers(0, 4, len(xyz), dtype=np.uint32)
+                for start in range(0, len(xyz), 60):
+                    idx.add(tile, xyz[start:start + 60], {'id': labels[start:start + 60]}, np.arange(start, start + 60))
+                clouds.append(xyz)
+            idx.flush()
+            q = np.concatenate(clouds + [rng.uniform([-5, -5, 0], [35, 25, 3], (200, 3))]) + rng.uniform(-.006, .006, (2000, 3))
+            for kw in ({}, {'tile': 4}, {'before_tile': 3}, {'positive_dimension': 'id'},
+                       {'overlaps': {0: (np.array([8., -2.]), np.array([12., 12.])), 2: (np.array([18., 8.]), np.array([22., 12.]))}}):
+                actual, expected = idx.nearest(q, .01, **kw), idx._nearest_batches(q, .01, **kw)
+                np.testing.assert_array_equal(actual[0], expected[0])
+                np.testing.assert_array_equal(actual[1]['id'], expected[1]['id'])
+                np.testing.assert_array_equal(actual[2], expected[2])
+            distances = idx.nearest_distances(q, .01)
+            np.testing.assert_array_equal(np.isfinite(distances), np.isfinite(idx._nearest_batches(q, .01)[0]))
+            assert pool.bytes_used <= pool.max_bytes

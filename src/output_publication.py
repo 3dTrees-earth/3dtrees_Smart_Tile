@@ -12,6 +12,8 @@ from pathlib import Path
 import shutil
 import tempfile
 
+from scratch import remove_tree
+
 
 def _identity(path: Path):
     try:
@@ -95,7 +97,7 @@ class OutputTransaction:
                     directory = Path(tempfile.mkdtemp(prefix=".smarttile-output-", dir=parent))
                     self._directories.append(directory)
                     parents[parent] = directory
-                    self._stack.callback(shutil.rmtree, directory)
+                    self._stack.callback(remove_tree, directory)
                 self._paths[output] = parents[parent] / output.name
         except Exception:
             self._stack.close()
@@ -149,8 +151,8 @@ class DirectoryTransaction:
 
     def __enter__(self):
         self.destination.parent.mkdir(parents=True, exist_ok=True)
-        self._temporary = tempfile.TemporaryDirectory(prefix=".smarttile-task-", dir=self.destination.parent)
-        self.path = Path(self._temporary.name) / self.destination.name
+        self._temporary = tempfile.mkdtemp(prefix=".smarttile-task-", dir=self.destination.parent)
+        self.path = Path(self._temporary) / self.destination.name
         self.path.mkdir()
         return self
 
@@ -162,4 +164,4 @@ class DirectoryTransaction:
 
     def __exit__(self, exc_type, exc, traceback):
         if self._temporary is not None:
-            self._temporary.cleanup()
+            remove_tree(self._temporary)

@@ -1,9 +1,10 @@
 """Streaming core ownership on dense predictions, before cross-tile matching."""
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 import copy
 import json
-import tempfile
-from contextlib import closing
+import multiprocessing
+from contextlib import ExitStack, closing
 from pathlib import Path
 from time import perf_counter
 
@@ -11,10 +12,12 @@ import laspy
 import numpy as np
 from scipy.spatial import cKDTree
 
-from bounded_point_index import (MAX_BATCH_POINTS, PointIndex, coordinates, distance_limit,
+from bounded_point_index import (MAX_BATCH_POINTS, PointIndex, coordinates, distance_limit, read_chunks,
                                  spatial_batches, inside_xy)
-from merge_stages import DUPLICATE_RADIUS, index_written_record, mapped_values
+from indexed_chunks import IndexMismatch, indexed_chunks, tile_rows
+from merge_stages import DUPLICATE_RADIUS, index_written_record, mapped_values, prediction_values, validate_labels
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
+from scratch import scratch_directory
 from parallel_tiles import map_tiles
 
 
@@ -120,13 +123,15 @@ def preferred_core(xyz, first, second, regions, origin):
 
 
 def filter_owned_instances(model, files, regions, output_dir, index, origin, report, *, anchor="centroid",
-                           workers=1):
+                           workers=1, source=None):
     """Keep owned tree instances and core-owned background, with their source attributes.
 
     Only per-instance statistics survive between bounded chunks. Extremum ties
     select the first point in source order, matching the legacy implementation.
     Tiles are independent: up to ``workers`` run in processes and join the
-    shared index in tile order, so outputs equal a one-process run.
+    shared index in tile order, so outputs equal a one-process run. With
+    ``source``, the index of ``files``, coordinates and labels are read from
+    it instead of decoding the files (``indexed_chunks``).
     """
     if anchor not in ANCHORS:
         raise ValueError(f"Unknown filter anchor: {anchor}")
@@ -136,12 +141,18 @@ def filter_owned_instances(model, files, regions, output_dir, index, origin, rep
         "semantics": "preserve per-point values from owning tile",
         "boundary": "inclusive core; outer edges retained", "tiles": []}
     sizes = [Path(file).stat().st_size for file in files]
-    jobs = [(model, tile, file, region, output_dir, origin, anchor, report["tile_sources"][tile]["prediction"])
+    if source is not None:
+        source.flush()
+    jobs = [(model, tile, file, region, output_dir, origin, anchor, report["tile_sources"][tile]["prediction"],
+             None if source is None else str(source.path))
             for tile, (file, region) in enumerate(zip(files, regions))]
     processes = min(max(1, int(workers)), len(jobs))
     report.setdefault("parallelism", {})["core_filter_processes"] = processes
+    indexed = report["parallelism"]["core_filter_indexed_reads"] = []
     outputs, counts = [], Counter()
     for output, shard_path, metric, tile_counts in map_tiles(_filter_tile, jobs, processes=processes, sizes=sizes):
+        if metric.pop("indexed_reads"):
+            indexed.append(metric["tile"])
         stats["tiles"].append(metric)
         index.append_index(shard_path)
         shard_path.unlink()
@@ -151,83 +162,162 @@ def filter_owned_instances(model, files, regions, output_dir, index, origin, rep
     return outputs, counts
 
 
-def _filter_tile(model, tile, file, region, output_dir, origin, anchor, prediction):
+def _filter_tile(model, tile, file, region, output_dir, origin, anchor, prediction, source_path=None):
     """Core ownership for one tile; returns ``(output, index_file, metric, counts)``."""
     counts = Counter()
-    aggregates = {}
+    dimensions = {n: p.type for n, p in model.dimensions.items()}
     with laspy.open(file) as reader:
         header = copy_single_source_header(reader.header)
-        for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-            xyz = coordinates(record, reader.header, origin)
-            labels = np.asarray(record[model.instance])
-            order = np.argsort(labels, kind="stable")
-            ids, starts, sizes = np.unique(labels[order], return_index=True, return_counts=True)
-            for uid, start, size in zip(ids, starts, sizes):
-                if uid == 0:
-                    continue
-                points = xyz[order[start:start + size]]
-                key = int(uid)
-                if anchor == "centroid":
-                    value = points.sum(axis=0)
-                else:
-                    pos = points[:, 2].argmax() if anchor == "highest_point" else points[:, 2].argmin()
-                    value = points[pos].copy()
-                if key not in aggregates:
-                    aggregates[key] = [int(size), value, points.min(axis=0), points.max(axis=0)]
-                else:
-                    old = aggregates[key]
-                    old[0] += int(size)
-                    old[2] = np.minimum(old[2], points.min(axis=0))
-                    old[3] = np.maximum(old[3], points.max(axis=0))
-                    if anchor == "centroid":
-                        old[1] += value
-                    elif (anchor == "highest_point" and value[2] > old[1][2]) or (
-                            anchor == "lowest_point" and value[2] < old[1][2]):
-                        old[1] = value
-    decisions = []
-    removed = []
-    for uid, (size, value, lower, upper) in sorted(aggregates.items()):
-        point = (value / size if anchor == "centroid" else value) + origin
-        keep = owned_anchor(point[:2], region)
-        # Ownership is horizontal: a centroid anchor acts as the XY centroid.
-        decisions.append({"instance": uid, "points": size, "anchor_xy": point[:2].tolist(),
-                          "anchor_xyz": point.tolist(),
-                          "bbox_xyz": [(lower + origin).tolist(), (upper + origin).tolist()],
-                          "source_prediction": prediction,
-                          "normal_kept": keep, "kept": keep,
-                          "disposition": "normal_owner" if keep else "rejected_buffer"})
-        if keep:
-            counts[tile, uid] = size
+        point_count = reader.header.point_count
+        source = None
+        if source_path is not None and point_count and unscaled(reader.header, model):
+            source = PointIndex(source_path, dimensions, query_workers=1, read_only=True)
+            if tile_rows(source.db, tile) is None:
+                source.close()
+                source = None
+
+    def indexed():
+        return indexed_chunks(source.db, source._storage_dtype(), list(dimensions), tile, point_count,
+                              MAX_BATCH_POINTS)
+
+    def decoded(reader):
+        return ((coordinates(record, reader.header, origin), {model.instance: np.asarray(record[model.instance])})
+                for record in read_chunks(reader, MAX_BATCH_POINTS))
+
+    with ExitStack() as stack:
+        if source is not None:
+            stack.enter_context(source)
+            try:
+                aggregates = _instance_aggregates(indexed(), model, anchor)
+            except IndexMismatch:
+                stack.close()
+                source = None
+        if source is None:
+            with laspy.open(file) as reader:
+                aggregates = _instance_aggregates(decoded(reader), model, anchor)
+        decisions = []
+        removed = []
+        for uid, (size, value, lower, upper) in sorted(aggregates.items()):
+            point = (value / size if anchor == "centroid" else value) + origin
+            keep = owned_anchor(point[:2], region)
+            # Ownership is horizontal: a centroid anchor acts as the XY centroid.
+            decisions.append({"instance": uid, "points": size, "anchor_xy": point[:2].tolist(),
+                              "anchor_xyz": point.tolist(),
+                              "bbox_xyz": [(lower + origin).tolist(), (upper + origin).tolist()],
+                              "source_prediction": prediction,
+                              "normal_kept": keep, "kept": keep,
+                              "disposition": "normal_owner" if keep else "rejected_buffer"})
+            if keep:
+                counts[tile, uid] = size
+            else:
+                removed.append(uid)
+        metric = dict(region, tile=tile, input=0, surviving=0, removed=0,
+                      background_input=0, background_removed=0,
+                      kept_instances=len(aggregates) - len(removed), removed_instances=len(removed),
+                      instances=decisions)
+        output = output_dir / file.name
+        shard_path = output_dir / f".index_{tile:05d}.sqlite"
+        kept = CoreOwned(model, removed, region, origin)
+        if source is not None:
+            # The output's index comes from the source index too, in a process
+            # of its own while this one copies the records.
+            pool = stack.enter_context(ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context('spawn')))
+            shard_job = pool.submit(_index_kept, model, tile, source_path, dimensions, point_count, str(shard_path),
+                                    MAX_BATCH_POINTS, kept)
+            index = None
         else:
-            removed.append(uid)
-    metric = dict(region, tile=tile, input=0, surviving=0, removed=0,
-                  background_input=0, background_removed=0,
-                  kept_instances=len(aggregates) - len(removed), removed_instances=len(removed),
-                  instances=decisions)
-    output = output_dir / file.name
-    shard_path = output_dir / f".index_{tile:05d}.sqlite"
+            index = stack.enter_context(PointIndex(shard_path, dimensions, query_workers=1))
+        try:
+            _write_core_owned(file, output, header, origin, model, kept, metric, index, tile,
+                              indexed() if source is not None else None)
+        except IndexMismatch:
+            for key in ("input", "surviving", "background_input", "background_removed"):
+                metric[key] = 0
+            _write_core_owned(file, output, header, origin, model, kept, metric, index, tile, None)
+        if index is not None:
+            index.flush()
+        else:
+            try:
+                shard_job.result()
+            except IndexMismatch:
+                _index_kept_records(model, tile, file, header, origin, kept, shard_path, dimensions)
+    metric["indexed_reads"] = source is not None
+    metric["removed"] = metric["input"] - metric["surviving"]
+    return output, shard_path, metric, counts
+
+
+def _write_core_owned(file, output, header, origin, model, kept, metric, index, tile, chunks):
+    """Copy the kept records; their labels and coordinates come from ``chunks`` (index reads) or the records."""
     indexed_offset = 0
-    dimensions = {n: p.type for n, p in model.dimensions.items()}
-    with laspy.open(file) as reader, laspy.open(output, mode="w", header=header) as writer, \
-            PointIndex(shard_path, dimensions, query_workers=1) as index:
-        for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-            labels = np.asarray(record[model.instance])
-            keep = ~np.isin(labels, removed)
-            background = labels == 0
-            if np.any(background):
-                xyz = coordinates(record, reader.header, origin) + origin
-                keep[background] = owned_background(xyz[background, :2], region)
+    with laspy.open(file) as reader, laspy.open(output, mode="w", header=header) as writer:
+        for record in read_chunks(reader, MAX_BATCH_POINTS):
+            if chunks is not None:
+                xyz, values = next(chunks)
+                labels = values[model.instance]
+            else:
+                xyz = lambda record=record: coordinates(record, reader.header, origin)
+                labels = np.asarray(record[model.instance])
+            keep, background = kept.mask(xyz, labels)
             metric["background_input"] += int(np.count_nonzero(background))
             metric["background_removed"] += int(np.count_nonzero(background & ~keep))
             retained = record[keep]
             writer.write_points(retained)
-            indexed_offset = index_written_record(index, retained, tile, header, origin, model, indexed_offset)
+            if index is not None:
+                indexed_offset = index_written_record(index, retained, tile, header, origin, model, indexed_offset)
             metric["input"] += len(record)
             metric["surviving"] += int(np.count_nonzero(keep))
         write_retained_evlrs(writer, header)
-        index.flush()
-    metric["removed"] = metric["input"] - metric["surviving"]
-    return output, shard_path, metric, counts
+
+
+def _instance_aggregates(chunks, model, anchor):
+    """Per instance: ``[points, anchor statistic, XYZ minimum, XYZ maximum]`` over ``(xyz, values)`` chunks."""
+    aggregates = {}
+    for xyz, values in chunks:
+        labels = values[model.instance]
+        order = np.argsort(labels, kind="stable")
+        ids, starts, sizes = np.unique(labels[order], return_index=True, return_counts=True)
+        for uid, start, size in zip(ids, starts, sizes):
+            if uid == 0:
+                continue
+            points = xyz[order[start:start + size]]
+            key = int(uid)
+            if anchor == "centroid":
+                value = points.sum(axis=0)
+            else:
+                pos = points[:, 2].argmax() if anchor == "highest_point" else points[:, 2].argmin()
+                value = points[pos].copy()
+            if key not in aggregates:
+                aggregates[key] = [int(size), value, points.min(axis=0), points.max(axis=0)]
+            else:
+                old = aggregates[key]
+                old[0] += int(size)
+                old[2] = np.minimum(old[2], points.min(axis=0))
+                old[3] = np.maximum(old[3], points.max(axis=0))
+                if anchor == "centroid":
+                    old[1] += value
+                elif (anchor == "highest_point" and value[2] > old[1][2]) or (
+                        anchor == "lowest_point" and value[2] < old[1][2]):
+                    old[1] = value
+    return aggregates
+
+
+class CoreOwned:
+    """The core filter's kept records of a chunk: owned instances and core-owned background."""
+
+    def __init__(self, model, removed, region, origin):
+        self.instance, self.removed, self.region, self.origin = model.instance, removed, region, origin
+
+    def mask(self, xyz, labels):
+        """``(keep, background)`` from local ``xyz`` (or a function giving them) and instance ``labels``."""
+        keep = ~np.isin(labels, self.removed)
+        background = labels == 0
+        if np.any(background):
+            xyz = (xyz() if callable(xyz) else xyz) + self.origin
+            keep[background] = owned_background(xyz[background, :2], self.region)
+        return keep, background
+
+    def __call__(self, offset, xyz, values):
+        return self.mask(xyz, values[self.instance])[0]
 
 
 def ownership_candidates(index, pts, tile, competitors, regions, origin, model,
@@ -241,6 +331,8 @@ def ownership_candidates(index, pts, tile, competitors, regions, origin, model,
     from spatial_query_cache import REGION_SIZE, region_entry
     cell = tuple(np.floor(pts[0, :2] / REGION_SIZE).astype(np.int64))
     limit = distance_limit(pts, DUPLICATE_RADIUS)
+    reachable = set(index.search_order(pts, DUPLICATE_RADIUS if block_limit is None else block_limit)
+                    if index._cache_ready else competitors)
     for other, bounds in sorted(competitors.items()):
         allowed = inside_xy(pts, bounds)
         if not background_only:
@@ -248,6 +340,9 @@ def ownership_candidates(index, pts, tile, competitors, regions, origin, model,
         if not np.any(allowed):
             continue
         if occupancy is not None and not occupancy.may_contain(other, pts[allowed], limit):
+            continue
+        # After the occupancy check, so its skip counts in the report stay the same.
+        if other not in reachable:
             continue
         select = None if background_only else lambda xyz: preferred_core(
             xyz, other, tile, regions, origin)
@@ -306,8 +401,11 @@ def assign_shared_points(model, files, source_index, regions, mapping, output_di
              output_dir, origin, overlaps, background_only, occupancy, query_workers)
             for tile, file in enumerate(files)]
     outputs = []
+    indexed = report["parallelism"][f"{stage}_indexed_reads"] = []
     for output, shard_path, metric, (groups, points) in map_tiles(
             _assign_tile, jobs, processes=processes, sizes=[Path(f).stat().st_size for f in files]):
+        if metric.pop('indexed_reads'):
+            indexed.append(metric['tile'])
         stats["tiles"].append(metric)
         index.append_index(shard_path)
         shard_path.unlink()
@@ -322,7 +420,6 @@ def assign_shared_points(model, files, source_index, regions, mapping, output_di
 def _assign_tile(model, tile, file, tiles, source_path, dimensions, regions, mapping, output_dir, origin,
                  overlaps, background_only, occupancy, query_workers):
     """Shared-point ownership for one tile; returns ``(output, index_file, metric, occupancy skips)``."""
-    from ownership_spatial_blocks import OwnershipQuerySpool
     # Count this tile's pruning on a private copy; the caller adds the counts.
     occupancy = copy.copy(occupancy)
     occupancy.skipped_groups = occupancy.skipped_points = 0
@@ -333,30 +430,30 @@ def _assign_tile(model, tile, file, tiles, source_path, dimensions, regions, map
     output = output_dir / file.name
     started = perf_counter()
     shard_path = output_dir / f".index_{tile:05d}.sqlite"
-    with tempfile.TemporaryDirectory(prefix='.ownership-blocks-', dir=output_dir.parent) as scratch, \
-            PointIndex(source_path, dimensions, query_workers=query_workers, read_only=True) as source_index, \
-            PointIndex(shard_path, dimensions, query_workers=1) as index:
-        with closing(OwnershipQuerySpool(Path(scratch) / 'queries.sqlite')) as spool:
+    with scratch_directory('.ownership-blocks-', dir=output_dir.parent) as scratch, \
+            PointIndex(source_path, dimensions, query_workers=query_workers, read_only=True) as source_index:
+        with laspy.open(file) as reader:
+            header = copy_single_source_header(reader.header)
+            point_count = reader.header.point_count
+            # The source index holds this tile's records as written: read
+            # coordinates and labels from it instead of decoding the file.
+            indexed = (point_count > 0 and unscaled(reader.header, model)
+                       and tile_rows(source_index.db, tile) is not None)
+        stage = (scratch, model, tile, mapping, background_only, competitors, regions, origin)
+        if indexed:
+            try:
+                spool = _staged_queries(*stage, indexed_chunks(
+                    source_index.db, source_index._storage_dtype(), list(dimensions), tile, point_count,
+                    MAX_BATCH_POINTS))
+            except IndexMismatch:
+                indexed = False
+        if not indexed:
             with laspy.open(file) as reader:
-                header = copy_single_source_header(reader.header)
-                point_count = reader.header.point_count
-                offset = 0
-                for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-                    xyz = coordinates(record, reader.header, origin)
-                    labels = mapped_values(model, {model.instance: np.asarray(record[model.instance])},
-                                           tile, mapping)[model.instance]
-                    eligible = (labels == 0) if background_only else (labels > 0)
-                    if not background_only:
-                        could_lose = np.zeros(len(record), dtype=bool)
-                        for other, bounds in competitors.items():
-                            could_lose |= (inside_xy(xyz, bounds) &
-                                           preferred_core(xyz, other, tile, regions, origin))
-                        eligible &= could_lose
-                    positions = np.flatnonzero(eligible)
-                    for group in spatial_batches(xyz[positions]):
-                        rows = positions[group]
-                        spool.add(xyz[rows], rows + offset, DUPLICATE_RADIUS)
-                    offset += len(record)
+                spool = _staged_queries(*stage, (
+                    (coordinates(record, reader.header, origin), {model.instance: np.asarray(record[model.instance])})
+                    for record in read_chunks(reader, MAX_BATCH_POINTS)))
+        metric['indexed_reads'] = indexed
+        with closing(spool):
             metric['query_staging_seconds'] = perf_counter() - started
             removed = (np.memmap(Path(scratch) / 'removed.bin', mode='w+', dtype=bool,
                                  shape=(point_count,)) if point_count else np.empty(0, dtype=bool))
@@ -402,18 +499,120 @@ def _assign_tile(model, tile, file, tiles, source_path, dimensions, regions, map
             metric.update(query_seconds=perf_counter() - started,
                           query_points=spool.points, query_blocks=spool.blocks)
             started = perf_counter()
-            offset = indexed_offset = 0
-            with laspy.open(file) as reader, laspy.open(output, mode='w', header=header) as writer:
-                for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-                    keep = ~removed[offset:offset + len(record)]
-                    retained = record[keep]
-                    writer.write_points(retained)
-                    indexed_offset = index_written_record(index, retained, tile, header, origin, model, indexed_offset)
-                    metric['removed'] += len(record) - len(retained)
-                    offset += len(record)
-                write_retained_evlrs(writer, header)
+            with ExitStack() as stack:
+                if indexed:
+                    # The output's index comes from the source index too, in a
+                    # process of its own while this one copies the records.
+                    removed.flush()
+                    pool = stack.enter_context(ProcessPoolExecutor(
+                        max_workers=1, mp_context=multiprocessing.get_context('spawn')))
+                    shard_job = pool.submit(_index_kept, model, tile, str(source_path), dimensions, point_count,
+                                            str(shard_path), MAX_BATCH_POINTS,
+                                            Unremoved(Path(scratch) / 'removed.bin', point_count))
+                    index = None
+                else:
+                    index = stack.enter_context(PointIndex(shard_path, dimensions, query_workers=1))
+                offset = indexed_offset = 0
+                with laspy.open(file) as reader, laspy.open(output, mode='w', header=header) as writer:
+                    for record in read_chunks(reader, MAX_BATCH_POINTS):
+                        keep = ~removed[offset:offset + len(record)]
+                        retained = record[keep]
+                        writer.write_points(retained)
+                        if index is not None:
+                            indexed_offset = index_written_record(index, retained, tile, header, origin, model,
+                                                                  indexed_offset)
+                        metric['removed'] += len(record) - len(retained)
+                        offset += len(record)
+                    write_retained_evlrs(writer, header)
+                if index is not None:
+                    index.flush()
+                else:
+                    try:
+                        shard_job.result()
+                    except IndexMismatch:
+                        _index_kept_records(model, tile, file, header, origin,
+                                            lambda offset, xyz, values: ~removed[offset:offset + len(xyz)],
+                                            shard_path, dimensions)
             metric['write_and_index_seconds'] = perf_counter() - started
             if isinstance(removed, np.memmap):
                 removed._mmap.close()
-        index.flush()
     return output, shard_path, metric, (occupancy.skipped_groups, occupancy.skipped_points)
+
+
+def _staged_queries(scratch, model, tile, mapping, background_only, competitors, regions, origin, chunks):
+    """A query spool of the points that may lose ownership, from ``(xyz, values)`` chunks in record order."""
+    from ownership_spatial_blocks import OwnershipQuerySpool
+    path = Path(scratch) / 'queries.sqlite'
+    path.unlink(missing_ok=True)
+    spool = OwnershipQuerySpool(path)
+    try:
+        offset = 0
+        for xyz, values in chunks:
+            labels = mapped_values(model, {model.instance: values[model.instance]}, tile, mapping)[model.instance]
+            eligible = (labels == 0) if background_only else (labels > 0)
+            if not background_only:
+                could_lose = np.zeros(len(xyz), dtype=bool)
+                for other, bounds in competitors.items():
+                    could_lose |= (inside_xy(xyz, bounds) &
+                                   preferred_core(xyz, other, tile, regions, origin))
+                eligible &= could_lose
+            positions = np.flatnonzero(eligible)
+            for group in spatial_batches(xyz[positions]):
+                rows = positions[group]
+                spool.add(xyz[rows], rows + offset, DUPLICATE_RADIUS)
+            offset += len(xyz)
+    except BaseException:
+        spool.close()
+        raise
+    return spool
+
+
+def unscaled(header, model):
+    """Whether the instance labels are stored raw, as ``prediction_values`` indexes them."""
+    dimension = header.point_format.dimension_by_name(model.instance)
+    return getattr(dimension, 'scales', None) is None and getattr(dimension, 'offsets', None) is None
+
+
+def _index_kept_records(model, tile, file, header, origin, kept, shard_path, dimensions):
+    """The write pass's ``index_written_record`` rows, decoding the file again."""
+    shard_path.unlink(missing_ok=True)
+    with PointIndex(shard_path, dimensions, query_workers=1) as index, laspy.open(file) as reader:
+        offset = indexed_offset = 0
+        for record in read_chunks(reader, MAX_BATCH_POINTS):
+            xyz = coordinates(record, reader.header, origin)
+            retained = record[kept(offset, xyz, prediction_values(record, model.dimensions))]
+            indexed_offset = index_written_record(index, retained, tile, header, origin, model, indexed_offset)
+            offset += len(record)
+        index.flush()
+
+
+class Unremoved:
+    """Ownership's kept records: those not marked in the ``removed`` file."""
+
+    def __init__(self, path, point_count):
+        self.path, self.point_count, self.removed = str(path), point_count, None
+
+    def __getstate__(self):
+        return {'path': self.path, 'point_count': self.point_count, 'removed': None}
+
+    def __call__(self, offset, xyz, values):
+        if self.removed is None:
+            self.removed = np.memmap(self.path, mode='r', dtype=bool, shape=(self.point_count,))
+        return ~self.removed[offset:offset + len(xyz)]
+
+
+def _index_kept(model, tile, source_path, dimensions, point_count, shard_path, chunk_points, kept):
+    """``index_written_record``'s rows for the records ``kept(offset, xyz, values)`` keeps, from the source index."""
+    with PointIndex(source_path, dimensions, query_workers=1, read_only=True) as source, \
+            PointIndex(shard_path, dimensions, query_workers=1) as index:
+        offset = indexed_offset = 0
+        for xyz, values in indexed_chunks(source.db, source._storage_dtype(), list(dimensions), tile, point_count,
+                                          chunk_points):
+            keep = kept(offset, xyz, values)
+            retained = {name: data[keep] for name, data in values.items()}
+            validate_labels(model, retained, 'written tile')
+            count = int(np.count_nonzero(keep))
+            index.add(tile, xyz[keep], retained, np.arange(indexed_offset, indexed_offset + count, dtype=np.int64))
+            indexed_offset += count
+            offset += len(xyz)
+        index.flush()

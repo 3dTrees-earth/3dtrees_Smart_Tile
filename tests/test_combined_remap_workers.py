@@ -30,7 +30,7 @@ def test_combined_remap_uses_worker_budget_with_identical_outputs(tmp_path,monke
         else:
             reports.append(merge_collections(**args))
     assert reports[1]['parallelism']['enrichment_processes']==4
-    assert reports[1]['parallelism']['max_pending_batches']==8
+    assert reports[1]['parallelism']['max_pending_batches']==32
     assert reports[0]['original_coverage']==reports[1]['original_coverage']
     if not missing:
         np.testing.assert_array_equal(laspy.read(tmp_path/'case1/original_with_predictions/raw.las').points.array,laspy.read(tmp_path/'case4/original_with_predictions/raw.las').points.array)

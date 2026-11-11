@@ -507,6 +507,8 @@ class CreateMergedFileTests(unittest.TestCase):
         self.assertIn("dropped dimensions", message)
         self.assertFalse(output.exists())
 
+    # Fake COPC bytes have no LAS header to count.
+    @mock.patch("main_create_merged_file._require_all_points", mock.Mock())
     def test_prepare_copc_inputs_uses_tiling_converter(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -553,6 +555,8 @@ class CreateMergedFileTests(unittest.TestCase):
             self.assertEqual(outputs, [copc])
             convert.assert_not_called()
 
+    # Fake COPC bytes have no LAS header to count.
+    @mock.patch("main_create_merged_file._require_all_points", mock.Mock())
     def test_prepare_copc_inputs_rebuilds_existing_copc_without_fresh_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -597,6 +601,8 @@ class CreateMergedFileTests(unittest.TestCase):
 
             self.assertEqual(outputs, [copc])
 
+    # Fake COPC bytes have no LAS header to count.
+    @mock.patch("main_create_merged_file._require_all_points", mock.Mock())
     def test_prepare_copc_inputs_keeps_raw_and_copc_only_sources(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -698,6 +704,8 @@ class CreateMergedFileTests(unittest.TestCase):
             self.assertNotIn(unrelated, outputs)
             convert.assert_not_called()
 
+    # Fake COPC bytes have no LAS header to count.
+    @mock.patch("main_create_merged_file._require_all_points", mock.Mock())
     def test_prepare_copc_inputs_ignores_unreadable_staged_copc(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -771,3 +779,167 @@ def test_chunk_pipeline_only_reads_and_merges(tmp_path):
     kinds = [stage.get("type") for stage in _chunked_prod_merged_pipeline(
         sources, tmp_path / "raw.las", "([0,1],[0,1])", {})["pipeline"]]
     assert kinds == ["readers.copc", "readers.copc", "filters.merge", "writers.las"]
+
+
+def _raw_chunk(path, count=6000, seed=4):
+    """An uncompressed LAS 1.4 chunk with GPS times, equal times and an ExtraBytes dimension."""
+    import laspy
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    header = laspy.LasHeader(point_format=7, version="1.4")
+    header.scales, header.offsets = np.full(3, 0.001), np.zeros(3)
+    header.add_extra_dim(laspy.ExtraBytesParams(name="PredInstance", type=np.uint32))
+    las = laspy.LasData(header)
+    xyz = np.round(rng.uniform(0, 3, (count, 3)), 3)
+    xyz[200:220] = xyz[200]
+    las.x, las.y, las.z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+    las.gps_time = rng.uniform(0, 100, count)
+    las.gps_time[::5] = 7.0
+    las.PredInstance = rng.integers(0, 40, count)
+    las.write(str(path))
+    return las
+
+
+def _whole_chunk_pick(raw_file, chunk_file, resolution, lo, hi):
+    """The pick before streaming: the whole chunk in memory."""
+    import laspy
+    import numpy as np
+    from main_create_merged_file import select_voxel_points
+    from voxel_grid import voxel_keys
+    cloud = laspy.read(str(raw_file))
+    columns = voxel_keys(np.asarray(cloud.points.array["X"])[:, None], cloud.header.scales[:1],
+                         cloud.header.offsets[:1], resolution)[:, 0]
+    owned = np.ones(len(columns), dtype=bool)
+    if lo is not None:
+        owned &= columns >= lo
+    if hi is not None:
+        owned &= columns < hi
+    cloud.points = cloud.points[owned]
+    cloud.points = cloud.points[select_voxel_points(cloud.points, resolution)]
+    cloud.write(str(chunk_file))
+
+
+def test_streamed_chunk_pick_writes_the_whole_chunk_pick(tmp_path):
+    import main_create_merged_file as module
+    raw = tmp_path / "raw.las"
+    _raw_chunk(raw)
+    for lo, hi in [(None, None), (4, 11), (None, 9), (12, None)]:
+        expected, streamed = tmp_path / "whole.laz", tmp_path / "streamed.laz"
+        _whole_chunk_pick(raw, expected, 0.25, lo, hi)
+        for batch in (1, 250, 10**9):  # one column per group, a few columns, one group
+            with mock.patch.object(module, "SELECTION_POINTS", batch):
+                assert module._select_chunk_points(raw, streamed, 0.25, lo, hi)
+            assert streamed.read_bytes() == expected.read_bytes(), (lo, hi, batch)
+
+
+def test_streamed_chunk_pick_reports_an_empty_chunk(tmp_path):
+    import main_create_merged_file as module
+    raw = tmp_path / "raw.las"
+    _raw_chunk(raw)
+    assert not module._select_chunk_points(raw, tmp_path / "out.laz", 0.25, 100, None)
+    assert not (tmp_path / "out.laz").exists()
+
+
+def test_merge_in_batches_keeps_points_and_order(tmp_path):
+    import laspy
+    import numpy as np
+    import shutil
+    import main_create_merged_file as module
+    if not shutil.which("pdal"):
+        import pytest
+        pytest.skip("pdal not available")
+    files, arrays = [], []
+    for index in range(7):
+        path = tmp_path / f"chunk{index}.las"
+        arrays.append(_raw_chunk(path, count=300, seed=index).points.array)
+        files.append(path)
+    with mock.patch.object(module, "MERGE_BATCH_FILES", 2):
+        merged = module._merge_in_batches(files, tmp_path, {})
+    assert len(merged) == 2
+    together = np.concatenate([laspy.read(str(path)).points.array for path in merged])
+    assert np.array_equal(together, np.concatenate(arrays))
+    assert module._merge_in_batches(files[:2], tmp_path, {}) == files[:2]
+
+
+def test_pdal_error_names_the_crash_signal():
+    import subprocess
+    from main_create_merged_file import _pdal_error
+    assert _pdal_error(subprocess.CompletedProcess(["pdal"], -11, "", "")) == "PDAL was killed by SIGSEGV"
+    assert "code 3" in _pdal_error(subprocess.CompletedProcess(["pdal"], 3, "", ""))
+    assert _pdal_error(subprocess.CompletedProcess(["pdal"], 1, "", "bad bounds")) == "bad bounds"
+
+
+def test_open_file_limit_is_raised_to_the_hard_limit():
+    import resource
+    from main_create_merged_file import _raise_open_file_limit
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(256, hard), hard))
+        _raise_open_file_limit()
+        assert resource.getrlimit(resource.RLIMIT_NOFILE)[0] == hard or hard == resource.RLIM_INFINITY
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_record_order_matches_the_structured_sort():
+    import numpy as np
+    from main_create_merged_file import record_order
+    rng = np.random.default_rng(5)
+    plain = np.zeros(4000, dtype=[("X", "<i4"), ("intensity", "<u2"), ("scan_angle", "<i2"), ("gps_time", "<f8")])
+    for name in plain.dtype.names:
+        plain[name] = rng.integers(-3, 3, len(plain))  # many ties across fields
+    plain["gps_time"][::50] = np.nan
+    assert np.array_equal(record_order(plain), np.argsort(plain, kind="stable"))
+    vector = np.zeros(500, dtype=[("X", "<i4"), ("normal", "<f4", (3,))])
+    vector["X"] = rng.integers(0, 4, len(vector))
+    vector["normal"] = rng.integers(0, 3, (len(vector), 3))
+    assert np.array_equal(record_order(vector), np.argsort(vector, kind="stable"))
+
+
+def _write_points(path, count):
+    import laspy
+    import numpy as np
+    header = laspy.LasHeader(point_format=3, version="1.4")
+    header.scales, header.offsets = np.full(3, 0.01), np.zeros(3)
+    las = laspy.LasData(header)
+    las.x = las.y = las.z = np.arange(count, dtype=float)
+    las.write(str(path))
+
+
+def test_prepare_copc_inputs_rejects_a_copc_short_of_its_source(tmp_path):
+    import pytest
+    input_dir, output_dir = tmp_path / "input", tmp_path / "out"
+    input_dir.mkdir()
+    _write_points(input_dir / "original.laz", 5)
+    convert = mock.Mock(side_effect=lambda _, output, **__: _write_points(output, 4) or True)
+    with mock.patch.dict(sys.modules, {"tile_copc": mock.Mock(convert_laz_to_copc=convert)}), \
+            mock.patch("main_create_merged_file.write_copc_stage_manifest_entry") as manifest:
+        with pytest.raises(RuntimeError, match="COPC holds 4 of 5 points"):
+            prepare_copc_inputs(input_dir, output_dir)
+    assert not (output_dir / "original_with_predictions_copc/original.copc.laz").exists()
+    manifest.assert_not_called()
+
+
+def test_chunk_merge_laz_fallback_rejects_a_copc_short_of_its_chunks(tmp_path):
+    import pytest
+    output = tmp_path / "prod_merged_1cm.copc.laz"
+
+    def run_pipeline(pipeline, *_):
+        target = Path(pipeline["pipeline"][-1]["filename"])
+        if target.suffix != ".laz" or target.name.endswith(".copc.laz"):
+            return mock.Mock(returncode=1, stdout="", stderr="direct COPC merge failed")
+        _write_points(target, 5)
+        return mock.Mock(returncode=0, stdout="", stderr="")
+
+    convert = mock.Mock(side_effect=lambda _, target, **__: _write_points(target, 4) or True)
+    with mock.patch("main_create_merged_file._untwine_chunk_files_to_copc", return_value=(False, "untwine failed")), \
+            mock.patch("main_create_merged_file._run_pdal_pipeline", side_effect=run_pipeline), \
+            mock.patch("main_create_merged_file._select_chunk_points", side_effect=_copy_raw_chunk), \
+            mock.patch("subsample_outputs.convert_laz_output_to_copc", convert), \
+            mock.patch("main_create_merged_file._finalize_product") as finalize:
+        (tmp_path / "work").mkdir()
+        with pytest.raises(RuntimeError, match="COPC holds 4 of 5 points"):
+            _merge_prod_chunks([tmp_path / "chunk.laz"], output, "copc.laz", tmp_path / "work",
+                               tmp_path / "source.copc.laz", {"scale_x": 0.01})
+    assert not output.exists()
+    finalize.assert_not_called()
