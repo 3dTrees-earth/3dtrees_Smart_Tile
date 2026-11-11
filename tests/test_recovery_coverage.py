@@ -125,3 +125,44 @@ def test_core_first_and_unreachable_tiles_do_not_change_coverage(tmp_path):
             # Only tiles whose extent reaches the group are searched, owners first.
             order = index.search_order(np.array([[15.0, 5.0, 1.0]]), .01, cores)
             assert order[0] == 1 and 3 not in order and 5 not in order
+
+
+def test_block_coverage_equals_covered_per_chunk(tmp_path):
+    """Spilled, block-wise support equals ``covered`` on the same chunks, bounds included."""
+    from block_coverage import CoverageSpill, point_limits
+    rng = np.random.default_rng(2803)
+    path = tmp_path / 'owned.db'
+    clouds = []
+    with PointIndex(path, {'tree': np.uint32}) as index:
+        for tile in range(4):
+            x0 = 30.0 * tile
+            xyz = rng.uniform([x0 - 3, -3, 0], [x0 + 33, 40, 5], (4000, 3))
+            clouds.append(xyz)
+            labels = rng.integers(0, 3, len(xyz), dtype=np.uint32)
+            for start in range(0, len(xyz), 500):
+                index.add(tile, xyz[start:start + 500], {'tree': labels[start:start + 500]}, np.arange(start, start + 500))
+        index.flush()
+        chunks, expected = [], []
+        for tile in range(4):
+            base = np.concatenate([clouds[tile][:2000], rng.uniform([30.0 * tile - 3, -3, 0], [30.0 * tile + 33, 40, 5], (1000, 3))])
+            near = base + rng.uniform(-.012, .012, base.shape)
+            # Points exactly at the bound of a high-Z group: decided by that group's 8-ULP allowance.
+            near[:2] = [[30.0 * tile, 0, 1e6], [30.0 * tile + .01 + 4 * np.spacing(1e6), 0, 0]]
+            for start in range(0, len(near), 700):
+                chunk = near[start:start + 700]
+                chunks.append((tile, np.full(len(chunk), 7 + tile), chunk))
+                expected.append(index.covered(chunk, .01, positive_dimension='tree'))
+    spill = CoverageSpill(tmp_path / 'spill')
+    for tile, labels, xyz in chunks:
+        spill.add(tile, labels, xyz, point_limits(xyz, .01))
+    want = {(int(t), float(x), float(y), float(z))
+            for (t, _, xyz), covered in zip(chunks, expected) for x, y, z in xyz[~covered]}
+    for workers in (1, 3):
+        if workers == 3:
+            spill = CoverageSpill(tmp_path / 'spill3')
+            for tile, labels, xyz in chunks:
+                spill.add(tile, labels, xyz, point_limits(xyz, .01))
+        got = set()
+        for tiles, labels, xyz in spill.uncovered(path, {'tree': np.uint32}, 'tree', workers=workers):
+            got |= {(int(t), float(x), float(y), float(z)) for t, (x, y, z) in zip(tiles, xyz)}
+        assert got == want and 0 < len(want) < sum(len(c[2]) for c in chunks)

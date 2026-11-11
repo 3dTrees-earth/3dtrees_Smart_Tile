@@ -18,7 +18,7 @@ from merge_stages import DUPLICATE_RADIUS, index_file
 from point_cloud_metadata import copy_single_source_header, write_retained_evlrs
 from orphan_claims import claim_coordinates, select_claims
 from parallel_tiles import map_tiles
-from parallel_index_queries import IndexQueries
+from block_coverage import CoverageSpill, point_limits
 
 
 def _positive_support(index, xyz, instance_dimension):
@@ -76,21 +76,26 @@ class _ClaimRows:
         self.tiles, self.labels, self.locs, self.rows = [], [], [], 0
 
 
-def _claim_candidates(model, dense_files, rejected, regions, overlaps, origin):
-    """Yield ``((tile, labels), xyz)`` for rejected-instance points inside any relevant core."""
-    for tile, file in enumerate(dense_files):
-        if not rejected[tile]:
-            continue
-        with laspy.open(file) as reader:
-            for record in reader.chunk_iterator(MAX_BATCH_POINTS):
-                labels = np.asarray(record[model.instance])
-                eligible = np.isin(labels, list(rejected[tile]))
-                if not np.any(eligible):
-                    continue
-                xyz = coordinates(record, reader.header, origin)
-                eligible &= _core_union_mask(xyz, tile, regions, overlaps, origin)
-                if np.any(eligible):
-                    yield (tile, labels[eligible]), xyz[eligible]
+def _claim_candidates(model, tile, file, rejected, regions, overlaps, origin):
+    """Yield ``(labels, xyz)`` per chunk for the tile's rejected-instance points inside any relevant core."""
+    with laspy.open(file) as reader:
+        for record in reader.chunk_iterator(MAX_BATCH_POINTS):
+            labels = np.asarray(record[model.instance])
+            eligible = np.isin(labels, list(rejected))
+            if not np.any(eligible):
+                continue
+            xyz = coordinates(record, reader.header, origin)
+            eligible &= _core_union_mask(xyz, tile, regions, overlaps, origin)
+            if np.any(eligible):
+                yield labels[eligible], xyz[eligible]
+
+
+def _spill_candidates(model, tile, file, rejected, regions, overlaps, origin, folder):
+    """Worker: spill one tile's candidates with the bound ``covered`` gives each point (per chunk)."""
+    spill = CoverageSpill(folder)
+    for labels, xyz in _claim_candidates(model, tile, file, rejected, regions, overlaps, origin):
+        spill.add(tile, labels, xyz, point_limits(xyz, DUPLICATE_RADIUS))
+    return spill.strips
 
 
 def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
@@ -127,21 +132,26 @@ def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
         db.execute('CREATE INDEX claims_loc ON claims(loc)')
         db.execute('CREATE TABLE covered (loc BLOB PRIMARY KEY) WITHOUT ROWID')
         started = perf_counter()
-        # Support checks are GIL-bound per-cell searches on the finished owned
-        # index: answer them in worker processes; claims form a set, so only
-        # their content (not insertion order) matters.
-        # Rejected copies are usually covered by the tile whose core holds them: search it first.
-        cores = {tile: tuple((lo - o, hi - o) for (lo, hi), o in zip(region['core'], origin[:2]))
-                 for tile, region in enumerate(regions)}
-        with IndexQueries(owned_index, DUPLICATE_RADIUS, method='covered', positive_dimension=model.instance,
-                          cores=cores, workers=max(1, int(workers)) if any(rejected) else 1) as queries:
-            claims = _ClaimRows(db)
-            for (tile, labels), xyz, covered in queries.map(
-                    _claim_candidates(model, dense_files, rejected, regions, overlaps, origin)):
-                uncovered = ~covered
-                if np.any(uncovered):
-                    claims.add(tile, labels[uncovered], xyz[uncovered])
-            claims.flush()
+        # Support is answered block by block from the finished owned index
+        # (block_coverage); claims form a set, so their order does not matter.
+        spill = CoverageSpill(output_dir / '.claim_points')
+        # Each tile's candidates are read and spilled in a process of its own.
+        jobs = [(model, tile, file, rejected[tile], regions, overlaps, origin, spill.folder / f'tile_{tile:05d}')
+                for tile, file in enumerate(dense_files) if rejected[tile]]
+        for strips in map_tiles(_spill_candidates, jobs, processes=max(1, int(workers)),
+                                sizes=[Path(job[2]).stat().st_size for job in jobs]):
+            spill.adopt(strips)
+        owned_index.flush()
+        claims = _ClaimRows(db)
+        for tiles, labels, xyz in spill.uncovered(owned_index.path, owned_index.dimensions, model.instance,
+                                                  workers=max(1, int(workers))):
+            for tile in np.unique(tiles):
+                mine = tiles == tile
+                claims.add(int(tile), labels[mine], xyz[mine])
+        claims.flush()
+        for folder in spill.folder.iterdir():
+            folder.rmdir()
+        spill.folder.rmdir()
         db.commit()
         metric['claim_seconds'] = perf_counter() - started
         metric['candidates'] = db.execute(
@@ -180,8 +190,12 @@ def recover_orphaned_instances(model, dense_files, owned_files, owned_index,
         sizes = [Path(dense).stat().st_size if tile in by_tile else Path(owned).stat().st_size
                  for tile, (dense, owned) in enumerate(zip(dense_files, owned_files))]
         outputs = []
+        # At most a third of the workers' shards (each the size of a tile index)
+        # wait on disk to be appended.
+        ahead = max(2, int(workers) // 3)
+        report.setdefault('parallelism', {})['orphan_output_tiles_ahead'] = ahead
         for tile, (output, revised, shard_path) in enumerate(
-                map_tiles(_recovered_tile, jobs, processes=max(1, int(workers)), sizes=sizes)):
+                map_tiles(_recovered_tile, jobs, processes=max(1, int(workers)), sizes=sizes, ahead=ahead)):
             if revised is not None:
                 decisions[tile]['surviving'] = revised
                 decisions[tile]['removed'] = decisions[tile]['input'] - revised
