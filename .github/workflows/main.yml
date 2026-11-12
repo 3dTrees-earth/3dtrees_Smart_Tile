@@ -43,6 +43,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -51,3 +52,32 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Singularity image for Galaxy: Galaxy pulls oras://...:<version>-sif, Docker stays for local use.
+      # Runs for release tags only (also a manual run on a tag), so no "main-sif" tags appear.
+      - name: Set up Apptainer
+        if: github.ref_type == 'tag'
+        uses: eWaterCycle/setup-apptainer@v3
+        with:
+          apptainer-version: 1.5.4
+
+      - name: Build SIF from the pushed digest and push it via ORAS
+        if: github.ref_type == 'tag'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          IMAGE="${IMAGE,,}"  # OCI references are lower case; the repository name is not
+          echo "$GHCR_TOKEN" | apptainer registry login -u "$ACTOR" --password-stdin docker://ghcr.io
+          echo "$GHCR_TOKEN" | apptainer registry login -u "$ACTOR" --password-stdin oras://ghcr.io
+          # Built from the digest just pushed, so the Docker image and the SIF hold the same content.
+          apptainer build tool.sif "docker://${IMAGE}@${DIGEST}"
+          apptainer exec --cleanenv --contain tool.sif python -u /src/run.py --help > /dev/null
+          apptainer push tool.sif "oras://${IMAGE}:${VERSION}-sif"
+          apptainer pull --force check.sif "oras://${IMAGE}:${VERSION}-sif"
+          [ "$(sha256sum < tool.sif)" = "$(sha256sum < check.sif)" ]
+          echo "SIF: oras://${IMAGE}:${VERSION}-sif ($(du -h tool.sif | cut -f1), from ${DIGEST})" >> "$GITHUB_STEP_SUMMARY"
