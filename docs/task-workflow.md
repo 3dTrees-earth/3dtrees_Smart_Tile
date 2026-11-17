@@ -134,7 +134,9 @@ the processed spacing, even where report or baseline names contain `1cm`.
 - User-facing `prod_merged_*` products come from enriched originals via
   `create_merged_file` (or `--produce-merged-file` on merge/remap). Product
   subsampling keeps real source points. PLY cannot carry LAS CRS/VLR metadata.
-- RCT tree/QSM tables remain separate aligned outputs. SmartTile produces no DTM.
+- RCT tree/QSM tables remain separate aligned outputs. RCT terrain meshes are
+  retained per original and rasterized together into `rct_terrain.tif`; SmartTile
+  does not estimate terrain from the point cloud.
 
 ## Original-resolution handoff
 

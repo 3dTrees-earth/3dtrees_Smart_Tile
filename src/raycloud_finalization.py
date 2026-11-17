@@ -18,7 +18,7 @@ from ply_crs import crs_comment_from_file
 
 
 INSTANCE = "PredInstance_RCT"
-OCTREE = "octree"  # the viewer's QSM octree of the run, as qsm_merge writes it
+OCTREE = "octree"  # the viewer's QSM octree of the RCT run
 MAPPING_FILE = "rct_instance_mapping.json"
 
 
@@ -163,7 +163,7 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
 
 
 def _write_octree(output_dir, files):
-    """The viewer's QSM octree of RCT's own trees, one per run (``qsm_octree``, as for an existing segmentation).
+    """The viewer's QSM octree of RCT's own trees, one per run (``qsm_octree``).
 
     Built from each original's tree-info table (its tree table without
     ``--treeinfo``) and tree mesh; a tree in several originals is in the octree

@@ -1,8 +1,7 @@
 """The QSM octree the viewer reads beside the RayCloudTools files of a run: the
 only file the viewer adds to the original outputs (3DT-2626). SmartTile writes
-one per dataset and instance dimension in `merge --instance-manifest` (QSMs for
-an existing segmentation), internal to the viewer; the files per original stay
-the products. Derived from the results viewer's
+one per run for RCT's own trees during merge and remap, internal to the viewer;
+the files per original stay the products. Derived from the results viewer's
 `scripts/results_view/qsm_octree.py` (contract v1, one original); v2 indexes
 several originals.
 

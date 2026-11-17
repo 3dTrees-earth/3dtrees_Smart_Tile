@@ -8,7 +8,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from collection_folders import original_collections  # noqa: E402
 from raycloud_finalization import OCTREE, _write_octree  # noqa: E402
-from test_qsm_per_segmentation import INFO_HEADER, TREES_HEADER, tree_mesh  # noqa: E402
+import numpy as np
+from raycloud_meshes import FACE as TREE_FACE, VERTEX  # noqa: E402
+
+
+TREES_HEADER = ("# Tree file. Optional per-tree attributes (e.g. 'height,crown_radius, ') followed by 'x,y,z,radius' "
+                "and any additional per-segment attributes:\npredinstance, x,y,z,radius,parent_id,section_id\n")
+
+
+INFO_HEADER = ("# Tree file. Optional per-tree attributes (e.g. 'height,crown_radius, ') followed by 'x,y,z,radius' "
+               "and any additional per-segment attributes:\npredinstance,height,crown_radius,dimension,monocotal,DBH,"
+               "bend,branch_slope, x,y,z,radius,parent_id,section_id,volume,diameter,length,strength,min_strength,"
+               "dominance,angle,children\n")
+
+
+def tree_mesh(path, trees):
+    """A mesh as RCT --instance-dimension writes it: per tree one triangle, tree_id = instance ID."""
+    vertices = np.zeros(3 * len(trees), dtype=VERTEX)
+    faces = np.zeros(len(trees), dtype=TREE_FACE)
+    for k, (uid, (x, y)) in enumerate(trees.items()):
+        vertices["xyz"][3 * k:3 * k + 3] = [(x, y, 0), (x + 0.1, y, 0), (x, y, 2)]
+        faces[k] = (3, (3 * k, 3 * k + 1, 3 * k + 2), uid)
+    header = ["ply", "format binary_little_endian 1.0", "comment rct_tree_id_scope instance-dimension",
+              f"comment rct_tree_count {len(trees)}", f"element vertex {len(vertices)}",
+              "property double x", "property double y", "property double z", "property uchar red",
+              "property uchar green", "property uchar blue", "property uchar alpha", f"element face {len(faces)}",
+              "property list int int vertex_indices", "property uint tree_id", "end_header"]
+    path.write_bytes(("\n".join(header) + "\n").encode() + vertices.tobytes() + faces.tobytes())
 
 
 def original(folder, stem, trees):

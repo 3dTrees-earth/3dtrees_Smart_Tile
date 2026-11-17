@@ -47,22 +47,11 @@ def check_collection_dir(collection_dir: Path, output_root: Path) -> None:
 
 
 def tile_collections(output_dir: Path) -> dict[str, list[Path]]:
-    """Tile output i (``subsampled_res<i>``) is collection ``tiles_<i>``.
-
-    Instance tiles add ``tiles_<i>_terrain`` (the RCT terrain cut per tile) and
-    ``qsm_manifest`` (the manifests and footprints merge --instance-manifest reads).
-    """
+    """Tile output i (``subsampled_res<i>``) is collection ``tiles_<i>``."""
     collections, index = {}, 1
     while (output_dir / f"subsampled_res{index}").is_dir():
         collections[f"tiles_{index}"] = _files(output_dir / f"subsampled_res{index}", POINT_CLOUDS)
-        terrain = _files(output_dir / f"subsampled_res{index}_terrain", (".ply",))
-        if terrain:
-            collections[f"tiles_{index}_terrain"] = terrain
         index += 1
-    manifest = [p for p in _files(output_dir, (".json", ".npz"))
-                if p.name.startswith("qsm_manifest_") or p.name == "qsm_footprints.npz"]
-    if manifest:
-        collections["qsm_manifest"] = manifest
     return collections
 
 
