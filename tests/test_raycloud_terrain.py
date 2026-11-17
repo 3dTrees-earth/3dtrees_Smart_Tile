@@ -11,7 +11,8 @@ from pyproj import CRS
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from raycloud_meshes import VERTEX
-from raycloud_terrain import FACE, ORIGINAL_SCOPE, TILE_SCOPE, TerrainMesh, cell_keys
+from raycloud_terrain import (FACE, ORIGINAL_SCOPE, TILE_SCOPE, TerrainMesh, _clip, filtered_terrain_meshes,
+                              open_tile_terrain, write_original_terrain)
 from remap_first_pipeline import merge_collections, strict_remap
 from test_merge_stages import write_cloud
 import test_raycloud_filter_only as rct_tests
@@ -106,7 +107,43 @@ class TerrainMeshTests(unittest.TestCase):
             # Six edges on each side of x = 10 lie beside the 2 m core line (y = -1..1).
             self.assertEqual(seams["open_seam_edges"], 12)
 
-    def test_each_original_gets_the_welded_terrain_over_its_points(self):
+    def test_each_original_gets_the_terrain_cut_straight_at_its_extent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, layout = self.fixture(root)
+            self.merge(root, source, layout)
+            tiles = open_tile_terrain(filtered_terrain_meshes(root / "segmented_filtered"))
+            # a and b meet at x = 10.25, across the tile seam at x = 10; no extent edge is on the 0.5 m grid.
+            extents = {"a": (1.1, -1.2, 10.25, 1.3), "b": (10.25, -1.2, 14.7, 1.3)}
+            meshes = {}
+            for stem, extent in extents.items():
+                report = write_original_terrain(root / f"{stem}_terrain_mesh.ply", tiles, extent)
+                mesh = meshes[stem] = TerrainMesh.open(root / f"{stem}_terrain_mesh.ply")
+                self.assertEqual(mesh.scope, ORIGINAL_SCOPE)
+                self.assertEqual(report["faces"], len(mesh.faces))
+                x0, y0, x1, y1 = extent
+                xyz = np.asarray(mesh.vertices["xyz"])
+                tri = xyz[mesh.faces["indices"]]
+                # Every vertex lies in the extent and the triangles cover it exactly: no holes, no overlap.
+                self.assertTrue(np.all((xyz[:, 0] >= x0) & (xyz[:, 0] <= x1) & (xyz[:, 1] >= y0) & (xyz[:, 1] <= y1)))
+                cross = ((tri[:, 1, 0] - tri[:, 0, 0]) * (tri[:, 2, 1] - tri[:, 0, 1])
+                         - (tri[:, 1, 1] - tri[:, 0, 1]) * (tri[:, 2, 0] - tri[:, 0, 0]))
+                self.assertAlmostEqual(float(np.abs(cross).sum() / 2), (x1 - x0) * (y1 - y0), places=9)
+                # Triangles wholly inside the extent are the tiles' own, unchanged.
+                inside = [t for t in grid_triangles(-1, 21)
+                          if all(x0 <= c[0] * STEP <= x1 and y0 <= c[1] * STEP <= y1 for c in t)]
+                self.assertTrue(set(expected(inside)) <= set(triangle_set(mesh)))
+                # Cut vertices lie on the triangle they came from (z = 100 + 0.1 x here).
+                self.assertTrue(np.allclose(xyz[:, 2], 100 + 0.1 * xyz[:, 0]))
+                # Vertices are welded, also across the tile seam: every vertex is distinct and used.
+                self.assertEqual(len(np.unique(xyz, axis=0)), len(xyz))
+                self.assertEqual(len(xyz), len(np.unique(mesh.faces["indices"])))
+            # Neighbouring originals meet on one straight cut with identical vertices.
+            line = lambda stem: {tuple(v) for v in np.asarray(meshes[stem].vertices["xyz"]) if v[0] == 10.25}
+            self.assertEqual(line("a"), line("b"))
+            self.assertGreater(len(line("a")), 2)
+
+    def test_remap_cuts_each_original_at_the_extent_of_its_points(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source, layout = self.fixture(root)
@@ -114,30 +151,15 @@ class TerrainMeshTests(unittest.TestCase):
             originals = root / "originals"
             originals.mkdir()
             write_cloud(originals / "a.las", [1, 11, 10.6])
-            write_cloud(originals / "b.laz", [9.5, 10.5])
             write_cloud(originals / "empty.las", [])
             report = strict_remap(collections=[root / "output"], originals=originals, output=root / "final")
-            cells = {"a": {1, 10, 11}, "b": {9, 10}, "empty": set()}
-            meshes = {}
-            for stem, xs in cells.items():
-                mesh = meshes[stem] = TerrainMesh.open(root / "final" / f"{stem}_terrain_mesh.ply")
-                self.assertEqual(mesh.scope, ORIGINAL_SCOPE)
-                wanted = [t for t in grid_triangles(-1, 21)
-                          if int(np.floor(np.mean([c[0] for c in t]) * STEP)) in xs
-                          and np.floor(np.mean([c[1] for c in t]) * STEP) == 0]
-                self.assertEqual(sorted(triangle_set(mesh)), expected(wanted))
-                # Seam vertices are welded: every vertex is distinct and used.
-                xyz = np.asarray(mesh.vertices["xyz"])
-                self.assertEqual(len(np.unique(xyz, axis=0)), len(xyz))
-                self.assertEqual(len(xyz), len(np.unique(mesh.faces["indices"])))
-            # Shared ground (cell x = 10) is identical in both originals.
-            shared = lambda stem: {t for t in triangle_set(meshes[stem]) if 10 <= np.mean([c[0] for c in t]) < 11}
-            self.assertEqual(shared("a"), shared("b"))
-            self.assertTrue(shared("a"))
             files = {f["file"]: f for f in report["rct_finalization"]["files"]}
-            self.assertEqual(files["b.laz"]["sidecars"]["terrain_mesh"], "b_terrain_mesh.ply")
-            self.assertEqual(files["b.laz"]["terrain"]["faces"], len(meshes["b"].faces))
-            self.assertGreater(files["b.laz"]["terrain"]["welded_vertices"], 0)
+            # The fixture's points lie on y = 0: an extent without area holds no terrain.
+            self.assertEqual(files["a.las"]["terrain"]["extent"], [1.0, 0.0, 11.0, 0.0])
+            self.assertEqual(files["a.las"]["sidecars"]["terrain_mesh"], "a_terrain_mesh.ply")
+            self.assertEqual(files["empty.las"]["terrain"]["extent"], None)
+            for stem in ("a", "empty"):
+                self.assertEqual(len(TerrainMesh.open(root / "final" / f"{stem}_terrain_mesh.ply").faces), 0)
 
     def test_terrain_records_the_crs_and_no_mapping_file_name(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -194,10 +216,16 @@ class TerrainMeshTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "terrain meshes require the matching"):
                 self.merge(root, source, layout)
 
-    def test_cell_keys_separate_negative_and_positive_cells(self):
-        keys = cell_keys(np.array([[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5], [0.9, 0.1]]))
-        self.assertEqual(len(set(keys.tolist())), 4)
-        self.assertEqual(keys[3], keys[4])
+    def test_a_triangle_across_a_corner_is_clipped_to_the_extent(self):
+        corners = np.zeros(3, dtype=VERTEX)
+        corners["xyz"] = [[0, 0, 0], [4, 0, 4], [0, 4, 0]]
+        corners["rgba"] = [[0, 0, 0, 255], [200, 0, 0, 255], [0, 0, 0, 255]]
+        polygon = _clip(list(corners), (1, 1, 3, 3))
+        xy = np.array([p["xyz"][:2] for p in polygon])
+        area = 0.5 * abs((xy[:, 0] * np.roll(xy[:, 1], -1) - np.roll(xy[:, 0], -1) * xy[:, 1]).sum())
+        self.assertAlmostEqual(area, 2.0)  # the part of the 2 x 2 square below x + y = 4
+        self.assertTrue(np.allclose([p["xyz"][2] for p in polygon], xy[:, 0]))
+        self.assertEqual({int(p["rgba"][0]) for p in polygon if p["xyz"][0] == 1}, {50})
 
 
 if __name__ == "__main__":

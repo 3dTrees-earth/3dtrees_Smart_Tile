@@ -38,7 +38,7 @@ from orphan_instance_recovery import recover_orphaned_instances, validate_recove
 from raycloud_tree_files import TABLE_KINDS, filter_tree_sidecars, folder_files, tree_sidecars
 from raycloud_finalization import finalize_rct_originals, remap_tree_sidecars
 from raycloud_meshes import filter_tree_meshes, remap_tree_meshes, tree_meshes
-from raycloud_terrain import (cell_keys, filter_terrain_meshes, filtered_terrain_meshes, open_tile_terrain,
+from raycloud_terrain import (filter_terrain_meshes, filtered_terrain_meshes, open_tile_terrain,
                               remap_terrain_meshes, terrain_meshes, terrain_seams)
 from instance_finalization import compact_originals
 from raycloud_recovery import RayCloudRecoveryGate
@@ -164,7 +164,8 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
     ``matches[i]`` (an instance dimension the originals already carry) makes
     model i match only prediction points of the same instance; that dimension
     is then not transferred. ``footprints`` (a dict) receives, per original
-    name, the sorted 1 m cell keys holding its points, for the terrain cut.
+    name, the XY extent of its points (xmin, ymin, xmax, ymax), or None for an
+    original without points, for the terrain cut.
     """
     matches = list(matches or [None] * len(models))
     files = original_files(originals)
@@ -246,13 +247,13 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                 phases["spill"] += time.monotonic() - tick
                 tick = time.monotonic()
                 total = int(source_header.point_count)
-                store, assigned, cells = {}, 0, []
+                store, assigned, low, high = {}, 0, None, None
                 for index, xyz, results in queries.map(batches):
                     assigned += len(index)
-                    if footprints is not None:
-                        cells.append(np.unique(cell_keys(xyz[:, :2] + origin[:2])))
-                        if len(cells) > 64:
-                            cells = [np.unique(np.concatenate(cells))]
+                    if footprints is not None and len(xyz):
+                        xy = xyz[:, :2] + origin[:2]
+                        low = xy.min(axis=0) if low is None else np.minimum(low, xy.min(axis=0))
+                        high = xy.max(axis=0) if high is None else np.maximum(high, xy.max(axis=0))
                     for i, (base_distances, distances, values) in enumerate(results):
                         if base_distances is not None:
                             _record_coverage(baseline_metrics[i], xyz, base_distances, origin)
@@ -276,7 +277,8 @@ def enrich_originals(models, indices, baseline_indices, originals, output_dir, o
                 if assigned != total:
                     raise ValueError(f"{file.name}: enrichment queried {assigned:,} of {total:,} points")
                 if footprints is not None:
-                    footprints[file.name] = np.unique(np.concatenate(cells)) if cells else np.empty(0, dtype=np.int64)
+                    footprints[file.name] = (None if low is None
+                                             else (float(low[0]), float(low[1]), float(high[0]), float(high[1])))
                 phases["query"] += time.monotonic() - tick
                 tick = time.monotonic()
                 with laspy.open(file) as reader, \

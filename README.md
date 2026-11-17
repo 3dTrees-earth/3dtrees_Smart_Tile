@@ -150,11 +150,13 @@ RCT terrain meshes (`*_mesh.ply` beside the tiles, or `--terrain-meshes-folder`,
 at most one per tile) are optional. Merge keeps each tile's triangles whose XY
 centroid lies in that tile's core (`c00_r00_filtered_terrain_mesh.ply`) and
 reports whether the tiles join along their shared core lines. Every original
-then gets `<original>_terrain_mesh.ply`: the triangles whose centroid lies in a
-1 m cell holding one of its points, with vertices shared by two tiles welded.
-Originals that cover the same ground get the same triangles, as they get the
-same whole trees. Retained vertices, colours and winding are unchanged; the
-header records `comment crs:` from the original.
+then gets `<original>_terrain_mesh.ply`: every triangle that touches the XY
+extent of its points, cut straight at that extent, with vertices shared by two
+tiles welded. Triangles inside the extent keep their vertices, colours and
+winding; triangles across its edges are clipped to it (new vertices interpolated
+along the cut edges). The terrain covers the whole extent, and originals whose
+extents meet share the cut line. The header records `comment crs:` from the
+original and `comment rct_terrain_extent`.
 
 Merge and remap also publish the originals' terrain as `rct_terrain.tif`, a
 0.5 m float32 COG. RCT's own tree tables feed one viewer QSM octree in

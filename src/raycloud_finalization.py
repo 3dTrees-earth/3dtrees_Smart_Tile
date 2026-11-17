@@ -89,8 +89,8 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
     With ``meshes``, each original also gets ``<stem>_trees_mesh.ply`` holding
     the complete retained QSM mesh of exactly its represented trees, with the
     same compact IDs as its LAZ and tables. With ``terrain`` (core-filtered tile
-    terrain meshes) and ``footprints`` (each original's 1 m cell keys), each
-    original also gets ``<stem>_terrain_mesh.ply`` covering its footprint.
+    terrain meshes) and ``footprints`` (each original's XY extent), each
+    original also gets ``<stem>_terrain_mesh.ply`` cut straight at its extent.
     With treeinfo tables, the run gets ``octree/``, the viewer's QSM octree of
     all originals (each tree once).
     """

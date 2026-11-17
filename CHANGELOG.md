@@ -8,6 +8,7 @@ options, per-instance-tile terrain, and QSM merge mode are no longer supported.
 RCT's own trees, their viewer octree and per-original terrain remain supported.
 
 ### RCT terrain and viewer octree
+- Each original's terrain (`<original>_terrain_mesh.ply`) holds every triangle that touches the XY extent of its points, cut straight at that extent, instead of the triangles whose centroid lies in a 1 m cell holding one of its points. RCT bridges point-free ground with large triangles, and the cell rule dropped them: on 3753 tiled into four 30 m tiles, 80 triangles (50 m², near the plot edge) and 230 empty COG cells against 33 for an untiled RCT run. Triangles inside the extent are unchanged; triangles across its edges are clipped to it, and neighbouring originals share the cut line. The header records `comment rct_terrain_extent`.
 - Merge and remap retain each original's terrain mesh and write one QSM octree
   for RCT's own trees across all originals; shared trees appear once.
 - `rct_terrain.tif`: beside the terrain meshes, merge and remap write all originals' RCT terrain as one COG (float32, 0.5 m, each cell the mesh height at its centre), for the viewer's raster layers. `src/terrain_cog.py` also converts existing meshes.

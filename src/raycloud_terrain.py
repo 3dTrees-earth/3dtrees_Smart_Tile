@@ -8,10 +8,13 @@ Merge keeps each tile's triangles whose XY centroid lies in that tile's core,
 using the half-open core rule of background points, so every patch of ground
 comes from exactly one tile (``<tile>_filtered_terrain_mesh.ply``). The
 per-original terrain (``<original>_terrain_mesh.ply``) then holds every kept
-triangle whose centroid falls in a 1 m cell that holds at least one of the
-original's points. Originals that share ground share identical triangles, as
-they share whole trees. Vertices with identical coordinates from different
-tiles are welded. Retained geometry, colours and winding never change.
+triangle that touches the XY extent of the original's points, cut straight at
+that extent: triangles inside it are copied unchanged, triangles across its
+edges are clipped to it (new vertices interpolated along the cut edges, then
+fanned into triangles), so the terrain covers the whole extent without the
+holes of a per-point footprint. Originals that share ground share identical
+triangles; neighbouring originals whose extents meet share the cut line.
+Vertices with identical coordinates from different tiles are welded.
 """
 from __future__ import annotations
 
@@ -30,7 +33,6 @@ from raycloud_tree_files import _prediction_key, _tile_key, rct_sidecar_folder
 FACE = np.dtype([("count", "<i4"), ("indices", "<i4", (3,))])
 TILE_SCOPE = "smarttile-terrain-tile-core"
 ORIGINAL_SCOPE = "smarttile-terrain-original-footprint"
-FOOTPRINT_CELL_M = 1.0
 # Seam edges left open after welding lie within this XY distance of an interior core line.
 SEAM_BAND_M = 2.0
 _NATIVE_FILE = re.compile(r"^(?P<stem>.+?)(?<!_trees)(?<!_terrain)_mesh\.ply$", re.IGNORECASE)
@@ -201,14 +203,6 @@ def filter_terrain_meshes(pairs, meshes, regions, output_dir: Path):
             "policy": "triangle XY centroid in the tile's half-open core"}
 
 
-def cell_keys(xy, cell=FOOTPRINT_CELL_M) -> np.ndarray:
-    """int64 keys of the ``cell`` m grid cells holding ``xy`` (absolute coordinates), in input order."""
-    ij = np.floor(np.asarray(xy, dtype=np.float64) / cell).astype(np.int64)
-    if len(ij) and np.abs(ij).max() >= 1 << 31:
-        raise ValueError("Coordinates too large for the terrain footprint grid")
-    return (ij[:, 0] << 32) | (ij[:, 1] & 0xFFFFFFFF)
-
-
 def _interior_lines(regions):
     """Core edges shared with a neighbour, as ((x0, y0), (x1, y1)) segments."""
     lines = set()
@@ -231,10 +225,11 @@ def _near_lines(xy, lines, band):
     return near
 
 
-def _select_and_weld(tile_meshes, select):
-    """Faces chosen by ``select(mesh, batch)`` from every tile, with identical vertices welded.
+def _select_and_weld(tile_meshes, select, extra=()):
+    """Faces chosen by ``select(mesh, batch)`` from every tile, plus ``extra`` pieces, with identical vertices welded.
 
-    A welded vertex keeps the first copy in tile order. Returns
+    ``extra`` holds ``(vertices, faces)`` pieces appended after the tiles. A
+    welded vertex keeps the first copy in tile order. Returns
     ``(vertices, faces as int64 index triples, welded vertex count)``.
     """
     pieces = []
@@ -243,6 +238,7 @@ def _select_and_weld(tile_meshes, select):
         indices = np.concatenate(keep) if keep else np.empty((0, 3), dtype=np.int32)
         used = np.unique(indices)
         pieces.append((np.asarray(mesh.vertices[used]), np.searchsorted(used, indices)))
+    pieces += [piece for piece in extra if len(piece[1])]
     vertices = np.concatenate([v for v, _ in pieces]) if pieces else np.empty(0, dtype=VERTEX)
     keys = np.ascontiguousarray(vertices["xyz"]).view(np.dtype((np.void, 24))).ravel()
     _, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
@@ -256,20 +252,91 @@ def _select_and_weld(tile_meshes, select):
     return vertices[np.sort(first)], faces, len(vertices) - len(first)
 
 
-def write_original_terrain(output, tile_meshes, footprint, *, crs=None, cell=FOOTPRINT_CELL_M):
-    """Write the core-filtered tile triangles over one original's footprint as one welded mesh.
+def _inside_extent(mesh, batch, extent):
+    """Which triangles lie wholly inside ``extent`` and which cross or touch its edges."""
+    xy = mesh.vertices["xyz"][batch["indices"]][:, :, :2]
+    x0, y0, x1, y1 = extent
+    inside = ((xy[..., 0] >= x0) & (xy[..., 0] <= x1) & (xy[..., 1] >= y0) & (xy[..., 1] <= y1)).all(axis=1)
+    low, high = xy.min(axis=1), xy.max(axis=1)
+    overlaps = (low[:, 0] <= x1) & (high[:, 0] >= x0) & (low[:, 1] <= y1) & (high[:, 1] >= y0)
+    return inside, overlaps & ~inside
 
-    ``footprint`` holds the sorted unique ``cell_keys`` of the original's points.
-    A triangle is kept when its XY centroid lies in one of those cells.
+
+def _cut_point(a, b, axis, value):
+    """Where edge a-b crosses ``axis = value``: the same bytes whichever way round the edge runs."""
+    if (a["xyz"][0], a["xyz"][1], a["xyz"][2]) > (b["xyz"][0], b["xyz"][1], b["xyz"][2]):
+        a, b = b, a
+    t = (value - a["xyz"][axis]) / (b["xyz"][axis] - a["xyz"][axis])
+    point = np.zeros((), dtype=VERTEX)
+    point["xyz"] = a["xyz"] + t * (b["xyz"] - a["xyz"])
+    point["xyz"][axis] = value
+    point["rgba"] = np.rint(a["rgba"] + t * (b["rgba"].astype(np.float64) - a["rgba"])).astype(np.uint8)
+    return point
+
+
+def _clip(polygon, extent):
+    """Sutherland-Hodgman clip of a vertex list against the extent rectangle."""
+    x0, y0, x1, y1 = extent
+    for axis, value, keep in ((0, x0, np.greater_equal), (0, x1, np.less_equal),
+                              (1, y0, np.greater_equal), (1, y1, np.less_equal)):
+        out = []
+        for i, current in enumerate(polygon):
+            previous = polygon[i - 1]
+            now, before = keep(current["xyz"][axis], value), keep(previous["xyz"][axis], value)
+            if now != before:
+                out.append(_cut_point(previous, current, axis, value))
+            if now:
+                out.append(current)
+        polygon = out
+        if not polygon:
+            break
+    return polygon
+
+
+def _cut_at_extent(tile_meshes, extent):
+    """Triangles across the extent's edges, clipped to it and fanned: one ``(vertices, faces)`` piece."""
+    vertices, faces = [], []
+    for mesh in tile_meshes:
+        for _, batch in mesh.face_batches():
+            _, crossing = _inside_extent(mesh, batch, extent)
+            for indices in batch["indices"][crossing]:
+                polygon = _clip([mesh.vertices[i] for i in indices], extent)
+                if len(polygon) < 3:
+                    continue
+                xy = np.array([p["xyz"][:2] for p in polygon])
+                area = 0.5 * (xy[:, 0] * np.roll(xy[:, 1], -1) - np.roll(xy[:, 0], -1) * xy[:, 1]).sum()
+                if abs(area) <= 1e-12:  # touches the extent only along an edge or at a corner
+                    continue
+                base = len(vertices)
+                vertices += polygon
+                faces += [(base, base + k, base + k + 1) for k in range(1, len(polygon) - 1)]
+    if not faces:
+        return np.empty(0, dtype=VERTEX), np.empty((0, 3), dtype=np.int64)
+    return np.array(vertices, dtype=VERTEX), np.array(faces, dtype=np.int64)
+
+
+def write_original_terrain(output, tile_meshes, extent, *, crs=None):
+    """Write the core-filtered tile terrain cut straight at one original's XY extent as one welded mesh.
+
+    ``extent`` is ``(xmin, ymin, xmax, ymax)`` of the original's points, or
+    None for an original without points. Triangles inside it are copied
+    unchanged; triangles across its edges are clipped to it.
     """
-    vertices, faces, welded = _select_and_weld(
-        tile_meshes, lambda mesh, batch: np.isin(cell_keys(mesh.centroids(batch), cell), footprint))
+    if extent is None:
+        vertices, faces, welded = np.empty(0, dtype=VERTEX), np.empty((0, 3), dtype=np.int64), 0
+    else:
+        cut = _cut_at_extent(tile_meshes, extent)
+        vertices, faces, welded = _select_and_weld(
+            tile_meshes, lambda mesh, batch: _inside_extent(mesh, batch, extent)[0], extra=[cut])
     if len(vertices) > np.iinfo(np.int32).max:
         raise ValueError(f"{Path(output).name}: too many vertices for native int32 face indices")
-    header = _header(ORIGINAL_SCOPE, len(vertices), len(faces),
-                     [f"rct_terrain_source_tiles {len(tile_meshes)}", f"rct_terrain_footprint_cell_m {cell:g}"], crs)
+    comments = [f"rct_terrain_source_tiles {len(tile_meshes)}"]
+    if extent is not None:
+        comments.append("rct_terrain_extent " + " ".join(f"{v:.6f}" for v in extent))
+    header = _header(ORIGINAL_SCOPE, len(vertices), len(faces), comments, crs)
     _write(output, header, [vertices], [_faces(faces)])
-    return {"vertices": int(len(vertices)), "faces": int(len(faces)), "welded_vertices": int(welded)}
+    return {"vertices": int(len(vertices)), "faces": int(len(faces)), "welded_vertices": int(welded),
+            "extent": None if extent is None else [float(v) for v in extent]}
 
 
 def terrain_seams(tile_meshes, regions):
