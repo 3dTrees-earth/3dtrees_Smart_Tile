@@ -4,8 +4,8 @@ An RCT terrain mesh is a height field (one triangulated surface over XY), so it
 is sampled on a regular grid: each cell holds the mesh height at its centre. The
 grid covers every terrain mesh of a run, so a dataset of several originals gets
 one COG (originals that share ground share identical triangles). It shows what
-the meshes cover: `<original>_terrain_mesh.ply` is already cut to the original's
-footprint, and ground under closed canopy is the mesh's own triangles across it.
+the meshes cover: `<original>_terrain_mesh.ply` is already cut straight at the original's
+extent, and ground under closed canopy is the mesh's own triangles across it.
 
 The meshes stay the originals; this COG is a view of them.
 

@@ -1,11 +1,16 @@
 # Changelog
 
-## v2.5.0 - 2026-11-11
+## v2.4.3 - 2026-11-17
 
-### QSMs per segmentation (Linear: SmartTile v2.5)
-- RayCloudTools QSMs for every segmentation (SAT, ForestMamba, ...) at any size. The tile task's `--qsm-manifest` writes beside the instance tiles what a QSM merge needs without reading points: `qsm_manifest_<dimension>.json` (originals, tiles, every instance with its tile and the originals holding its points) and `qsm_footprints.npz`. The per-instance statistics read collects both; nothing else is read.
-- `--rct-terrain-folder` takes the per-original terrain meshes of an earlier RayCloudTools run, merges them once (identical vertices welded, shared triangles once) and writes per instance tile the triangles within 10 m (`<tiles>_terrain/<tile>.ply`) for RayCloudTools `--terrain-mesh`, so every segmentation's QSMs stand on the RCT ground.
-- `merge --instance-manifest` (a mode of merge; it takes no segmented point collections): the RayCloudTools `--instance-dimension` outputs of all instance tiles, from `--qsm-folder` or the per-kind folders of the RCT merge, per original (`_trees.txt`, `_trees_info.txt`, `_trees_mesh.ply`, `_terrain_mesh.ply`), with the instance IDs and table rows unchanged and a tree shared by originals in each, plus `octree/`, the results viewer's QSM octree (3DT-2626): one per run, that is per dataset and instance dimension, internal to the viewer. Its contract `3dtrees-qsm-octree-v2` lists `originals` (info and mesh file per original) and gives each tree record the `original` its ranges point into; a tree shared by originals is in the octree once. A tile whose instances all got no QSM (RayCloudTools writes rowless tables and a mesh without trees) is reported, not refused. Point clouds are not merged.
+This release supersedes 2.5.0 with QSMs for other segmentations removed: the
+`--qsm-manifest`, `--rct-terrain-folder`, `--instance-manifest` and `--qsm-folder`
+options, per-instance-tile terrain, and QSM merge mode are no longer supported.
+RCT's own trees, their viewer octree and per-original terrain remain supported.
+
+### RCT terrain and viewer octree
+- Each original's terrain (`<original>_terrain_mesh.ply`) holds every triangle that touches the XY extent of its points, cut straight at that extent, instead of the triangles whose centroid lies in a 1 m cell holding one of its points. RCT bridges point-free ground with large triangles, and the cell rule dropped them: on 3753 tiled into four 30 m tiles, 80 triangles (50 m², near the plot edge) and 230 empty COG cells against 33 for an untiled RCT run. Triangles inside the extent are unchanged; triangles across its edges are clipped to it, and neighbouring originals share the cut line. The header records `comment rct_terrain_extent`.
+- Merge and remap retain each original's terrain mesh and write one QSM octree
+  for RCT's own trees across all originals; shared trees appear once.
 - `rct_terrain.tif`: beside the terrain meshes, merge and remap write all originals' RCT terrain as one COG (float32, 0.5 m, each cell the mesh height at its centre), for the viewer's raster layers. `src/terrain_cog.py` also converts existing meshes.
 
 ### Visualization COPC (prototype)
@@ -15,7 +20,7 @@
 - Instance tiles honour `--subsampling-method` when it is given: `center-of-mass` writes each (instance, voxel) as the exact mean of its points, as tile outputs do; ID and carried attributes come from the point nearest that mean. Without the option they keep `nearest-to-centroid`, so existing runs are unchanged (3753 at 10 cm: byte-identical, 18 s with either method).
 
 ### Tree table ID column (3DT-2625)
-- The ID column of the RayCloudTools tree tables SmartTile writes is named after the instance dimension it refers to, not `predinstance`: `PredInstance_RCT` for RayCloudTools' own trees (merge and remap) and the segmentation's dimension, such as `PredInstance_SAT`, for QSMs merged with `--instance-manifest`. Values and the other columns are unchanged. Tables with `predinstance` are still read. The tree meshes name the dimension in `comment rct_instance_dimension`. Readers of the old name need updating; the results viewer's `products_to_parquet.py` takes either.
+- The ID column of the RayCloudTools tree tables SmartTile writes is named after the instance dimension it refers to, not `predinstance`: `PredInstance_RCT` for RayCloudTools' own trees (merge and remap). Values and the other columns are unchanged. Tables with `predinstance` are still read. The tree meshes name the dimension in `comment rct_instance_dimension`. Readers of the old name need updating; the results viewer's `products_to_parquet.py` takes either.
 
 ### Merge speed: orphan recovery, deduplication, consolidation (2585)
 - Outputs are byte-identical to before (3753 and 2779, SAT and FM; 2585 9-tile subset: 43,130 → 33,850 s on 10 CPUs); only the work is spread differently.
@@ -43,7 +48,8 @@
 
 ### Memory and Galaxy (3DT-1896, 3DT-2469)
 - Workers are capped by the memory limit, the smallest of `GALAXY_MEMORY_MB`, the cgroup limits and physical memory: per task a fixed 0.5 GB plus 0.6 (tile), 0.35 (merge), 0.35 (remap) or 0.95 GB (create_merged_file) per worker, measured with about 40 % margin. The merge's share covers its block-query and index processes: at 10 workers 3753 merge needs 3.8 GB, and in a 2 GB grant it runs 4 workers (90 s, byte-identical) instead of being killed. When one worker does not fit, the task stops with an error that names memory. A failure from lack of memory exits 137 with `out of memory`, so Galaxy can resubmit with more. 2548 (2 GB grant), Brandenburg 1129 (3.06 GB) and 1134 (3.55 GB) pass with 2, 4 and 5 workers; outputs equal the 10-worker runs.
-- `--collection-dir` also publishes `qsm_manifest` (manifests and footprints), `tiles_<i>_terrain` (the RCT terrain per tile) and `terrain_cog` (`rct_terrain.tif`).
+- `--collection-dir` publishes the RCT viewer octree and `terrain_cog` (`rct_terrain.tif`).
+- Release CI builds the SIF from the published Docker digest and publishes it through ORAS; the Galaxy wrapper lists Singularity first and Docker second.
 
 ### PLY sidecars (3DT-1898)
 - Every point-cloud PLY (tiles and merged products) gets `<file>.crs.wkt`, the source CRS record verbatim, and `<file>.smarttile.json` with task, sources, point count, properties, CRS and the source's LAS scale and offset, published with it.
@@ -55,8 +61,6 @@
 - The query cache reserves a region's read against its whole budget and the kept search tree against half; a region that still does not fit is cached per 2 m query cell instead of being queried from SQLite on every batch. The budget is a third of the memory limit across the run's processes.
 - Regions go to workers by point count, largest first onto the least-loaded worker; dense regions are placed as their 2 m cells. Eight batches per worker are in flight. The report records cache hits, builds, disk fallbacks and points per worker.
 - 1919 (65.5 M terrestrial points), first 12 M points: 1,072 → 39 s at 10 workers, 1,523 → 57 s at its 2.5 GB Galaxy grant; the whole cloud at 10 workers in 303 s. Outputs byte-identical; 3753, 2779 and 2030 unchanged in output and speed.
-
-## v2.4.3 - not released separately; included in v2.5.0
 
 ### CRS records (3DT-2718)
 - LAS/LAZ outputs keep the source's CRS records byte for byte, in VLRs and EVLRs, with the WKT flag. `copy_single_source_header` no longer rewrites them as WKT1_GDAL from the local EPSG database. That rewrite dropped the axis order of northing-first CRSs (3805, EPSG:6678) and renamed CRSs between PROJ versions (3827, EPSG:3067 became EUREF-FIN), so the sidecar check rejected the member.

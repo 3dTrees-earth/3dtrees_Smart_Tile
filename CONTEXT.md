@@ -22,15 +22,6 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
   validates COPC twins; no enriched COPC original is written.
 - `create_merged_file`: builds `prod_merged_*` / `merged.*` products from
   Original-with-predictions (or plain source) files.
-- `merge --instance-manifest`: RayCloudTools `--instance-dimension` QSMs of instance tiles per
-  original (`qsm_merge.py`), from the tile task's `--qsm-manifest`
-  (`qsm_tiles.py`); reads no points. IDs and table rows stay unchanged; a tree
-  in several originals goes to each; terrain is the RCT original's
-  (`--rct-terrain-folder`) or the core-owned tile triangles over the original's
-  footprint. Writes one viewer QSM octree per run (`qsm_octree.py`, contract
-  v2: several originals, each tree from the first original holding it). A tile
-  whose instances all got no QSM is reported, not refused. Never merge or
-  rewrite point clouds here.
 
 ## Merge contract (3DT-2101)
 
@@ -96,6 +87,9 @@ shared terminology. Keep both files short and aligned with `src/run.py`.
 - Final remap prefers a positive tree within the radius over background and
   compacts IDs dataset-wide (VLR 24003, `rct_instance_mapping.json`, per-original
   tables and meshes). Standalone remap rejects several unencoded legacy tiles.
+- RCT's own trees have one viewer QSM octree per run, with shared trees indexed
+  once across the originals. Each original retains the terrain over its points;
+  all originals' terrain is also published as one `rct_terrain.tif` COG.
 - See `docs/raycloud-filter-only.md`.
 
 ## Product contract

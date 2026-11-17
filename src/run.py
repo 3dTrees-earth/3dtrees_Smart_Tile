@@ -324,8 +324,6 @@ def _write_tile_task(params: Parameters):
             instance_outputs = parse_tile_outputs(params.instance_outputs)
             if not instance_outputs:
                 raise ValueError("--instance-outputs lists no outputs")
-        if (params.qsm_manifest or params.rct_terrain_folder) and not instance_dimensions:
-            raise ValueError("--qsm-manifest and --rct-terrain-folder need --instance-tiles")
         if params.tile_outputs:
             tile_outputs = parse_tile_outputs(params.tile_outputs)
         elif instance_dimensions:
@@ -366,8 +364,7 @@ def _write_tile_task(params: Parameters):
                 wide=params.max_instance_extent,
                 attributes=_parse_csv(params.instance_tile_dims) if params.instance_tile_dims else [],
                 check_ids=not params.allow_reused_instance_ids, workers=spatial_query_worker_count(workers),
-                publish_occupancy=not tile_outputs, qsm_manifest=params.qsm_manifest,
-                rct_terrain=params.rct_terrain_folder,
+                publish_occupancy=not tile_outputs,
                 # Instance tiles keep real points unless a method is chosen explicitly.
                 nearest="subsampling_method" not in params.model_fields_set or not center_of_mass,
                 **instance_options)
@@ -403,41 +400,6 @@ def _write_tile_task(params: Parameters):
         sys.exit(failure_exit_code(e, OOM_KILLS_AT_START))
 
 
-def _run_merge_qsm(params: Parameters):
-    """Merge of RayCloudTools QSMs of instance tiles per original (--instance-manifest); reads no points."""
-    from output_publication import DirectoryTransaction
-    from qsm_merge import merge_qsm
-
-    if params.subsampled_10cm_folder or params.segmented_folders or params.segmented_remapped_folder:
-        print("Error: --instance-manifest merges RayCloudTools QSMs; it takes no segmented point collections")
-        sys.exit(1)
-    kinds = {"trees": params.tree_tables_folder, "info": params.tree_info_folder,
-             "mesh": params.tree_meshes_folder, "terrain": params.terrain_meshes_folder}
-    kind_folders = {kind: Path(folder) for kind, folder in kinds.items() if folder is not None}
-    output = params.output_folder or params.output_dir
-    if not output or not (params.qsm_folder or kind_folders):
-        print("Error: the QSM merge needs --output-dir and --qsm-folder or --tree-tables-folder, "
-              "--tree-info-folder and --tree-meshes-folder")
-        sys.exit(1)
-    output_dir = Path(output)
-    inputs = [Path(p) for p in [params.qsm_folder, *kind_folders.values()] if p is not None]
-    try:
-        _check_collection_dir(params, output_dir)
-        with DirectoryTransaction(output_dir, inputs=inputs) as transaction:
-            report = merge_qsm(params.instance_manifest, params.qsm_folder, transaction.path,
-                               dimension=params.instance_dimension if "instance_dimension" in params.model_fields_set
-                               else None, rct_terrain_folder=params.rct_terrain_folder, kind_folders=kind_folders)
-            transaction.commit()
-        from collection_folders import original_collections
-        _publish_collections(params, original_collections(output_dir), {})
-    except Exception as exc:
-        print(f"Error: {exc}")
-        sys.exit(failure_exit_code(exc, OOM_KILLS_AT_START))
-    print(f"QSM merge {report['instance_dimension']}: {report['qsms']} QSMs of {report['instances']} instances "
-          f"for {len(report['originals'])} originals ({report['instances_without_qsm']} instances without QSM); "
-          f"terrain from {report['terrain']}: {output_dir}")
-
-
 def _small_instance_policy(params: Parameters):
     if not params.reassign_small_instances:
         return None
@@ -447,13 +409,7 @@ def _small_instance_policy(params: Parameters):
 
 
 def run_merge_task(params: Parameters):
-    """Transfer to dense geometry, filter ownership, reconcile and deduplicate.
-
-    With ``--instance-manifest`` it instead merges RayCloudTools QSMs of instance
-    tiles per original, without points (``qsm_merge``).
-    """
-    if params.instance_manifest:
-        return _run_merge_qsm(params)
+    """Transfer to dense geometry, filter ownership, reconcile and deduplicate."""
     from merge_stages import MatchLimits
     from remap_first_pipeline import merge_collections
 
@@ -702,7 +658,6 @@ def preprocess_boolean_flags(args_list):
         '--match-instances', '--match_instances',
         '--prediction-resolution-original', '--prediction_resolution_original',
         '--allow-reused-instance-ids', '--allow_reused_instance_ids',
-        '--qsm-manifest', '--qsm_manifest',
         '--original-point-index', '--original_point_index',
         '--transfer-original-dims-to-merged', '--transfer_original_dims_to_merged',
         '--visualization-copc', '--visualization_copc',
@@ -821,8 +776,6 @@ def _print_cli_help() -> None:
                 "max_instance_extent",
                 "instance_tile_dims",
                 "allow_reused_instance_ids",
-                "qsm_manifest",
-                "rct_terrain_folder",
                 "resolution_1",
                 "resolution_2",
                 "output_copc_res1",
@@ -831,8 +784,6 @@ def _print_cli_help() -> None:
                 "tiling_threshold",
             ],
         ),
-        ("Merge of RayCloudTools QSMs of instance tiles (merge --instance-manifest)",
-         ["instance_manifest", "qsm_folder", "rct_terrain_folder"]),
         (
             "Merge",
             [

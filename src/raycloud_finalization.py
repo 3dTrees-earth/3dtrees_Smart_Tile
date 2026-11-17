@@ -18,7 +18,7 @@ from ply_crs import crs_comment_from_file
 
 
 INSTANCE = "PredInstance_RCT"
-OCTREE = "octree"  # the viewer's QSM octree of the run, as qsm_merge writes it
+OCTREE = "octree"  # the viewer's QSM octree of the RCT run
 MAPPING_FILE = "rct_instance_mapping.json"
 
 
@@ -89,8 +89,8 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
     With ``meshes``, each original also gets ``<stem>_trees_mesh.ply`` holding
     the complete retained QSM mesh of exactly its represented trees, with the
     same compact IDs as its LAZ and tables. With ``terrain`` (core-filtered tile
-    terrain meshes) and ``footprints`` (each original's 1 m cell keys), each
-    original also gets ``<stem>_terrain_mesh.ply`` covering its footprint.
+    terrain meshes) and ``footprints`` (each original's XY extent), each
+    original also gets ``<stem>_terrain_mesh.ply`` cut straight at its extent.
     With treeinfo tables, the run gets ``octree/``, the viewer's QSM octree of
     all originals (each tree once).
     """
@@ -163,7 +163,7 @@ def finalize_rct_originals(output_dir, ids_by_file, predictions, sidecars, *, me
 
 
 def _write_octree(output_dir, files):
-    """The viewer's QSM octree of RCT's own trees, one per run (``qsm_octree``, as for an existing segmentation).
+    """The viewer's QSM octree of RCT's own trees, one per run (``qsm_octree``).
 
     Built from each original's tree-info table (its tree table without
     ``--treeinfo``) and tree mesh; a tree in several originals is in the octree
