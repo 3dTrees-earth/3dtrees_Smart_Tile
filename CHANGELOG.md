@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.4.3 - unreleased
+## v2.4.3 - 2026-11-17
 
 This release supersedes 2.5.0 with QSMs for other segmentations removed: the
 `--qsm-manifest`, `--rct-terrain-folder`, `--instance-manifest` and `--qsm-folder`
