@@ -129,7 +129,13 @@ def crs_equivalent(source_crs, output_crs) -> bool:
     try:
         if source_crs.equals(output_crs, ignore_axis_order=True):
             return True
-        if _without_bound(source_crs).equals(_without_bound(output_crs), ignore_axis_order=True):
+        source_plain, output_plain = _without_bound(source_crs), _without_bound(output_crs)
+        if source_plain.equals(output_plain, ignore_axis_order=True):
+            return True
+        # A 3D CRS whose third axis is an ellipsoidal height (no vertical datum) against its 2D form,
+        # as GeoTIFF keys write it: the same coordinates.
+        if not source_plain.is_compound and not output_plain.is_compound and \
+                source_plain.to_2d().equals(output_plain.to_2d(), ignore_axis_order=True):
             return True
     except Exception:
         pass

@@ -218,6 +218,31 @@ class CopcCrsValidationTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("differs from source CRS", message)
 
+    def test_accepts_a_3d_crs_with_ellipsoidal_height_against_its_2d_form(self):
+        """Dataset 3950: the WKT record is WGS 84 / UTM 32N with an ellipsoidal height axis, the GeoTIFF keys
+        (and so the COPC) say 32632."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source.las"
+            output = Path(tmpdir) / "output.las"
+            _write_las(source, CRS.from_epsg(32632).to_3d().to_wkt().encode())
+            _write_las(output, CRS.from_epsg(32632).to_wkt("WKT1_GDAL").encode())
+
+            ok, message = validate_single_crs_record(source, output)
+
+            self.assertTrue(ok, message)
+
+    def test_rejects_a_3d_crs_against_another_2d_projection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source.las"
+            output = Path(tmpdir) / "output.las"
+            _write_las(source, CRS.from_epsg(32632).to_3d().to_wkt().encode())
+            _write_las(output, CRS.from_epsg(32633).to_wkt("WKT1_GDAL").encode())
+
+            ok, message = validate_single_crs_record(source, output)
+
+            self.assertFalse(ok)
+            self.assertIn("differs from source CRS", message)
+
     def test_rejects_named_vertical_datum_change(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
