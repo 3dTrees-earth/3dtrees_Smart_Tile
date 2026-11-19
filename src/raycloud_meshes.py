@@ -1,6 +1,6 @@
 """Keep RayCloudTools QSM tree meshes aligned with the output tree IDs (3DT-2232).
 
-RCT v1.3.0 writes one ``<stem>_trees_mesh.ply`` per tile: binary little-endian
+RCT 1.2.3 or newer writes one ``<stem>_trees_mesh.ply`` per tile: binary little-endian
 double XYZ + uchar RGBA vertices and triangle faces followed by
 ``property uint tree_id``, the native tile-local tree ID (1-based tree-table
 row). SmartTile applies the same ID mapping as the LAZ and tree tables, drops
@@ -95,7 +95,7 @@ class TreeMesh:
                 comments[parts[1]] = parts[2]
         schema = [line for line in lines if not line.startswith(("comment", "obj_info"))]
         if "property uint tree_id" not in schema:
-            raise ValueError(f"{path.name}: tree mesh has no per-face tree_id; regenerate it with RayCloudTools >= 1.3.0")
+            raise ValueError(f"{path.name}: tree mesh has no per-face tree_id; regenerate it with RayCloudTools 1.2.3 or newer")
         if len(schema) != len(_SCHEMA) or any(e is not None and e != a for e, a in zip(_SCHEMA, schema)):
             raise ValueError(f"{path.name}: unsupported tree mesh schema (expected native RCT double XYZ/RGBA triangles)")
         try:
