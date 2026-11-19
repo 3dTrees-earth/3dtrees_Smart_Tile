@@ -1,6 +1,15 @@
 # Changelog
 
-## v2.4.3 - 2026-11-17
+## v2.4.3 - 2026-11-17, rebuilt 2026-11-19
+
+Rebuilt on 2026-11-19 under the same version with the CRS fixes below (images
+`ghcr.io/3dtrees-earth/3dtrees_smart_tile:2.4.3` and `:2.4.3-sif` replaced; the
+17 Nov images stay reachable by digest).
+
+### CRS of COPC outputs (rebuild, 2026-11-19)
+- Compound CRS with a datum shift or geoid grid: a LAS 1.2 file can carry a compound WKT record with `TOWGS84` or a geoid grid next to GeoTIFF keys of the same CRS. untwine and PDAL write the COPC from the GeoTIFF keys, which cannot carry either, so the CRS check reported `output CRS 'ETRS89 / UTM zone 32N + DHHN2016 height' differs from source CRS 'ETRS89 / UTM zone 32N + DHHN2016 height'` and tiling and the full-resolution merge failed (datasets 4697, 4698). The check now also compares both CRSs with every BoundCRS replaced by its source CRS, inside compound CRSs too. A different horizontal or vertical CRS still fails.
+- WKT-only files below LAS 1.4: untwine and PDAL take such a file's CRS from its GeoTIFF keys. A file whose CRS only a WKT record holds and that has no EPSG code (a compound CRS, or the SYSSIFOSS WKT with a `Height` axis) got a COPC without CRS and failed with `source CRS missing in output`. Its WKT is now passed to untwine as `--a_srs`. Files with GeoTIFF keys keep them as the writers' source, so a WKT record that disagrees with them still fails the check.
+- Tree meshes with a per-face `tree_id` come from RayCloudTools 1.2.3 or newer (docs and error message said 1.3.0).
 
 This release supersedes 2.5.0 with QSMs for other segmentations removed: the
 `--qsm-manifest`, `--rct-terrain-folder`, `--instance-manifest` and `--qsm-folder`
