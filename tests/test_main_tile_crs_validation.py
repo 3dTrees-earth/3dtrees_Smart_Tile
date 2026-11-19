@@ -185,6 +185,38 @@ class CopcCrsValidationTests(unittest.TestCase):
 
             self.assertTrue(ok, message)
 
+    def test_accepts_compound_crs_whose_wkt_adds_a_datum_shift_or_geoid_grid(self):
+        """Datasets 4697/4698: the WKT record carries TOWGS84 or a geoid grid that the GeoTIFF keys,
+        from which untwine writes the COPC of a LAS 1.2 file, cannot carry."""
+        plain = CRS("EPSG:25832+7837").to_wkt("WKT1_GDAL")
+        shifted = plain.replace('AUTHORITY["EPSG","6258"]', 'TOWGS84[0,0,0,0,0,0,0],AUTHORITY["EPSG","6258"]')
+        geoid = plain.replace('VERT_DATUM["Deutsches Haupthoehennetz 2016",2005,',
+                              'VERT_DATUM["Deutsches Haupthoehennetz 2016",2005,EXTENSION["PROJ4_GRIDS","de_bkg_gcg2016.tif"],')
+        for source_wkt in (shifted, geoid):
+            with self.subTest(source=source_wkt[-80:]), tempfile.TemporaryDirectory() as tmpdir:
+                source = Path(tmpdir) / "source.las"
+                output = Path(tmpdir) / "output.las"
+                _write_las(source, source_wkt.encode())
+                _write_las(output, plain.encode())
+
+                ok, message = validate_single_crs_record(source, output)
+
+                self.assertTrue(ok, message)
+
+    def test_rejects_other_vertical_datum_behind_a_datum_shift(self):
+        shifted = CRS("EPSG:25832+7837").to_wkt("WKT1_GDAL").replace(
+            'AUTHORITY["EPSG","6258"]', 'TOWGS84[0,0,0,0,0,0,0],AUTHORITY["EPSG","6258"]')
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source.las"
+            output = Path(tmpdir) / "output.las"
+            _write_las(source, shifted.encode())
+            _write_las(output, CRS("EPSG:25832+5783").to_wkt("WKT1_GDAL").encode())
+
+            ok, message = validate_single_crs_record(source, output)
+
+            self.assertFalse(ok)
+            self.assertIn("differs from source CRS", message)
+
     def test_rejects_named_vertical_datum_change(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

@@ -100,6 +100,22 @@ def crs_authority_string(header) -> Optional[str]:
     return crs_authority_from_crs(parse_crs(header))
 
 
+def _without_bound(crs):
+    """``crs`` with every BoundCRS (TOWGS84, geoid grid) replaced by its source CRS, also inside a compound CRS.
+
+    A WKT record may attach a datum shift or a geoid grid that GeoTIFF keys of the same CRS cannot carry;
+    both describe the same coordinates.
+    """
+    from pyproj.crs import CompoundCRS
+    if getattr(crs, "is_bound", False) and crs.source_crs is not None:
+        crs = crs.source_crs
+    if crs.is_compound:
+        parts = [sub.source_crs if getattr(sub, "is_bound", False) and sub.source_crs is not None else sub
+                 for sub in crs.sub_crs_list]
+        return CompoundCRS(crs.name, parts)
+    return crs
+
+
 def crs_equivalent(source_crs, output_crs) -> bool:
     """Return True when two parsed CRS objects describe the same CRS."""
     if source_crs is None or output_crs is None:
@@ -112,6 +128,8 @@ def crs_equivalent(source_crs, output_crs) -> bool:
 
     try:
         if source_crs.equals(output_crs, ignore_axis_order=True):
+            return True
+        if _without_bound(source_crs).equals(_without_bound(output_crs), ignore_axis_order=True):
             return True
     except Exception:
         pass
