@@ -140,12 +140,40 @@ def crs_equivalent(source_crs, output_crs) -> bool:
         return str(source_crs) == str(output_crs)
 
 
+def wkt_only_srs(header) -> Optional[str]:
+    """The WKT record's text when untwine and PDAL would not read it, None otherwise.
+
+    They take the CRS of a file below LAS 1.4, or without the global-encoding WKT bit,
+    from the GeoTIFF keys. Without GeoTIFF keys such a file's WKT record would be lost,
+    so it is passed as --a_srs. A file that has GeoTIFF keys keeps them as the writers'
+    source, so the CRS check still sees a WKT record that disagrees with them.
+    """
+    records = projection_records(header, {2112, 34735})
+    wkt = records.get((PROJECTION_VLR_USER_ID, 2112), b"").rstrip(b"\0").strip()
+    if not wkt or (PROJECTION_VLR_USER_ID, 34735) in records:
+        return None
+    if str(header.version) >= "1.4" and header.global_encoding.wkt:
+        return None
+    try:
+        text = wkt.decode("utf-8")
+        from pyproj import CRS
+
+        CRS.from_wkt(text)
+    except Exception:
+        return None
+    return text
+
+
 def srs_assignment_from_file(path: Path) -> Optional[str]:
-    """Read an input header and return an Untwine --a_srs value when possible."""
+    """Read an input header and return an Untwine --a_srs value when possible.
+
+    The EPSG authority when the CRS has one, else the WKT record of a file whose
+    CRS only the WKT record holds and the writers would not read (``wkt_only_srs``).
+    """
     import laspy
 
     try:
         with laspy.open(str(path), laz_backend=laspy_laz_backend()) as src:
-            return crs_authority_string(src.header)
+            return crs_authority_string(src.header) or wkt_only_srs(src.header)
     except Exception:
         return None

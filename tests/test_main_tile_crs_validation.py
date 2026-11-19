@@ -1,3 +1,4 @@
+import struct
 import sys
 import tempfile
 import unittest
@@ -13,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pyproj import CRS  # noqa: E402
 
-from copc_metadata import crs_authority_string, crs_equivalent  # noqa: E402
+from copc_metadata import crs_authority_string, crs_equivalent, srs_assignment_from_file  # noqa: E402
 from crs_records import validate_single_crs_record  # noqa: E402
 
 # Same CRS, two serializations: PDAL's standardized EPSG text and a
@@ -245,3 +246,56 @@ class CopcCrsValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+_GEOKEYS_25832 = struct.pack("<8H", 1, 1, 0, 1, 3072, 0, 1, 25832)
+_WKT_3AXIS = CRS.from_epsg(25832).to_wkt("WKT1_GDAL").replace(
+    'AXIS["Northing",NORTH]', 'AXIS["Northing",NORTH],AXIS["Height",UP]')
+
+
+def _write_versioned(path: Path, version: str, wkt: str | None, geokeys: bytes | None = None,
+                     wkt_bit: bool = False) -> None:
+    header = laspy.LasHeader(point_format=1 if version < "1.4" else 6, version=version)
+    if wkt is not None:
+        header.vlrs.append(VLR(user_id="LASF_Projection", record_id=2112, description="WKT", record_data=wkt.encode()))
+    if geokeys is not None:
+        header.vlrs.append(VLR(user_id="LASF_Projection", record_id=34735, description="GeoKeys", record_data=geokeys))
+    las = laspy.LasData(header)
+    las.x, las.y, las.z = np.array([437000.0]), np.array([5342000.0]), np.array([300.0])
+    las.write(path)
+    with open(path, "r+b") as stream:
+        stream.seek(6)
+        encoding = struct.unpack("<H", stream.read(2))[0]
+        stream.seek(6)
+        stream.write(struct.pack("<H", (encoding | 16) if wkt_bit else (encoding & ~16)))
+
+
+class SrsAssignmentTests(unittest.TestCase):
+    """The --a_srs value given to untwine, which reads a LAS 1.2 file's CRS from its GeoTIFF keys."""
+
+    def assignment(self, *args, **kwargs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "input.las"
+            _write_versioned(path, *args, **kwargs)
+            return srs_assignment_from_file(path)
+
+    def test_an_identified_crs_is_passed_as_its_epsg_code(self):
+        self.assertEqual(self.assignment("1.2", CRS.from_epsg(25832).to_wkt("WKT1_GDAL")), "EPSG:25832")
+
+    def test_a_wkt_only_file_below_las_1_4_passes_its_wkt(self):
+        compound = CRS("EPSG:25832+7837").to_wkt("WKT1_GDAL")
+        for wkt in (compound, _WKT_3AXIS):
+            for wkt_bit in (False, True):
+                with self.subTest(wkt=wkt[:20], wkt_bit=wkt_bit):
+                    self.assertEqual(self.assignment("1.2", wkt, wkt_bit=wkt_bit), wkt)
+
+    def test_a_file_with_geokeys_keeps_them_as_the_writers_source(self):
+        self.assertIsNone(self.assignment("1.2", _WKT_3AXIS, geokeys=_GEOKEYS_25832))
+
+    def test_a_las_1_4_file_with_the_wkt_bit_is_read_by_the_writers(self):
+        self.assertIsNone(self.assignment("1.4", _WKT_3AXIS, wkt_bit=True))
+        self.assertEqual(self.assignment("1.4", _WKT_3AXIS, wkt_bit=False), _WKT_3AXIS)
+
+    def test_no_crs_gives_no_assignment(self):
+        self.assertIsNone(self.assignment("1.2", None))
+
