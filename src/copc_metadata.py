@@ -100,6 +100,22 @@ def crs_authority_string(header) -> Optional[str]:
     return crs_authority_from_crs(parse_crs(header))
 
 
+def _without_bound(crs):
+    """``crs`` with every BoundCRS (TOWGS84, geoid grid) replaced by its source CRS, also inside a compound CRS.
+
+    A WKT record may attach a datum shift or a geoid grid that GeoTIFF keys of the same CRS cannot carry;
+    both describe the same coordinates.
+    """
+    from pyproj.crs import CompoundCRS
+    if getattr(crs, "is_bound", False) and crs.source_crs is not None:
+        crs = crs.source_crs
+    if crs.is_compound:
+        parts = [sub.source_crs if getattr(sub, "is_bound", False) and sub.source_crs is not None else sub
+                 for sub in crs.sub_crs_list]
+        return CompoundCRS(crs.name, parts)
+    return crs
+
+
 def crs_equivalent(source_crs, output_crs) -> bool:
     """Return True when two parsed CRS objects describe the same CRS."""
     if source_crs is None or output_crs is None:
@@ -113,6 +129,8 @@ def crs_equivalent(source_crs, output_crs) -> bool:
     try:
         if source_crs.equals(output_crs, ignore_axis_order=True):
             return True
+        if _without_bound(source_crs).equals(_without_bound(output_crs), ignore_axis_order=True):
+            return True
     except Exception:
         pass
 
@@ -122,12 +140,40 @@ def crs_equivalent(source_crs, output_crs) -> bool:
         return str(source_crs) == str(output_crs)
 
 
+def wkt_only_srs(header) -> Optional[str]:
+    """The WKT record's text when untwine and PDAL would not read it, None otherwise.
+
+    They take the CRS of a file below LAS 1.4, or without the global-encoding WKT bit,
+    from the GeoTIFF keys. Without GeoTIFF keys such a file's WKT record would be lost,
+    so it is passed as --a_srs. A file that has GeoTIFF keys keeps them as the writers'
+    source, so the CRS check still sees a WKT record that disagrees with them.
+    """
+    records = projection_records(header, {2112, 34735})
+    wkt = records.get((PROJECTION_VLR_USER_ID, 2112), b"").rstrip(b"\0").strip()
+    if not wkt or (PROJECTION_VLR_USER_ID, 34735) in records:
+        return None
+    if str(header.version) >= "1.4" and header.global_encoding.wkt:
+        return None
+    try:
+        text = wkt.decode("utf-8")
+        from pyproj import CRS
+
+        CRS.from_wkt(text)
+    except Exception:
+        return None
+    return text
+
+
 def srs_assignment_from_file(path: Path) -> Optional[str]:
-    """Read an input header and return an Untwine --a_srs value when possible."""
+    """Read an input header and return an Untwine --a_srs value when possible.
+
+    The EPSG authority when the CRS has one, else the WKT record of a file whose
+    CRS only the WKT record holds and the writers would not read (``wkt_only_srs``).
+    """
     import laspy
 
     try:
         with laspy.open(str(path), laz_backend=laspy_laz_backend()) as src:
-            return crs_authority_string(src.header)
+            return crs_authority_string(src.header) or wkt_only_srs(src.header)
     except Exception:
         return None
